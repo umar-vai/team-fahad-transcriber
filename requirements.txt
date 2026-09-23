@@ -1,0 +1,5 @@
+streamlit>=1.50
+moviepy>=2.2
+imageio-ffmpeg>=0.6
+google-genai>=1.50
+python-docx>=1.2
