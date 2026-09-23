@@ -673,6 +673,35 @@ hr {{border-color:var(--tf-border) !important;}}
 .small-muted {{color:var(--tf-muted); font-size:.9rem;}}
 .output-card {{border:1px solid var(--tf-border); border-radius:16px; padding:1rem; background:var(--tf-panel);}}
 
+.dev-card {{
+  margin-top: 1.1rem;
+  padding: .9rem 1rem;
+  border: 1px solid var(--tf-border);
+  border-radius: 16px;
+  background: var(--tf-panel2);
+}}
+.dev-card .dev-label {{
+  font-size: .67rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--tf-muted);
+  font-weight: 800;
+  margin-bottom: .28rem;
+}}
+.dev-card a {{
+  color: var(--tf-text) !important;
+  text-decoration: none !important;
+  font-weight: 800;
+}}
+.dev-card a:hover {{
+  color: var(--tf-accent2) !important;
+}}
+.dev-card .dev-sub {{
+  color: var(--tf-muted);
+  font-size: .78rem;
+  margin-top: .2rem;
+}}
+
 /* Streamlit text colors */
 p, label, .stMarkdown, .stCaption, [data-testid="stWidgetLabel"] {{color:var(--tf-text);}}
 .stCaption, small {{color:var(--tf-muted) !important;}}
@@ -738,6 +767,17 @@ with st.sidebar:
 
     st.divider()
     st.caption("Privacy: temporary local files are deleted after processing, and the Gemini Files API copy is deleted after the request.")
+
+    st.markdown(
+        '''
+        <div class="dev-card">
+          <div class="dev-label">Developer</div>
+          <a href="https://github.com/umar-vai" target="_blank">Umar Vai ↗</a>
+          <div class="dev-sub">github.com/umar-vai</div>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
 
 st.markdown("<div class='section-label'>01 · Upload & process</div>", unsafe_allow_html=True)
 st.markdown("### Start with your media file")
@@ -938,6 +978,12 @@ if result:
 
 st.divider()
 st.markdown(
-    "<div class='small-muted' style='text-align:center;padding:.4rem 0 1rem'>Team Fahad AI Studio · Client-ready transcription workflow</div>",
+    '''
+    <div class="small-muted" style="text-align:center;padding:.4rem 0 1rem">
+      Team Fahad AI Studio · Client-ready transcription workflow
+      <br>
+      Developed by <a href="https://github.com/umar-vai" target="_blank" style="color:var(--tf-accent2);text-decoration:none;font-weight:800;">Umar Vai</a>
+    </div>
+    ''',
     unsafe_allow_html=True,
 )
