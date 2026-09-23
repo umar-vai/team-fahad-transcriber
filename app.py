@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -69,16 +70,127 @@ class Segment:
     speaker: str | None = None
 
 
-def secret_or_env(name: str) -> str | None:
+class APIKeyPoolExhausted(RuntimeError):
+    """Raised when every configured API key is temporarily rate-limited."""
+
+
+def secret_or_env(name: str) -> Any | None:
     """Read a secret from Streamlit first, then from environment variables."""
     try:
         value = st.secrets.get(name)
-        if value:
-            return str(value)
+        if value not in (None, "", []):
+            return value
     except Exception:
         pass
     value = os.getenv(name)
     return value if value else None
+
+
+def normalize_key_list(value: Any | None) -> list[str]:
+    """Normalize TOML arrays, single secrets, or comma/newline-separated env values."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        raw = [str(item).strip() for item in value]
+    else:
+        raw = [item.strip() for item in re.split(r"[,;\n]+", str(value))]
+
+    keys: list[str] = []
+    seen: set[str] = set()
+    for key in raw:
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
+def load_api_key_pool(scope: str | None = None) -> list[str]:
+    """Load a scoped Gemini key pool, falling back to the shared key pool."""
+    scoped_names: list[str] = []
+    if scope:
+        prefix = scope.upper()
+        scoped_names = [f"{prefix}_GEMINI_API_KEYS", f"{prefix}_GEMINI_API_KEY"]
+
+    for name in scoped_names + ["GEMINI_API_KEYS", "GEMINI_API_KEY"]:
+        keys = normalize_key_list(secret_or_env(name))
+        if keys:
+            return keys
+    return []
+
+
+def api_key_id(api_key: str) -> str:
+    """Create a non-secret identifier used only for in-session cooldown tracking."""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+
+
+def api_error_code(exc: Exception) -> int | None:
+    try:
+        return int(getattr(exc, "code", None))
+    except (TypeError, ValueError):
+        return None
+
+
+def api_error_text(exc: Exception) -> str:
+    return str(getattr(exc, "message", "") or str(exc)).lower()
+
+
+def rate_limit_cooldown_seconds(exc: Exception) -> int:
+    """Use a long cooldown for daily limits and a short cooldown for burst limits."""
+    message = api_error_text(exc)
+    daily_markers = ("per day", "daily", "requests per day", "rpd")
+    return 12 * 60 * 60 if any(marker in message for marker in daily_markers) else 90
+
+
+def mark_key_rate_limited(api_key: str, exc: Exception) -> None:
+    cooldowns = st.session_state.setdefault("_api_key_cooldowns", {})
+    cooldowns[api_key_id(api_key)] = time.time() + rate_limit_cooldown_seconds(exc)
+
+
+def key_is_available(api_key: str) -> bool:
+    cooldowns = st.session_state.setdefault("_api_key_cooldowns", {})
+    until = float(cooldowns.get(api_key_id(api_key), 0) or 0)
+    if until <= time.time():
+        cooldowns.pop(api_key_id(api_key), None)
+        return True
+    return False
+
+
+def run_with_api_failover(api_keys: list[str], operation: Any, purpose: str) -> Any:
+    """Run an API operation and move to the next configured key after HTTP 429."""
+    if not api_keys:
+        raise RuntimeError("No Gemini API key is configured for this feature.")
+
+    available = [(index, key) for index, key in enumerate(api_keys) if key_is_available(key)]
+    if not available:
+        raise APIKeyPoolExhausted(
+            "All configured Gemini API slots are temporarily rate-limited. "
+            "Please try again later, add fresh capacity in Streamlit Secrets, or use a higher Gemini API tier."
+        )
+
+    last_rate_error: Exception | None = None
+    for attempt_position, (index, api_key) in enumerate(available):
+        try:
+            return operation(api_key)
+        except errors.APIError as exc:
+            if api_error_code(exc) != 429:
+                raise
+
+            last_rate_error = exc
+            mark_key_rate_limited(api_key, exc)
+            backups_left = len(available) - attempt_position - 1
+            if backups_left > 0:
+                st.info(
+                    f"{purpose}: API slot {index + 1} reached its limit. "
+                    f"Switching automatically to a backup ({backups_left} remaining)…"
+                )
+                continue
+            break
+
+    raise APIKeyPoolExhausted(
+        "All configured Gemini API slots have reached their current rate limit. "
+        "Please try again later, add another authorized API key/project in Streamlit Secrets, "
+        "or upgrade your Gemini API tier."
+    ) from last_rate_error
 
 
 def safe_name(name: str) -> str:
@@ -294,7 +406,7 @@ def prepare_audio(source: Path, extension: str, folder: Path) -> tuple[Path, str
     return source, AUDIO_MIME_TYPES[extension], duration
 
 
-def transcribe_media(
+def _transcribe_media_once(
     uploaded: Any,
     api_key: str,
     language_codes: list[str],
@@ -408,7 +520,28 @@ def transcribe_media(
             pass
 
 
-def ai_text(api_key: str, prompt: str) -> str:
+def transcribe_media(
+    uploaded: Any,
+    api_keys: list[str],
+    language_codes: list[str],
+    mode: str,
+    custom_vocabulary: list[str],
+) -> dict[str, Any]:
+    """Transcribe using the first available key and fail over automatically on HTTP 429."""
+    return run_with_api_failover(
+        api_keys,
+        lambda api_key: _transcribe_media_once(
+            uploaded=uploaded,
+            api_key=api_key,
+            language_codes=language_codes,
+            mode=mode,
+            custom_vocabulary=custom_vocabulary,
+        ),
+        "Transcription",
+    )
+
+
+def _ai_text_once(api_key: str, prompt: str) -> str:
     client = genai.Client(api_key=api_key)
     try:
         result = client.interactions.create(model=CONTENT_MODEL, input=prompt)
@@ -423,6 +556,15 @@ def ai_text(api_key: str, prompt: str) -> str:
             pass
 
 
+def ai_text(api_keys: list[str], prompt: str, purpose: str = "AI tool") -> str:
+    """Generate text using automatic key failover when a configured key returns HTTP 429."""
+    return run_with_api_failover(
+        api_keys,
+        lambda api_key: _ai_text_once(api_key, prompt),
+        purpose,
+    )
+
+
 def transcript_for_analysis(result: dict[str, Any]) -> str:
     detailed = result.get("speaker_transcript") or ""
     base = detailed if detailed else result.get("transcript", "")
@@ -431,29 +573,31 @@ def transcript_for_analysis(result: dict[str, Any]) -> str:
     return base
 
 
-def generate_summary(api_key: str, result: dict[str, Any]) -> str:
+def generate_summary(api_keys: list[str], result: dict[str, Any]) -> str:
     transcript = transcript_for_analysis(result)
     return ai_text(
-        api_key,
+        api_keys,
         """Summarize the following transcript for a client. Keep the summary accurate and useful.
 Use the same main language as the transcript. Include:
 1) a short executive summary,
 2) 5-10 key points,
 3) action items or decisions only if they are actually present.
 Do not invent facts.\n\nTRANSCRIPT:\n""" + transcript,
+        purpose="Summary",
     )
 
 
-def generate_translation(api_key: str, result: dict[str, Any], target: str) -> str:
+def generate_translation(api_keys: list[str], result: dict[str, Any], target: str) -> str:
     transcript = transcript_for_analysis(result)
     return ai_text(
-        api_key,
+        api_keys,
         f"""Translate the transcript below into {target}. Preserve meaning, names, numbers, and paragraph structure.
 If timestamp/speaker labels are present, preserve them. Do not summarize.\n\nTRANSCRIPT:\n{transcript}""",
+        purpose=f"Translation to {target}",
     )
 
 
-def generate_content_pack(api_key: str, result: dict[str, Any]) -> str:
+def generate_content_pack(api_keys: list[str], result: dict[str, Any]) -> str:
     transcript = transcript_for_analysis(result)
     timestamp_note = (
         "The transcript includes timestamps, so create accurate YouTube chapter suggestions from them."
@@ -461,7 +605,7 @@ def generate_content_pack(api_key: str, result: dict[str, Any]) -> str:
         else "The transcript has no reliable timestamps, so do not invent chapter times."
     )
     return ai_text(
-        api_key,
+        api_keys,
         f"""Turn this transcript into a practical creator/client content pack. Use the transcript's main language unless English is clearly better for a field.
 {timestamp_note}
 Return these sections:
@@ -475,6 +619,7 @@ Return these sections:
 - YouTube chapters only when reliable timestamps are present
 - One clear CTA
 Do not invent claims that are not in the transcript.\n\nTRANSCRIPT:\n{transcript}""",
+        purpose="Creator content pack",
     )
 
 
@@ -737,10 +882,24 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-api_key = secret_or_env("GEMINI_API_KEY")
-if not api_key:
-    st.warning("Developer setup: no GEMINI_API_KEY was found in Streamlit Secrets or environment variables.")
-    api_key = st.text_input("Gemini API key for this local session", type="password")
+transcription_api_keys = load_api_key_pool("TRANSCRIBE")
+content_api_keys = load_api_key_pool("CONTENT")
+
+if not transcription_api_keys and not content_api_keys:
+    st.warning(
+        "Developer setup: no Gemini API key was found. Add GEMINI_API_KEY or GEMINI_API_KEYS "
+        "in Streamlit Secrets/environment variables."
+    )
+    local_api_key = st.text_input("Gemini API key for this local session", type="password")
+    if local_api_key:
+        transcription_api_keys = [local_api_key]
+        content_api_keys = [local_api_key]
+
+# If only one specialized pool exists, let the other feature group use it too.
+if not transcription_api_keys and content_api_keys:
+    transcription_api_keys = content_api_keys
+if not content_api_keys and transcription_api_keys:
+    content_api_keys = transcription_api_keys
 
 with st.sidebar:
     st.markdown("<div class='side-kicker' style='margin-top:1.2rem'>TRANSCRIPTION</div>", unsafe_allow_html=True)
@@ -767,6 +926,10 @@ with st.sidebar:
 
     st.divider()
     st.caption("Privacy: temporary local files are deleted after processing, and the Gemini Files API copy is deleted after the request.")
+    st.caption(
+        f"API failover: {len(transcription_api_keys)} transcription slot(s) · "
+        f"{len(content_api_keys)} AI-tool slot(s). HTTP 429 automatically moves to the next available slot."
+    )
 
     st.markdown(
         '''
@@ -814,7 +977,7 @@ if uploaded is not None:
     if mode == "Detailed subtitles + speakers":
         st.info("Detailed mode is intended for recordings up to about 30 minutes. Standard modes support up to about 60 minutes per request.")
 
-    if st.button("Transcribe file", type="primary", disabled=not bool(api_key), use_container_width=True):
+    if st.button("Transcribe file", type="primary", disabled=not bool(transcription_api_keys), use_container_width=True):
         reset_outputs()
         if size_mb > MAX_UPLOAD_MB:
             st.error(f"Please upload a file smaller than {MAX_UPLOAD_MB} MB.")
@@ -826,7 +989,7 @@ if uploaded is not None:
                 status.write("Running speech-to-text…")
                 result = transcribe_media(
                     uploaded=uploaded,
-                    api_key=api_key,
+                    api_keys=transcription_api_keys,
                     language_codes=LANGUAGES[language_name],
                     mode=mode,
                     custom_vocabulary=vocab,
@@ -906,25 +1069,25 @@ if result:
 
         col_a, col_b = st.columns(2)
         with col_a:
-            if st.button("Generate summary + key points", use_container_width=True, disabled=not bool(api_key)):
+            if st.button("Generate summary + key points", use_container_width=True, disabled=not bool(content_api_keys)):
                 with st.spinner("Creating summary…"):
                     try:
-                        st.session_state.summary = generate_summary(api_key, result)
+                        st.session_state.summary = generate_summary(content_api_keys, result)
                     except Exception as exc:
                         st.error(f"Summary failed: {exc}")
         with col_b:
-            if st.button("Generate creator content pack", use_container_width=True, disabled=not bool(api_key)):
+            if st.button("Generate creator content pack", use_container_width=True, disabled=not bool(content_api_keys)):
                 with st.spinner("Creating content pack…"):
                     try:
-                        st.session_state.content_pack = generate_content_pack(api_key, result)
+                        st.session_state.content_pack = generate_content_pack(content_api_keys, result)
                     except Exception as exc:
                         st.error(f"Content pack failed: {exc}")
 
         target = st.selectbox("Translation target", TRANSLATION_LANGUAGES)
-        if st.button(f"Translate full transcript to {target}", use_container_width=True, disabled=not bool(api_key)):
+        if st.button(f"Translate full transcript to {target}", use_container_width=True, disabled=not bool(content_api_keys)):
             with st.spinner(f"Translating to {target}…"):
                 try:
-                    st.session_state.translation = generate_translation(api_key, result, target)
+                    st.session_state.translation = generate_translation(content_api_keys, result, target)
                     st.session_state.translation_target = target
                 except Exception as exc:
                     st.error(f"Translation failed: {exc}")
