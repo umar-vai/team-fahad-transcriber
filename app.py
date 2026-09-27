@@ -194,7 +194,7 @@ def run_with_api_failover(api_keys: list[str], operation: Any, purpose: str) -> 
     ) from last_rate_error
 
 
-def render_copy_button(text: str, label: str = "Copy transcript", height: int = 48) -> None:
+def render_copy_button(text: str, label: str = "Copy TXT", height: int = 48) -> None:
     """Render a browser-side copy button that copies text from the app to the user's clipboard."""
     payload = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     components.html(
@@ -1064,33 +1064,17 @@ if result:
     with tab_transcript:
         st.subheader("Transcript")
         transcript_text = result.get("transcript", "")
-        copy_col, _ = st.columns([1, 2])
-        with copy_col:
-            render_copy_button(transcript_text, "Copy transcript")
         st.text_area("Transcript text", transcript_text, height=430)
-        st.download_button(
-            "Download TXT",
-            transcript_text,
-            file_name=f"{base_name}_transcript.txt",
-            mime="text/plain",
-        )
+        render_copy_button(transcript_text, "Copy TXT")
 
     with tab_subtitles:
         if result.get("segments"):
             st.subheader("Speaker transcript")
             speaker_text = result.get("speaker_transcript", "")
-            copy_col, _ = st.columns([1, 2])
-            with copy_col:
-                render_copy_button(speaker_text, "Copy speaker transcript")
             st.text_area("Speaker + timestamp transcript", speaker_text, height=330)
             d1, d2, d3 = st.columns(3)
-            d1.download_button(
-                "Download speaker TXT",
-                result.get("speaker_transcript", ""),
-                file_name=f"{base_name}_speaker_transcript.txt",
-                mime="text/plain",
-                use_container_width=True,
-            )
+            with d1:
+                render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=48)
             d2.download_button(
                 "Download SRT",
                 result.get("srt", ""),
@@ -1140,16 +1124,13 @@ if result:
 
         if st.session_state.get("summary"):
             st.markdown("### Summary & key points")
-            render_copy_button(st.session_state.summary, "Copy summary")
             st.text_area("Summary", st.session_state.summary, height=300)
         if st.session_state.get("translation"):
             label = st.session_state.get("translation_target", "Translation")
             st.markdown(f"### {label} translation")
-            render_copy_button(st.session_state.translation, f"Copy {label} translation")
             st.text_area("Translated transcript", st.session_state.translation, height=360)
         if st.session_state.get("content_pack"):
             st.markdown("### Creator content pack")
-            render_copy_button(st.session_state.content_pack, "Copy content pack")
             st.text_area("Content pack", st.session_state.content_pack, height=430)
 
     with tab_downloads:
