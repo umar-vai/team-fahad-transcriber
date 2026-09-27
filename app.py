@@ -698,6 +698,7 @@ def make_zip_bytes(base_name: str, result: dict[str, Any], extras: dict[str, str
 def reset_outputs() -> None:
     for key in ["result", "summary", "translation", "content_pack", "translation_target", "source_name"]:
         st.session_state.pop(key, None)
+    st.session_state["workspace_section"] = "Transcript"
 
 
 def render_access_gate() -> bool:
@@ -839,13 +840,22 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
   color:white !important; border:0 !important; min-height:3rem;
 }}
 
-/* Tabs */
-.stTabs [data-baseweb="tab-list"] {{gap:.4rem; border-bottom:1px solid var(--tf-border);}}
-.stTabs [data-baseweb="tab"] {{
-  height:2.75rem; padding:0 .9rem; border-radius:10px 10px 0 0; color:var(--tf-muted); font-weight:750;
+/* Persistent workspace navigation */
+[data-testid="stSegmentedControl"] {{
+  margin: .35rem 0 1.15rem 0;
 }}
-.stTabs [aria-selected="true"] {{color:var(--tf-text) !important; background:var(--tf-panel) !important;}}
-.stTabs [data-baseweb="tab-highlight"] {{background:var(--tf-accent) !important;}}
+[data-testid="stSegmentedControl"] button {{
+  border-color: var(--tf-border) !important;
+  background: var(--tf-panel) !important;
+  color: var(--tf-muted) !important;
+  font-weight: 750 !important;
+}}
+[data-testid="stSegmentedControl"] button[aria-checked="true"] {{
+  background: linear-gradient(90deg, var(--tf-accent), var(--tf-accent2)) !important;
+  color: white !important;
+  border-color: transparent !important;
+}}
+
 
 /* Status / alerts */
 [data-testid="stAlert"] {{border-radius:14px !important; border:1px solid var(--tf-border) !important;}}
@@ -1057,17 +1067,22 @@ if result:
     st.markdown("<div class='section-label' style='margin-top:1.2rem'>02 · Workspace</div>", unsafe_allow_html=True)
     st.markdown("### Your transcription workspace")
 
-    tab_transcript, tab_subtitles, tab_ai, tab_downloads = st.tabs(
-        ["Transcript", "Speakers & subtitles", "AI client tools", "Downloads"]
+    workspace_section = st.segmented_control(
+        "Workspace",
+        options=["Transcript", "Speakers & subtitles", "AI client tools", "Downloads"],
+        default="Transcript",
+        selection_mode="single",
+        key="workspace_section",
+        label_visibility="collapsed",
     )
 
-    with tab_transcript:
+    if workspace_section == "Transcript":
         st.subheader("Transcript")
         transcript_text = result.get("transcript", "")
         st.text_area("Transcript text", transcript_text, height=430)
         render_copy_button(transcript_text, "Copy TXT")
 
-    with tab_subtitles:
+    elif workspace_section == "Speakers & subtitles":
         if result.get("segments"):
             st.subheader("Speaker transcript")
             speaker_text = result.get("speaker_transcript", "")
@@ -1093,7 +1108,7 @@ if result:
         else:
             st.info("Speaker labels and subtitle files are created when you use “Detailed subtitles + speakers” mode.")
 
-    with tab_ai:
+    elif workspace_section == "AI client tools":
         st.subheader("Turn the transcript into client-ready deliverables")
         st.caption("These are generated only when you click a button, so you control extra API usage.")
 
@@ -1133,7 +1148,7 @@ if result:
             st.markdown("### Creator content pack")
             st.text_area("Content pack", st.session_state.content_pack, height=430)
 
-    with tab_downloads:
+    elif workspace_section == "Downloads":
         extras = {
             "summary": st.session_state.get("summary", ""),
             f"translation_{str(st.session_state.get('translation_target', '')).lower()}": st.session_state.get("translation", ""),
