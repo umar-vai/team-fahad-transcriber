@@ -844,6 +844,54 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
 [data-testid="stSegmentedControl"] {{
   margin: .35rem 0 1.15rem 0;
 }}
+[data-testid="stSegmentedControl"] [role="radiogroup"] {{
+  gap: .3rem !important;
+}}
+[data-testid="stSegmentedControl"] button {{
+  transition:
+    background-color .28s ease,
+    color .28s ease,
+    border-color .28s ease,
+    box-shadow .32s ease,
+    transform .24s cubic-bezier(.22,1,.36,1) !important;
+  will-change: transform, box-shadow;
+}}
+[data-testid="stSegmentedControl"] button:hover {{
+  transform: translateY(-1px);
+}}
+[data-testid="stSegmentedControl"] button[aria-checked="true"] {{
+  box-shadow: 0 8px 24px var(--tf-glow);
+  transform: translateY(-1px);
+}}
+
+/* Calm content transition when changing workspace */
+@keyframes tfWorkspaceIn {{
+  0% {{
+    opacity: 0;
+    transform: translateY(7px);
+    filter: blur(1px);
+  }}
+  100% {{
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }}
+}}
+.st-key-workspace-content {{
+  animation: tfWorkspaceIn .38s cubic-bezier(.22,1,.36,1) both;
+  transform-origin: top center;
+}}
+.st-key-workspace-content > div {{
+  transition: opacity .25s ease;
+}}
+@media (prefers-reduced-motion: reduce) {{
+  .st-key-workspace-content {{
+    animation: none !important;
+  }}
+  [data-testid="stSegmentedControl"] button {{
+    transition: none !important;
+  }}
+}}
 [data-testid="stSegmentedControl"] button {{
   border-color: var(--tf-border) !important;
   background: var(--tf-panel) !important;
@@ -1076,113 +1124,117 @@ if result:
         label_visibility="collapsed",
     )
 
-    if workspace_section == "Transcript":
-        st.subheader("Transcript")
-        transcript_text = result.get("transcript", "")
-        st.text_area("Transcript text", transcript_text, height=430)
-        render_copy_button(transcript_text, "Copy TXT")
+    workspace_content = st.container(key="workspace_content")
+    with workspace_content:
+        if workspace_section == "Transcript":
+            st.subheader("Transcript")
+            transcript_text = result.get("transcript", "")
+            st.text_area("Transcript text", transcript_text, height=430)
+            render_copy_button(transcript_text, "Copy TXT")
 
-    elif workspace_section == "Speakers & subtitles":
-        if result.get("segments"):
-            st.subheader("Speaker transcript")
-            speaker_text = result.get("speaker_transcript", "")
-            st.text_area("Speaker + timestamp transcript", speaker_text, height=330)
-            d1, d2, d3 = st.columns(3)
-            with d1:
-                render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=48)
-            d2.download_button(
-                "Download SRT",
-                result.get("srt", ""),
-                file_name=f"{base_name}.srt",
-                mime="application/x-subrip",
+        elif workspace_section == "Speakers & subtitles":
+            if result.get("segments"):
+                st.subheader("Speaker transcript")
+                speaker_text = result.get("speaker_transcript", "")
+                st.text_area("Speaker + timestamp transcript", speaker_text, height=330)
+                d1, d2, d3 = st.columns(3)
+                with d1:
+                    render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=48)
+                d2.download_button(
+                    "Download SRT",
+                    result.get("srt", ""),
+                    file_name=f"{base_name}.srt",
+                    mime="application/x-subrip",
+                    use_container_width=True,
+                )
+                d3.download_button(
+                    "Download VTT",
+                    result.get("vtt", ""),
+                    file_name=f"{base_name}.vtt",
+                    mime="text/vtt",
+                    use_container_width=True,
+                )
+                st.caption(f"Subtitle segments: {len(result.get('segments', []))}")
+            else:
+                st.info("Speaker labels and subtitle files are created when you use “Detailed subtitles + speakers” mode.")
+
+        elif workspace_section == "AI client tools":
+            st.subheader("Turn the transcript into client-ready deliverables")
+            st.caption("These are generated only when you click a button, so you control extra API usage.")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("Generate summary + key points", use_container_width=True, disabled=not bool(content_api_keys)):
+                    with st.spinner("Creating summary…"):
+                        try:
+                            st.session_state.summary = generate_summary(content_api_keys, result)
+                        except Exception as exc:
+                            st.error(f"Summary failed: {exc}")
+            with col_b:
+                if st.button("Generate creator content pack", use_container_width=True, disabled=not bool(content_api_keys)):
+                    with st.spinner("Creating content pack…"):
+                        try:
+                            st.session_state.content_pack = generate_content_pack(content_api_keys, result)
+                        except Exception as exc:
+                            st.error(f"Content pack failed: {exc}")
+
+            target = st.selectbox("Translation target", TRANSLATION_LANGUAGES)
+            if st.button(f"Translate full transcript to {target}", use_container_width=True, disabled=not bool(content_api_keys)):
+                with st.spinner(f"Translating to {target}…"):
+                    try:
+                        st.session_state.translation = generate_translation(content_api_keys, result, target)
+                        st.session_state.translation_target = target
+                    except Exception as exc:
+                        st.error(f"Translation failed: {exc}")
+
+            if st.session_state.get("summary"):
+                st.markdown("### Summary & key points")
+                st.text_area("Summary", st.session_state.summary, height=300)
+            if st.session_state.get("translation"):
+                label = st.session_state.get("translation_target", "Translation")
+                st.markdown(f"### {label} translation")
+                st.text_area("Translated transcript", st.session_state.translation, height=360)
+            if st.session_state.get("content_pack"):
+                st.markdown("### Creator content pack")
+                st.text_area("Content pack", st.session_state.content_pack, height=430)
+
+        elif workspace_section == "Downloads":
+            extras = {
+                "summary": st.session_state.get("summary", ""),
+                f"translation_{str(st.session_state.get('translation_target', '')).lower()}": st.session_state.get("translation", ""),
+                "content_pack": st.session_state.get("content_pack", ""),
+            }
+            sections = [("Transcript", result.get("transcript", ""))]
+            if result.get("speaker_transcript"):
+                sections.append(("Speaker Transcript", result.get("speaker_transcript", "")))
+            if st.session_state.get("summary"):
+                sections.append(("Summary & Key Points", st.session_state.summary))
+            if st.session_state.get("translation"):
+                sections.append((f"Translation - {st.session_state.get('translation_target', '')}", st.session_state.translation))
+            if st.session_state.get("content_pack"):
+                sections.append(("Creator Content Pack", st.session_state.content_pack))
+
+            docx_data = make_docx_bytes(APP_TITLE, sections)
+            zip_data = make_zip_bytes(base_name, result, extras)
+
+            st.write("Download a polished document or one ZIP containing every output currently generated.")
+            dl1, dl2 = st.columns(2)
+            dl1.download_button(
+                "Download complete DOCX",
+                docx_data,
+                file_name=f"{base_name}_complete.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True,
             )
-            d3.download_button(
-                "Download VTT",
-                result.get("vtt", ""),
-                file_name=f"{base_name}.vtt",
-                mime="text/vtt",
+            dl2.download_button(
+                "Download everything as ZIP",
+                zip_data,
+                file_name=f"{base_name}_team_fahad_pack.zip",
+                mime="application/zip",
                 use_container_width=True,
             )
-            st.caption(f"Subtitle segments: {len(result.get('segments', []))}")
-        else:
-            st.info("Speaker labels and subtitle files are created when you use “Detailed subtitles + speakers” mode.")
 
-    elif workspace_section == "AI client tools":
-        st.subheader("Turn the transcript into client-ready deliverables")
-        st.caption("These are generated only when you click a button, so you control extra API usage.")
 
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("Generate summary + key points", use_container_width=True, disabled=not bool(content_api_keys)):
-                with st.spinner("Creating summary…"):
-                    try:
-                        st.session_state.summary = generate_summary(content_api_keys, result)
-                    except Exception as exc:
-                        st.error(f"Summary failed: {exc}")
-        with col_b:
-            if st.button("Generate creator content pack", use_container_width=True, disabled=not bool(content_api_keys)):
-                with st.spinner("Creating content pack…"):
-                    try:
-                        st.session_state.content_pack = generate_content_pack(content_api_keys, result)
-                    except Exception as exc:
-                        st.error(f"Content pack failed: {exc}")
-
-        target = st.selectbox("Translation target", TRANSLATION_LANGUAGES)
-        if st.button(f"Translate full transcript to {target}", use_container_width=True, disabled=not bool(content_api_keys)):
-            with st.spinner(f"Translating to {target}…"):
-                try:
-                    st.session_state.translation = generate_translation(content_api_keys, result, target)
-                    st.session_state.translation_target = target
-                except Exception as exc:
-                    st.error(f"Translation failed: {exc}")
-
-        if st.session_state.get("summary"):
-            st.markdown("### Summary & key points")
-            st.text_area("Summary", st.session_state.summary, height=300)
-        if st.session_state.get("translation"):
-            label = st.session_state.get("translation_target", "Translation")
-            st.markdown(f"### {label} translation")
-            st.text_area("Translated transcript", st.session_state.translation, height=360)
-        if st.session_state.get("content_pack"):
-            st.markdown("### Creator content pack")
-            st.text_area("Content pack", st.session_state.content_pack, height=430)
-
-    elif workspace_section == "Downloads":
-        extras = {
-            "summary": st.session_state.get("summary", ""),
-            f"translation_{str(st.session_state.get('translation_target', '')).lower()}": st.session_state.get("translation", ""),
-            "content_pack": st.session_state.get("content_pack", ""),
-        }
-        sections = [("Transcript", result.get("transcript", ""))]
-        if result.get("speaker_transcript"):
-            sections.append(("Speaker Transcript", result.get("speaker_transcript", "")))
-        if st.session_state.get("summary"):
-            sections.append(("Summary & Key Points", st.session_state.summary))
-        if st.session_state.get("translation"):
-            sections.append((f"Translation - {st.session_state.get('translation_target', '')}", st.session_state.translation))
-        if st.session_state.get("content_pack"):
-            sections.append(("Creator Content Pack", st.session_state.content_pack))
-
-        docx_data = make_docx_bytes(APP_TITLE, sections)
-        zip_data = make_zip_bytes(base_name, result, extras)
-
-        st.write("Download a polished document or one ZIP containing every output currently generated.")
-        dl1, dl2 = st.columns(2)
-        dl1.download_button(
-            "Download complete DOCX",
-            docx_data,
-            file_name=f"{base_name}_complete.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
-        )
-        dl2.download_button(
-            "Download everything as ZIP",
-            zip_data,
-            file_name=f"{base_name}_team_fahad_pack.zip",
-            mime="application/zip",
-            use_container_width=True,
-        )
 
 st.divider()
 st.markdown(
