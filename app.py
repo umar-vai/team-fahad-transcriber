@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 from docx import Document
 from google import genai
 from google.genai import errors
@@ -191,6 +192,42 @@ def run_with_api_failover(api_keys: list[str], operation: Any, purpose: str) -> 
         "Please try again later, add another authorized API key/project in Streamlit Secrets, "
         "or upgrade your Gemini API tier."
     ) from last_rate_error
+
+
+def render_copy_button(text: str, label: str = "Copy transcript", height: int = 48) -> None:
+    """Render a browser-side copy button that copies text from the app to the user's clipboard."""
+    payload = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    components.html(
+        f"""
+        <div style="font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+          <button id="copy-btn" style="
+            width:100%; min-height:42px; padding:0 16px; border-radius:13px;
+            border:1px solid rgba(148,163,184,.28); background:rgba(15,23,42,.55);
+            color:#f8fafc; font-weight:750; font-size:14px; cursor:pointer;
+          ">{label}</button>
+          <textarea id="copy-source" style="position:absolute;left:-9999px;top:-9999px;">{payload}</textarea>
+          <script>
+            const btn = document.getElementById("copy-btn");
+            const source = document.getElementById("copy-source");
+            btn.addEventListener("click", async () => {{
+              const value = source.value;
+              try {{
+                await navigator.clipboard.writeText(value);
+              }} catch (e) {{
+                source.focus();
+                source.select();
+                document.execCommand("copy");
+              }}
+              const original = btn.textContent;
+              btn.textContent = "Copied ✓";
+              setTimeout(() => btn.textContent = original, 1600);
+            }});
+          </script>
+        </div>
+        """,
+        height=height,
+        scrolling=False,
+    )
 
 
 def safe_name(name: str) -> str:
@@ -817,6 +854,7 @@ hr {{border-color:var(--tf-border) !important;}}
 
 .small-muted {{color:var(--tf-muted); font-size:.9rem;}}
 .output-card {{border:1px solid var(--tf-border); border-radius:16px; padding:1rem; background:var(--tf-panel);}}
+.copy-control {{margin: 0 0 .35rem 0;}}
 
 .dev-card {{
   margin-top: 1.1rem;
@@ -1025,10 +1063,14 @@ if result:
 
     with tab_transcript:
         st.subheader("Transcript")
-        st.text_area("Transcript text", result.get("transcript", ""), height=430)
+        transcript_text = result.get("transcript", "")
+        copy_col, _ = st.columns([1, 2])
+        with copy_col:
+            render_copy_button(transcript_text, "Copy transcript")
+        st.text_area("Transcript text", transcript_text, height=430)
         st.download_button(
             "Download TXT",
-            result.get("transcript", ""),
+            transcript_text,
             file_name=f"{base_name}_transcript.txt",
             mime="text/plain",
         )
@@ -1036,7 +1078,11 @@ if result:
     with tab_subtitles:
         if result.get("segments"):
             st.subheader("Speaker transcript")
-            st.text_area("Speaker + timestamp transcript", result.get("speaker_transcript", ""), height=330)
+            speaker_text = result.get("speaker_transcript", "")
+            copy_col, _ = st.columns([1, 2])
+            with copy_col:
+                render_copy_button(speaker_text, "Copy speaker transcript")
+            st.text_area("Speaker + timestamp transcript", speaker_text, height=330)
             d1, d2, d3 = st.columns(3)
             d1.download_button(
                 "Download speaker TXT",
@@ -1094,13 +1140,16 @@ if result:
 
         if st.session_state.get("summary"):
             st.markdown("### Summary & key points")
+            render_copy_button(st.session_state.summary, "Copy summary")
             st.text_area("Summary", st.session_state.summary, height=300)
         if st.session_state.get("translation"):
             label = st.session_state.get("translation_target", "Translation")
             st.markdown(f"### {label} translation")
+            render_copy_button(st.session_state.translation, f"Copy {label} translation")
             st.text_area("Translated transcript", st.session_state.translation, height=360)
         if st.session_state.get("content_pack"):
             st.markdown("### Creator content pack")
+            render_copy_button(st.session_state.content_pack, "Copy content pack")
             st.text_area("Content pack", st.session_state.content_pack, height=430)
 
     with tab_downloads:
