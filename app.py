@@ -194,16 +194,18 @@ def run_with_api_failover(api_keys: list[str], operation: Any, purpose: str) -> 
     ) from last_rate_error
 
 
-def render_copy_button(text: str, label: str = "Copy TXT", height: int = 48) -> None:
-    """Render a browser-side copy button that copies text from the app to the user's clipboard."""
+def render_copy_button(text: str, label: str = "Copy TXT", height: int = 42) -> None:
+    """Render a compact browser-side copy button."""
     payload = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     components.html(
         f"""
-        <div style="font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+        <div style="font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+                    width:100%; height:{height}px; display:flex; align-items:stretch;">
           <button id="copy-btn" style="
-            width:100%; min-height:42px; padding:0 16px; border-radius:13px;
+            width:100%; height:100%; box-sizing:border-box; padding:0 16px; border-radius:12px;
             border:1px solid rgba(148,163,184,.28); background:rgba(15,23,42,.55);
             color:#f8fafc; font-weight:750; font-size:14px; cursor:pointer;
+            transition:background .2s ease, border-color .2s ease, transform .2s ease;
           ">{label}</button>
           <textarea id="copy-source" style="position:absolute;left:-9999px;top:-9999px;">{payload}</textarea>
           <script>
@@ -1182,7 +1184,9 @@ if result:
         st.subheader("Transcript")
         transcript_text = result.get("transcript", "")
         st.text_area("Transcript text", transcript_text, height=430)
-        render_copy_button(transcript_text, "Copy TXT")
+        copy_col, _ = st.columns([0.28, 0.72])
+        with copy_col:
+            render_copy_button(transcript_text, "Copy TXT")
 
     with tab_subtitles:
         if result.get("segments"):
@@ -1191,7 +1195,7 @@ if result:
             st.text_area("Speaker + timestamp transcript", speaker_text, height=330)
             d1, d2, d3 = st.columns(3)
             with d1:
-                render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=48)
+                render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=42)
             d2.download_button(
                 "Download SRT",
                 result.get("srt", ""),
@@ -1242,13 +1246,16 @@ if result:
         if st.session_state.get("summary"):
             st.markdown("### Summary & key points")
             st.text_area("Summary", st.session_state.summary, height=300)
+            render_copy_button(st.session_state.summary, "Copy TXT")
         if st.session_state.get("translation"):
             label = st.session_state.get("translation_target", "Translation")
             st.markdown(f"### {label} translation")
             st.text_area("Translated transcript", st.session_state.translation, height=360)
+            render_copy_button(st.session_state.translation, "Copy TXT")
         if st.session_state.get("content_pack"):
             st.markdown("### Creator content pack")
             st.text_area("Content pack", st.session_state.content_pack, height=430)
+            render_copy_button(st.session_state.content_pack, "Copy TXT")
 
     with tab_downloads:
         extras = {
