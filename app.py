@@ -230,6 +230,66 @@ def render_copy_button(text: str, label: str = "Copy TXT", height: int = 48) -> 
     )
 
 
+def render_workspace_motion() -> None:
+    """Add a lightweight browser-only enter animation to native Streamlit tabs."""
+    components.html(
+        """
+        <script>
+        (() => {
+          const doc = window.parent && window.parent.document;
+          if (!doc) return;
+
+          const bind = () => {
+            const tabs = Array.from(doc.querySelectorAll('button[data-baseweb="tab"]'));
+            if (!tabs.length) return;
+
+            const animate = () => {
+              const active = doc.querySelector(
+                'button[data-baseweb="tab"][aria-selected="true"]'
+              );
+              if (!active) return;
+
+              const controls = active.getAttribute("aria-controls");
+              let panel = controls ? doc.getElementById(controls) : null;
+
+              if (!panel) {
+                const panels = Array.from(
+                  doc.querySelectorAll('[data-baseweb="tab-panel"], [role="tabpanel"]')
+                );
+                const index = tabs.indexOf(active);
+                panel = panels[index] || null;
+              }
+
+              if (!panel) return;
+
+              panel.classList.remove("tf-tab-enter");
+              void panel.offsetWidth;
+              panel.classList.add("tf-tab-enter");
+              window.setTimeout(() => panel.classList.remove("tf-tab-enter"), 520);
+            };
+
+            tabs.forEach((tab) => {
+              if (tab.dataset.tfMotionBound === "1") return;
+              tab.dataset.tfMotionBound = "1";
+              tab.addEventListener("click", () => {
+                window.requestAnimationFrame(() => {
+                  window.requestAnimationFrame(animate);
+                });
+              });
+            });
+          };
+
+          bind();
+          window.setTimeout(bind, 120);
+          window.setTimeout(bind, 500);
+        })();
+        </script>
+        """,
+        height=0,
+        scrolling=False,
+    )
+
+
 def safe_name(name: str) -> str:
     stem = Path(name).stem
     stem = re.sub(r"[^\w\-]+", "_", stem, flags=re.UNICODE).strip("_")
@@ -698,7 +758,7 @@ def make_zip_bytes(base_name: str, result: dict[str, Any], extras: dict[str, str
 def reset_outputs() -> None:
     for key in ["result", "summary", "translation", "content_pack", "translation_target", "source_name"]:
         st.session_state.pop(key, None)
-    st.session_state["workspace_section"] = "Transcript"
+    st.session_state["workspace_instance"] = st.session_state.get("workspace_instance", 0) + 1
 
 
 def render_access_gate() -> bool:
@@ -840,70 +900,66 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
   color:white !important; border:0 !important; min-height:3rem;
 }}
 
-/* Persistent workspace navigation */
-[data-testid="stSegmentedControl"] {{
-  margin: .35rem 0 1.15rem 0;
+/* Calm native workspace tabs */
+.stTabs {{
+  margin: .35rem 0 1.1rem 0;
 }}
-[data-testid="stSegmentedControl"] [role="radiogroup"] {{
-  gap: .3rem !important;
+.stTabs [data-baseweb="tab-list"] {{
+  gap: 0 !important;
+  padding: 3px !important;
+  border: 1px solid var(--tf-border) !important;
+  border-radius: 14px !important;
+  background: var(--tf-panel) !important;
+  overflow: hidden !important;
 }}
-[data-testid="stSegmentedControl"] button {{
+.stTabs [data-baseweb="tab"] {{
+  min-height: 2.65rem !important;
+  padding: .55rem .95rem !important;
+  border-radius: 10px !important;
+  color: var(--tf-muted) !important;
+  font-weight: 750 !important;
   transition:
-    background-color .28s ease,
     color .28s ease,
-    border-color .28s ease,
-    box-shadow .32s ease,
+    background-color .28s ease,
     transform .24s cubic-bezier(.22,1,.36,1) !important;
-  will-change: transform, box-shadow;
 }}
-[data-testid="stSegmentedControl"] button:hover {{
+.stTabs [data-baseweb="tab"]:hover {{
+  color: var(--tf-text) !important;
+  background: rgba(255,255,255,.035) !important;
   transform: translateY(-1px);
 }}
-[data-testid="stSegmentedControl"] button[aria-checked="true"] {{
+.stTabs [data-baseweb="tab"][aria-selected="true"] {{
+  color: var(--tf-text) !important;
+  background: linear-gradient(135deg, var(--tf-accent), var(--tf-accent2)) !important;
   box-shadow: 0 8px 24px var(--tf-glow);
-  transform: translateY(-1px);
 }}
-
-/* Calm content transition when changing workspace */
-@keyframes tfWorkspaceIn {{
-  0% {{
-    opacity: 0;
-    transform: translateY(7px);
-    filter: blur(1px);
-  }}
-  100% {{
-    opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
-  }}
+.stTabs [data-baseweb="tab-highlight"] {{
+  display: none !important;
 }}
-.st-key-workspace-content {{
-  animation: tfWorkspaceIn .38s cubic-bezier(.22,1,.36,1) both;
+.stTabs [data-baseweb="tab-border"] {{
+  display: none !important;
+}}
+.stTabs [role="tabpanel"] {{
+  animation: tfNativeTabEnter .42s cubic-bezier(.22,1,.36,1) both;
   transform-origin: top center;
 }}
-.st-key-workspace-content > div {{
-  transition: opacity .25s ease;
+@keyframes tfNativeTabEnter {{
+  from {{
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }}
+  to {{
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }}
 }}
 @media (prefers-reduced-motion: reduce) {{
-  .st-key-workspace-content {{
+  .stTabs [data-baseweb="tab"],
+  .stTabs [role="tabpanel"] {{
     animation: none !important;
-  }}
-  [data-testid="stSegmentedControl"] button {{
     transition: none !important;
   }}
 }}
-[data-testid="stSegmentedControl"] button {{
-  border-color: var(--tf-border) !important;
-  background: var(--tf-panel) !important;
-  color: var(--tf-muted) !important;
-  font-weight: 750 !important;
-}}
-[data-testid="stSegmentedControl"] button[aria-checked="true"] {{
-  background: linear-gradient(90deg, var(--tf-accent), var(--tf-accent2)) !important;
-  color: white !important;
-  border-color: transparent !important;
-}}
-
 
 /* Status / alerts */
 [data-testid="stAlert"] {{border-radius:14px !important; border:1px solid var(--tf-border) !important;}}
@@ -1115,126 +1171,122 @@ if result:
     st.markdown("<div class='section-label' style='margin-top:1.2rem'>02 · Workspace</div>", unsafe_allow_html=True)
     st.markdown("### Your transcription workspace")
 
-    workspace_section = st.segmented_control(
-        "Workspace",
-        options=["Transcript", "Speakers & subtitles", "AI client tools", "Downloads"],
+    workspace_tabs_key = f"workspace_tabs_{st.session_state.get('workspace_instance', 0)}"
+    tab_transcript, tab_subtitles, tab_ai, tab_downloads = st.tabs(
+        ["Transcript", "Speakers & subtitles", "AI client tools", "Downloads"],
         default="Transcript",
-        selection_mode="single",
-        key="workspace_section",
-        label_visibility="collapsed",
+        key=workspace_tabs_key,
     )
 
-    workspace_content = st.container(key="workspace_content")
-    with workspace_content:
-        if workspace_section == "Transcript":
-            st.subheader("Transcript")
-            transcript_text = result.get("transcript", "")
-            st.text_area("Transcript text", transcript_text, height=430)
-            render_copy_button(transcript_text, "Copy TXT")
+    with tab_transcript:
+        st.subheader("Transcript")
+        transcript_text = result.get("transcript", "")
+        st.text_area("Transcript text", transcript_text, height=430)
+        render_copy_button(transcript_text, "Copy TXT")
 
-        elif workspace_section == "Speakers & subtitles":
-            if result.get("segments"):
-                st.subheader("Speaker transcript")
-                speaker_text = result.get("speaker_transcript", "")
-                st.text_area("Speaker + timestamp transcript", speaker_text, height=330)
-                d1, d2, d3 = st.columns(3)
-                with d1:
-                    render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=48)
-                d2.download_button(
-                    "Download SRT",
-                    result.get("srt", ""),
-                    file_name=f"{base_name}.srt",
-                    mime="application/x-subrip",
-                    use_container_width=True,
-                )
-                d3.download_button(
-                    "Download VTT",
-                    result.get("vtt", ""),
-                    file_name=f"{base_name}.vtt",
-                    mime="text/vtt",
-                    use_container_width=True,
-                )
-                st.caption(f"Subtitle segments: {len(result.get('segments', []))}")
-            else:
-                st.info("Speaker labels and subtitle files are created when you use “Detailed subtitles + speakers” mode.")
+    with tab_subtitles:
+        if result.get("segments"):
+            st.subheader("Speaker transcript")
+            speaker_text = result.get("speaker_transcript", "")
+            st.text_area("Speaker + timestamp transcript", speaker_text, height=330)
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=48)
+            d2.download_button(
+                "Download SRT",
+                result.get("srt", ""),
+                file_name=f"{base_name}.srt",
+                mime="application/x-subrip",
+                use_container_width=True,
+            )
+            d3.download_button(
+                "Download VTT",
+                result.get("vtt", ""),
+                file_name=f"{base_name}.vtt",
+                mime="text/vtt",
+                use_container_width=True,
+            )
+            st.caption(f"Subtitle segments: {len(result.get('segments', []))}")
+        else:
+            st.info("Speaker labels and subtitle files are created when you use “Detailed subtitles + speakers” mode.")
 
-        elif workspace_section == "AI client tools":
-            st.subheader("Turn the transcript into client-ready deliverables")
-            st.caption("These are generated only when you click a button, so you control extra API usage.")
+    with tab_ai:
+        st.subheader("Turn the transcript into client-ready deliverables")
+        st.caption("These are generated only when you click a button, so you control extra API usage.")
 
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("Generate summary + key points", use_container_width=True, disabled=not bool(content_api_keys)):
-                    with st.spinner("Creating summary…"):
-                        try:
-                            st.session_state.summary = generate_summary(content_api_keys, result)
-                        except Exception as exc:
-                            st.error(f"Summary failed: {exc}")
-            with col_b:
-                if st.button("Generate creator content pack", use_container_width=True, disabled=not bool(content_api_keys)):
-                    with st.spinner("Creating content pack…"):
-                        try:
-                            st.session_state.content_pack = generate_content_pack(content_api_keys, result)
-                        except Exception as exc:
-                            st.error(f"Content pack failed: {exc}")
-
-            target = st.selectbox("Translation target", TRANSLATION_LANGUAGES)
-            if st.button(f"Translate full transcript to {target}", use_container_width=True, disabled=not bool(content_api_keys)):
-                with st.spinner(f"Translating to {target}…"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Generate summary + key points", use_container_width=True, disabled=not bool(content_api_keys)):
+                with st.spinner("Creating summary…"):
                     try:
-                        st.session_state.translation = generate_translation(content_api_keys, result, target)
-                        st.session_state.translation_target = target
+                        st.session_state.summary = generate_summary(content_api_keys, result)
                     except Exception as exc:
-                        st.error(f"Translation failed: {exc}")
+                        st.error(f"Summary failed: {exc}")
+        with col_b:
+            if st.button("Generate creator content pack", use_container_width=True, disabled=not bool(content_api_keys)):
+                with st.spinner("Creating content pack…"):
+                    try:
+                        st.session_state.content_pack = generate_content_pack(content_api_keys, result)
+                    except Exception as exc:
+                        st.error(f"Content pack failed: {exc}")
 
-            if st.session_state.get("summary"):
-                st.markdown("### Summary & key points")
-                st.text_area("Summary", st.session_state.summary, height=300)
-            if st.session_state.get("translation"):
-                label = st.session_state.get("translation_target", "Translation")
-                st.markdown(f"### {label} translation")
-                st.text_area("Translated transcript", st.session_state.translation, height=360)
-            if st.session_state.get("content_pack"):
-                st.markdown("### Creator content pack")
-                st.text_area("Content pack", st.session_state.content_pack, height=430)
+        target = st.selectbox("Translation target", TRANSLATION_LANGUAGES)
+        if st.button(f"Translate full transcript to {target}", use_container_width=True, disabled=not bool(content_api_keys)):
+            with st.spinner(f"Translating to {target}…"):
+                try:
+                    st.session_state.translation = generate_translation(content_api_keys, result, target)
+                    st.session_state.translation_target = target
+                except Exception as exc:
+                    st.error(f"Translation failed: {exc}")
 
-        elif workspace_section == "Downloads":
-            extras = {
-                "summary": st.session_state.get("summary", ""),
-                f"translation_{str(st.session_state.get('translation_target', '')).lower()}": st.session_state.get("translation", ""),
-                "content_pack": st.session_state.get("content_pack", ""),
-            }
-            sections = [("Transcript", result.get("transcript", ""))]
-            if result.get("speaker_transcript"):
-                sections.append(("Speaker Transcript", result.get("speaker_transcript", "")))
-            if st.session_state.get("summary"):
-                sections.append(("Summary & Key Points", st.session_state.summary))
-            if st.session_state.get("translation"):
-                sections.append((f"Translation - {st.session_state.get('translation_target', '')}", st.session_state.translation))
-            if st.session_state.get("content_pack"):
-                sections.append(("Creator Content Pack", st.session_state.content_pack))
+        if st.session_state.get("summary"):
+            st.markdown("### Summary & key points")
+            st.text_area("Summary", st.session_state.summary, height=300)
+        if st.session_state.get("translation"):
+            label = st.session_state.get("translation_target", "Translation")
+            st.markdown(f"### {label} translation")
+            st.text_area("Translated transcript", st.session_state.translation, height=360)
+        if st.session_state.get("content_pack"):
+            st.markdown("### Creator content pack")
+            st.text_area("Content pack", st.session_state.content_pack, height=430)
 
-            docx_data = make_docx_bytes(APP_TITLE, sections)
-            zip_data = make_zip_bytes(base_name, result, extras)
+    with tab_downloads:
+        extras = {
+            "summary": st.session_state.get("summary", ""),
+            f"translation_{str(st.session_state.get('translation_target', '')).lower()}": st.session_state.get("translation", ""),
+            "content_pack": st.session_state.get("content_pack", ""),
+        }
+        sections = [("Transcript", result.get("transcript", ""))]
+        if result.get("speaker_transcript"):
+            sections.append(("Speaker Transcript", result.get("speaker_transcript", "")))
+        if st.session_state.get("summary"):
+            sections.append(("Summary & Key Points", st.session_state.summary))
+        if st.session_state.get("translation"):
+            sections.append((f"Translation - {st.session_state.get('translation_target', '')}", st.session_state.translation))
+        if st.session_state.get("content_pack"):
+            sections.append(("Creator Content Pack", st.session_state.content_pack))
 
-            st.write("Download a polished document or one ZIP containing every output currently generated.")
-            dl1, dl2 = st.columns(2)
-            dl1.download_button(
-                "Download complete DOCX",
-                docx_data,
-                file_name=f"{base_name}_complete.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
-            dl2.download_button(
-                "Download everything as ZIP",
-                zip_data,
-                file_name=f"{base_name}_team_fahad_pack.zip",
-                mime="application/zip",
-                use_container_width=True,
-            )
+        docx_data = make_docx_bytes(APP_TITLE, sections)
+        zip_data = make_zip_bytes(base_name, result, extras)
 
+        st.write("Download a polished document or one ZIP containing every output currently generated.")
+        dl1, dl2 = st.columns(2)
+        dl1.download_button(
+            "Download complete DOCX",
+            docx_data,
+            file_name=f"{base_name}_complete.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+        dl2.download_button(
+            "Download everything as ZIP",
+            zip_data,
+            file_name=f"{base_name}_team_fahad_pack.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
 
+    render_workspace_motion()
 
 st.divider()
 st.markdown(
