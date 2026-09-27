@@ -194,7 +194,7 @@ def run_with_api_failover(api_keys: list[str], operation: Any, purpose: str) -> 
     ) from last_rate_error
 
 
-def render_copy_button(text: str, label: str = "Copy TXT", height: int = 42) -> None:
+def render_copy_button(text: str, label: str = "Copy TXT", height: int = 42, top_offset: int = 0) -> None:
     """Render a compact browser-side copy button."""
     payload = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     components.html(
@@ -205,6 +205,7 @@ def render_copy_button(text: str, label: str = "Copy TXT", height: int = 42) -> 
             width:100%; height:100%; box-sizing:border-box; padding:0 16px; border-radius:12px;
             border:1px solid rgba(148,163,184,.28); background:rgba(15,23,42,.55);
             color:#f8fafc; font-weight:750; font-size:14px; cursor:pointer;
+            position:relative; top:{top_offset}px;
             transition:background .2s ease, border-color .2s ease, transform .2s ease;
           ">{label}</button>
           <textarea id="copy-source" style="position:absolute;left:-9999px;top:-9999px;">{payload}</textarea>
@@ -1195,7 +1196,7 @@ if result:
             st.text_area("Speaker + timestamp transcript", speaker_text, height=330)
             d1, d2, d3 = st.columns(3)
             with d1:
-                render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=42)
+                render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=42, top_offset=-8)
             d2.download_button(
                 "Download SRT",
                 result.get("srt", ""),
