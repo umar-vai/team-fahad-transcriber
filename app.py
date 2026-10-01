@@ -233,66 +233,6 @@ def render_copy_button(text: str, label: str = "Copy TXT", height: int = 42, top
     )
 
 
-def render_workspace_motion() -> None:
-    """Add a lightweight browser-only enter animation to native Streamlit tabs."""
-    components.html(
-        """
-        <script>
-        (() => {
-          const doc = window.parent && window.parent.document;
-          if (!doc) return;
-
-          const bind = () => {
-            const tabs = Array.from(doc.querySelectorAll('button[data-baseweb="tab"]'));
-            if (!tabs.length) return;
-
-            const animate = () => {
-              const active = doc.querySelector(
-                'button[data-baseweb="tab"][aria-selected="true"]'
-              );
-              if (!active) return;
-
-              const controls = active.getAttribute("aria-controls");
-              let panel = controls ? doc.getElementById(controls) : null;
-
-              if (!panel) {
-                const panels = Array.from(
-                  doc.querySelectorAll('[data-baseweb="tab-panel"], [role="tabpanel"]')
-                );
-                const index = tabs.indexOf(active);
-                panel = panels[index] || null;
-              }
-
-              if (!panel) return;
-
-              panel.classList.remove("tf-tab-enter");
-              void panel.offsetWidth;
-              panel.classList.add("tf-tab-enter");
-              window.setTimeout(() => panel.classList.remove("tf-tab-enter"), 520);
-            };
-
-            tabs.forEach((tab) => {
-              if (tab.dataset.tfMotionBound === "1") return;
-              tab.dataset.tfMotionBound = "1";
-              tab.addEventListener("click", () => {
-                window.requestAnimationFrame(() => {
-                  window.requestAnimationFrame(animate);
-                });
-              });
-            });
-          };
-
-          bind();
-          window.setTimeout(bind, 120);
-          window.setTimeout(bind, 500);
-        })();
-        </script>
-        """,
-        height=0,
-        scrolling=False,
-    )
-
-
 def safe_name(name: str) -> str:
     stem = Path(name).stem
     stem = re.sub(r"[^\w\-]+", "_", stem, flags=re.UNICODE).strip("_")
@@ -759,7 +699,18 @@ def make_zip_bytes(base_name: str, result: dict[str, Any], extras: dict[str, str
 
 
 def reset_outputs() -> None:
-    for key in ["result", "summary", "translation", "content_pack", "translation_target", "source_name"]:
+    for key in [
+        "result",
+        "summary",
+        "translation",
+        "content_pack",
+        "translation_target",
+        "translation_target_selector",
+        "summary_output",
+        "translation_output",
+        "content_pack_output",
+        "source_name",
+    ]:
         st.session_state.pop(key, None)
     st.session_state["workspace_instance"] = st.session_state.get("workspace_instance", 0) + 1
 
@@ -783,6 +734,90 @@ def render_access_gate() -> bool:
 
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🎙️", layout="wide")
+
+
+@st.fragment(key="ai_client_tools")
+def render_ai_client_tools(result: dict[str, Any], content_api_keys: list[str]) -> None:
+    """Render AI client tools in an isolated fragment so AI actions don't rerun the whole app."""
+    st.subheader("Turn the transcript into client-ready deliverables")
+    st.caption("These are generated only when you click a button, so you control extra API usage.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button(
+            "Generate summary + key points",
+            use_container_width=True,
+            disabled=not bool(content_api_keys),
+            key="generate_summary",
+        ):
+            with st.spinner("Creating summary…"):
+                try:
+                    st.session_state.summary = generate_summary(content_api_keys, result)
+                except Exception as exc:
+                    st.error(f"Summary failed: {exc}")
+
+    with col_b:
+        if st.button(
+            "Generate creator content pack",
+            use_container_width=True,
+            disabled=not bool(content_api_keys),
+            key="generate_content_pack",
+        ):
+            with st.spinner("Creating creator content pack…"):
+                try:
+                    st.session_state.content_pack = generate_content_pack(content_api_keys, result)
+                except Exception as exc:
+                    st.error(f"Creator content pack failed: {exc}")
+
+    target = st.selectbox(
+        "Translation target",
+        TRANSLATION_LANGUAGES,
+        key="translation_target_selector",
+    )
+    if st.button(
+        f"Translate full transcript to {target}",
+        use_container_width=True,
+        disabled=not bool(content_api_keys),
+        key="translate_transcript",
+    ):
+        with st.spinner(f"Translating to {target}…"):
+            try:
+                st.session_state.translation = generate_translation(content_api_keys, result, target)
+                st.session_state.translation_target = target
+            except Exception as exc:
+                st.error(f"Translation failed: {exc}")
+
+    if st.session_state.get("summary"):
+        st.markdown("### Summary & key points")
+        st.text_area(
+            "Summary",
+            st.session_state.summary,
+            height=300,
+            key="summary_output",
+        )
+        render_copy_button(st.session_state.summary, "Copy TXT")
+
+    if st.session_state.get("translation"):
+        label = st.session_state.get("translation_target", "Translation")
+        st.markdown(f"### {label} translation")
+        st.text_area(
+            "Translated transcript",
+            st.session_state.translation,
+            height=360,
+            key="translation_output",
+        )
+        render_copy_button(st.session_state.translation, "Copy TXT")
+
+    if st.session_state.get("content_pack"):
+        st.markdown("### Creator content pack")
+        st.text_area(
+            "Content pack",
+            st.session_state.content_pack,
+            height=430,
+            key="content_pack_output",
+        )
+        render_copy_button(st.session_state.content_pack, "Copy TXT")
+
 
 THEMES = {
     "Midnight Neon": {
@@ -943,7 +978,7 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
   display: none !important;
 }}
 .stTabs [role="tabpanel"] {{
-  animation: tfNativeTabEnter .42s cubic-bezier(.22,1,.36,1) both;
+  animation: tfNativeTabEnter .28s ease-out both;
   transform-origin: top center;
 }}
 @keyframes tfNativeTabEnter {{
@@ -1179,6 +1214,7 @@ if result:
         ["Transcript", "Speakers & subtitles", "AI client tools", "Downloads"],
         default="Transcript",
         key=workspace_tabs_key,
+        on_change="ignore",
     )
 
     with tab_transcript:
@@ -1216,47 +1252,7 @@ if result:
             st.info("Speaker labels and subtitle files are created when you use “Detailed subtitles + speakers” mode.")
 
     with tab_ai:
-        st.subheader("Turn the transcript into client-ready deliverables")
-        st.caption("These are generated only when you click a button, so you control extra API usage.")
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("Generate summary + key points", use_container_width=True, disabled=not bool(content_api_keys)):
-                with st.spinner("Creating summary…"):
-                    try:
-                        st.session_state.summary = generate_summary(content_api_keys, result)
-                    except Exception as exc:
-                        st.error(f"Summary failed: {exc}")
-        with col_b:
-            if st.button("Generate creator content pack", use_container_width=True, disabled=not bool(content_api_keys)):
-                with st.spinner("Creating content pack…"):
-                    try:
-                        st.session_state.content_pack = generate_content_pack(content_api_keys, result)
-                    except Exception as exc:
-                        st.error(f"Content pack failed: {exc}")
-
-        target = st.selectbox("Translation target", TRANSLATION_LANGUAGES)
-        if st.button(f"Translate full transcript to {target}", use_container_width=True, disabled=not bool(content_api_keys)):
-            with st.spinner(f"Translating to {target}…"):
-                try:
-                    st.session_state.translation = generate_translation(content_api_keys, result, target)
-                    st.session_state.translation_target = target
-                except Exception as exc:
-                    st.error(f"Translation failed: {exc}")
-
-        if st.session_state.get("summary"):
-            st.markdown("### Summary & key points")
-            st.text_area("Summary", st.session_state.summary, height=300)
-            render_copy_button(st.session_state.summary, "Copy TXT")
-        if st.session_state.get("translation"):
-            label = st.session_state.get("translation_target", "Translation")
-            st.markdown(f"### {label} translation")
-            st.text_area("Translated transcript", st.session_state.translation, height=360)
-            render_copy_button(st.session_state.translation, "Copy TXT")
-        if st.session_state.get("content_pack"):
-            st.markdown("### Creator content pack")
-            st.text_area("Content pack", st.session_state.content_pack, height=430)
-            render_copy_button(st.session_state.content_pack, "Copy TXT")
+        render_ai_client_tools(result, content_api_keys)
 
     with tab_downloads:
         extras = {
@@ -1294,7 +1290,6 @@ if result:
             use_container_width=True,
         )
 
-    render_workspace_motion()
 
 st.divider()
 st.markdown(
