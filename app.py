@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import io
+import ipaddress
 import os
 import re
 import shutil
+import socket
+import subprocess
 import tempfile
 import time
+import urllib.parse
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +24,8 @@ from docx import Document
 from google import genai
 from google.genai import errors
 from moviepy import AudioFileClip, VideoFileClip
+import yt_dlp
+from imageio_ffmpeg import get_ffmpeg_exe
 
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
@@ -61,6 +67,13 @@ class WordInfo:
     speaker: str | None
     start: float | None
     end: float | None
+
+
+@dataclass
+class LocalMediaSource:
+    path: Path
+    name: str
+    size: int
 
 
 @dataclass
@@ -415,6 +428,147 @@ def segments_to_vtt(segments: list[Segment]) -> str:
     return "\n".join(blocks)
 
 
+def validate_public_media_url(url: str) -> str:
+    """Validate an HTTP(S) URL and reject obvious private/loopback targets."""
+    cleaned = str(url or "").strip()
+    if len(cleaned) > 2048:
+        raise ValueError("That link is too long. Please provide a shorter media URL.")
+
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Please enter a complete HTTP or HTTPS media link.")
+
+    hostname = parsed.hostname.strip().lower().rstrip(".")
+    if hostname in {"localhost", "localhost.localdomain", "0.0.0.0", "::1"} or hostname.endswith(".local"):
+        raise ValueError("Private/local network links are not supported.")
+
+    try:
+        addresses = {
+            info[4][0]
+            for info in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise ValueError("The link's host could not be resolved.") from exc
+
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if any((ip.is_private, ip.is_loopback, ip.is_link_local, ip.is_multicast, ip.is_unspecified, ip.is_reserved)):
+            raise ValueError("For security, links to private or local network addresses are not supported.")
+
+    return cleaned
+
+
+def ffmpeg_executable() -> str:
+    """Use system FFmpeg when available, otherwise imageio-ffmpeg's bundled binary."""
+    return shutil.which("ffmpeg") or get_ffmpeg_exe()
+
+
+def normalize_link_media_to_mp3(source: Path, destination: Path) -> Path:
+    """Normalize any linked audio/video file into a Gemini-friendly MP3."""
+    command = [
+        ffmpeg_executable(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "128k",
+        str(destination),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError as exc:
+        raise RuntimeError("FFmpeg is not available on the server.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Media conversion timed out. Please use a shorter recording.") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()
+        raise RuntimeError(f"The linked media could not be converted into audio. {detail[:400]}") from exc
+
+    if not destination.exists() or destination.stat().st_size == 0:
+        raise RuntimeError("No usable audio was produced from that link.")
+    return destination
+
+
+def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
+    """Download one public media URL with yt-dlp, then normalize it to MP3."""
+    url = validate_public_media_url(url)
+    download_dir = folder / "link_download"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+
+    def progress_hook(data: dict[str, Any]) -> None:
+        if int(data.get("downloaded_bytes") or 0) > max_bytes:
+            raise yt_dlp.utils.DownloadError(
+                f"Linked media exceeds the {MAX_UPLOAD_MB} MB limit."
+            )
+
+    ydl_opts: dict[str, Any] = {
+        "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best",
+        "outtmpl": str(download_dir / "source.%(ext)s"),
+        "noplaylist": True,
+        "max_filesize": max_bytes,
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+        "progress_hooks": [progress_hook],
+        "cachedir": False,
+    }
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        ydl_opts["ffmpeg_location"] = ffmpeg
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as exc:
+        message = str(exc).strip()
+        if "No supported JavaScript runtime" in message:
+            raise RuntimeError(
+                "This platform needs a supported JavaScript runtime for link extraction. "
+                "Try a direct MP4/MP3/M4A link or another supported public media URL."
+            ) from exc
+        raise RuntimeError(f"Could not download media from that link. {message[:500]}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Could not process that media link: {exc}") from exc
+
+    candidates = [
+        p for p in download_dir.iterdir()
+        if p.is_file() and p.suffix.lower() not in {".part", ".ytdl"}
+    ]
+    if not candidates:
+        raise RuntimeError(
+            "No downloadable audio/video file was found. Use a direct media URL or a supported platform link."
+        )
+
+    source = max(candidates, key=lambda p: p.stat().st_size)
+    if source.stat().st_size > max_bytes:
+        raise ValueError(f"Linked media is larger than the {MAX_UPLOAD_MB} MB limit.")
+
+    title = str((info or {}).get("title") or source.stem or "linked_media").strip()
+    safe_title = safe_name(title)[:100] or "linked_media"
+    normalized = folder / f"{safe_title}.mp3"
+    normalize_link_media_to_mp3(source, normalized)
+
+    return LocalMediaSource(
+        path=normalized,
+        name=f"{safe_title}.mp3",
+        size=normalized.stat().st_size,
+    )
+
+
 def media_duration(path: Path, is_video: bool) -> float | None:
     try:
         if is_video:
@@ -457,7 +611,10 @@ def _transcribe_media_once(
     if extension not in VIDEO_EXTENSIONS and extension not in AUDIO_MIME_TYPES:
         raise ValueError("Unsupported file format.")
 
-    upload_size_mb = getattr(uploaded, "size", 0) / (1024 * 1024)
+    upload_size_mb = (
+        uploaded.size if isinstance(uploaded, LocalMediaSource)
+        else getattr(uploaded, "size", 0)
+    ) / (1024 * 1024)
     if upload_size_mb > MAX_UPLOAD_MB:
         raise ValueError(f"File is too large. Maximum allowed size is {MAX_UPLOAD_MB} MB.")
 
@@ -467,13 +624,19 @@ def _transcribe_media_once(
     try:
         with tempfile.TemporaryDirectory(prefix="team_fahad_transcriber_") as temp_dir:
             folder = Path(temp_dir)
-            source = folder / f"source{extension}"
-            with source.open("wb") as destination:
-                uploaded.seek(0)
-                shutil.copyfileobj(uploaded, destination)
+            if isinstance(uploaded, LocalMediaSource):
+                source = uploaded.path
+                extension = source.suffix.lower()
+                if not source.exists() or source.stat().st_size == 0:
+                    raise ValueError("The downloaded media file is empty or unavailable.")
+            else:
+                source = folder / f"source{extension}"
+                with source.open("wb") as destination:
+                    uploaded.seek(0)
+                    shutil.copyfileobj(uploaded, destination)
 
-            if source.stat().st_size == 0:
-                raise ValueError("The uploaded file is empty.")
+                if source.stat().st_size == 0:
+                    raise ValueError("The uploaded file is empty.")
 
             audio_path, mime_type, duration = prepare_audio(source, extension, folder)
 
@@ -999,6 +1162,22 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
   }}
 }}
 
+/* Media source tabs */
+.stTabs [data-baseweb="tab-list"] {{
+  background: var(--tf-panel) !important;
+}}
+.stTabs [data-baseweb="tab"] {{
+  transition: color .24s ease, background-color .24s ease, transform .22s ease !important;
+}}
+.stTabs [data-baseweb="tab"]:hover {{
+  transform: translateY(-1px);
+}}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {{
+  color: var(--tf-text) !important;
+  background: linear-gradient(135deg, var(--tf-accent), var(--tf-accent2)) !important;
+  border-radius: 10px !important;
+}}
+
 /* Status / alerts */
 [data-testid="stAlert"] {{border-radius:14px !important; border:1px solid var(--tf-border) !important;}}
 [data-testid="stStatusWidget"] {{border-radius:16px !important; border:1px solid var(--tf-border) !important; background:var(--tf-panel) !important;}}
@@ -1133,21 +1312,40 @@ with st.sidebar:
     )
 
 st.markdown("<div class='section-label'>01 · Upload & process</div>", unsafe_allow_html=True)
-st.markdown("### Start with your media file")
-st.caption("Drop an audio or video file below. Your selected transcription mode and language settings are applied automatically.")
+st.markdown("### Start with your media")
 
-uploaded = st.file_uploader(
-    "Upload audio or video",
-    type=["mp3", "wav", "m4a", "aac", "ogg", "flac", "mp4", "mov", "mkv"],
-    help=f"Maximum app file size: {MAX_UPLOAD_MB} MB.",
-)
+vocab = [item.strip() for item in re.split(r"[,\n]", custom_vocab_text) if item.strip()]
 
-if uploaded is None:
+source_tabs = st.tabs(["Upload file", "Paste link"], key="source_input_tabs")
+
+uploaded = None
+media_link = ""
+
+with source_tabs[0]:
+    st.caption("Upload an audio or video file. Your selected transcription mode and language settings are applied automatically.")
+    uploaded = st.file_uploader(
+        "Upload audio or video",
+        type=["mp3", "wav", "m4a", "aac", "ogg", "flac", "mp4", "mov", "mkv"],
+        help=f"Maximum app file size: {MAX_UPLOAD_MB} MB.",
+        key="media_file_uploader",
+        max_upload_size=MAX_UPLOAD_MB,
+    )
+
+with source_tabs[1]:
+    st.caption("Paste a public media URL. The app downloads it temporarily, extracts audio, transcribes it, and removes the temporary files.")
+    media_link = st.text_input(
+        "Media URL",
+        placeholder="https://youtube.com/watch?v=… or https://example.com/video.mp4",
+        key="media_link_input",
+    )
+    st.caption("Direct MP4/MP3/M4A links and many sites supported by yt-dlp can be used. Private/login-only links may not work.")
+
+if uploaded is None and not media_link.strip():
     st.markdown(
         """
         <div class="empty-card">
           <strong>Ready when you are.</strong><br>
-          Choose a file to unlock transcription, speaker subtitles, AI summaries, translation and client-ready downloads.
+          Upload a file or paste a media link to unlock transcription, speaker subtitles, AI summaries, translation and client-ready downloads.
         </div>
         """,
         unsafe_allow_html=True,
@@ -1160,21 +1358,21 @@ if uploaded is not None:
     c2.metric("Size", f"{size_mb:.1f} MB")
     c3.metric("Mode", "Detailed" if mode.startswith("Detailed") else "Standard")
 
-    vocab = [item.strip() for item in re.split(r"[,\n]", custom_vocab_text) if item.strip()]
     if len(vocab) > 100:
         st.info("Only the first 100 custom vocabulary terms will be sent for best results.")
 
     if mode == "Detailed subtitles + speakers":
         st.info("Detailed mode is intended for recordings up to about 30 minutes. Standard modes support up to about 60 minutes per request.")
 
-    if st.button("Transcribe file", type="primary", disabled=not bool(transcription_api_keys), use_container_width=True):
+    if st.button("Transcribe file", type="primary", disabled=not bool(transcription_api_keys), use_container_width=True, key="transcribe_uploaded_file"):
         reset_outputs()
+        st.session_state["source_kind"] = "file"
         if size_mb > MAX_UPLOAD_MB:
             st.error(f"Please upload a file smaller than {MAX_UPLOAD_MB} MB.")
         else:
             status = st.status("Preparing media…", expanded=True)
             try:
-                status.write("Extracting/reading audio…")
+                status.write("Reading audio/video…")
                 status.write("Uploading securely for transcription…")
                 status.write("Running speech-to-text…")
                 result = transcribe_media(
@@ -1195,6 +1393,38 @@ if uploaded is not None:
             except Exception as exc:
                 status.update(label="Transcription failed", state="error")
                 st.error(str(exc))
+
+if media_link.strip():
+    if st.button("Transcribe from link", type="primary", disabled=not bool(transcription_api_keys), use_container_width=True, key="transcribe_media_link"):
+        reset_outputs()
+        st.session_state["source_kind"] = "link"
+        status = st.status("Preparing linked media…", expanded=True)
+        try:
+            with tempfile.TemporaryDirectory(prefix="team_fahad_link_") as link_dir:
+                folder = Path(link_dir)
+                status.write("Opening media link…")
+                linked_source = download_media_from_link(media_link, folder)
+                status.write(f"Media ready • {linked_source.name}")
+                status.write("Uploading securely for transcription…")
+                status.write("Running speech-to-text…")
+                result = transcribe_media(
+                    uploaded=linked_source,
+                    api_keys=transcription_api_keys,
+                    language_codes=LANGUAGES[language_name],
+                    mode=mode,
+                    custom_vocabulary=vocab,
+                )
+                st.session_state.result = result
+                st.session_state.source_name = linked_source.name
+                status.update(label="Transcription complete", state="complete", expanded=False)
+        except errors.APIError as exc:
+            status.update(label="Transcription failed", state="error")
+            code = getattr(exc, "code", "API")
+            message = getattr(exc, "message", str(exc))
+            st.error(f"Gemini request failed ({code}): {message}")
+        except Exception as exc:
+            status.update(label="Transcription failed", state="error")
+            st.error(str(exc))
 
 result = st.session_state.get("result")
 if result:
