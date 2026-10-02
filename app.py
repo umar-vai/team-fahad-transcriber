@@ -33,6 +33,7 @@ APP_TITLE = "Video/Audio Transcriber by Team Fahad"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
 MAX_UPLOAD_MB = 500
+MAX_LINK_MB = 2048
 MAX_ANALYSIS_CHARS = 120_000
 MAX_BULK_URLS = 50
 
@@ -538,7 +539,8 @@ def download_google_drive_media(url: str, folder: Path) -> LocalMediaSource:
             output=str(output),
             quiet=True,
             fuzzy=True,
-            resume=False,
+            resume=True,
+            retries=3,
         )
     except UnicodeEncodeError as exc:
         # Some hosted environments use an ASCII locale. Keep all downloader
@@ -552,7 +554,8 @@ def download_google_drive_media(url: str, folder: Path) -> LocalMediaSource:
     except Exception as exc:
         raise RuntimeError(
             f"Could not download the Google Drive file. "
-            f"Make sure the file is shared as 'Anyone with the link' or is otherwise publicly accessible. "
+            f"Make sure the file is shared as 'Anyone with the link' → 'Viewer'. "
+            f"If it is already public, Google may be throttling/quota-limiting the file. "
             f"{str(exc)[:450]}"
         ) from exc
 
@@ -563,9 +566,12 @@ def download_google_drive_media(url: str, folder: Path) -> LocalMediaSource:
             "Check that the file is shared publicly and that the link points to a file, not a folder."
         )
 
-    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    max_bytes = MAX_LINK_MB * 1024 * 1024
     if downloaded.stat().st_size > max_bytes:
-        raise ValueError(f"Linked media is larger than the {MAX_UPLOAD_MB} MB limit.")
+        raise ValueError(
+            f"Linked media is larger than the {MAX_LINK_MB} MB link limit. "
+            "Please use a smaller file."
+        )
 
     normalized = folder / "google_drive_media.mp3"
     normalize_link_media_to_mp3(downloaded, normalized)
@@ -586,12 +592,12 @@ def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
 
     download_dir = folder / "link_download"
     download_dir.mkdir(parents=True, exist_ok=True)
-    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    max_bytes = MAX_LINK_MB * 1024 * 1024
 
     def progress_hook(data: dict[str, Any]) -> None:
         if int(data.get("downloaded_bytes") or 0) > max_bytes:
             raise yt_dlp.utils.DownloadError(
-                f"Linked media exceeds the {MAX_UPLOAD_MB} MB limit."
+                f"Linked media exceeds the {MAX_LINK_MB} MB limit."
             )
 
     ydl_opts: dict[str, Any] = {
@@ -1519,7 +1525,7 @@ with source_tabs[0]:
     uploaded = st.file_uploader(
         "Upload audio or video",
         type=["mp3", "wav", "m4a", "aac", "ogg", "flac", "mp4", "mov", "mkv"],
-        help=f"Maximum app file size: {MAX_UPLOAD_MB} MB.",
+        help=f"Maximum local upload size: {MAX_UPLOAD_MB} MB. Linked media can be up to {MAX_LINK_MB} MB.",
         key="media_file_uploader",
         max_upload_size=MAX_UPLOAD_MB,
     )
@@ -1533,7 +1539,7 @@ with source_tabs[1]:
     st.markdown(
         """
         <div class="bulk-url-head">
-          <div><strong>Media URL</strong><span>Public Google Drive, direct media, YouTube and other supported links</span></div>
+          <div><strong>Media URL</strong><span>Google Drive, direct media, YouTube and other supported links • up to {MAX_LINK_MB} MB</span></div>
           <div><strong>Custom name</strong><span>This becomes the VTT filename</span></div>
         </div>
         """,
