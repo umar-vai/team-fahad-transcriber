@@ -504,6 +504,19 @@ def normalize_link_media_to_mp3(source: Path, destination: Path) -> Path:
     return destination
 
 
+def google_drive_folder_id(url: str) -> str | None:
+    """Extract a Google Drive folder ID from common folder URLs."""
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    host = (parsed.hostname or "").lower()
+    if host not in {"drive.google.com", "www.drive.google.com"}:
+        return None
+
+    match = re.search(r"/drive/folders/([a-zA-Z0-9_-]+)", parsed.path)
+    if match:
+        return match.group(1)
+    return None
+
+
 def google_drive_file_id(url: str) -> str | None:
     """Extract a Google Drive file ID from common share/view/download URLs."""
     parsed = urllib.parse.urlparse(str(url or "").strip())
@@ -599,6 +612,13 @@ def download_google_drive_media(url: str, folder: Path) -> LocalMediaSource:
 def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
     """Download one public media URL with yt-dlp, then normalize it to MP3."""
     url = validate_public_media_url(url)
+
+    if google_drive_folder_id(url):
+        raise ValueError(
+            "This is a Google Drive folder link, not a media file link. "
+            "Please open the folder and paste the Share link of the individual video/audio file. "
+            "Folder links are not processed as a single transcription item."
+        )
 
     if google_drive_file_id(url):
         return download_google_drive_media(url, folder)
@@ -1684,7 +1704,8 @@ with source_tabs[1]:
         "and all successful VTT files can be downloaded together as one ZIP."
     )
     st.caption(
-        "For Google Drive, set the file to “Anyone with the link” → “Viewer”. "
+        "For Google Drive files, set the file to “Anyone with the link” → “Viewer”. "
+        "Paste an individual file link — folder links are not treated as media files. "
         "Private Drive files cannot be downloaded by the public app."
     )
 
