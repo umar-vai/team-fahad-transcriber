@@ -1,0 +1,39 @@
+name: Frame.io connection gate fix v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/frameio_connection_gate_fix_v2.py'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply patch
+        run: python .github/frameio_connection_gate_fix_v2.py
+
+      - name: Validate Python
+        run: |
+          python -m py_compile app.py pages/2_Batch_Transcription.py
+          git diff --check
+
+      - name: Commit changes
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git commit -m "Fix Frame.io connected-state gating"
+          git push origin main
