@@ -1557,6 +1557,8 @@ with source_tabs[1]:
                 placeholder="https://drive.google.com/file/d/... or https://youtube.com/watch?v=...",
                 key=url_key,
                 label_visibility="collapsed",
+                type="url",
+                on_change="ignore",
             )
         with name_col:
             name_value = st.text_input(
@@ -1565,16 +1567,17 @@ with source_tabs[1]:
                 key=name_key,
                 label_visibility="collapsed",
                 max_chars=120,
+                on_change="ignore",
             )
         with remove_col:
-            if st.button(
+            st.button(
                 "×",
                 key=f"remove_bulk_url_{row_id}",
                 help="Remove this URL",
                 disabled=len(st.session_state["bulk_url_rows"]) <= 1,
-            ):
-                remove_bulk_url_row(row_id)
-                st.rerun()
+                on_click=remove_bulk_url_row,
+                args=(row_id,),
+            )
 
         bulk_link_rows.append(
             {
