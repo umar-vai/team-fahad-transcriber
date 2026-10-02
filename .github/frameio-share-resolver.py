@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Trigger workflow after adding the share-aware resolver.
 APP = Path('app.py')
 s = APP.read_text(encoding='utf-8')
 
@@ -79,8 +80,6 @@ new_func = r'''def download_frameio_media(url: str, folder: Path) -> LocalMediaS
             file_data = exact
             break
 
-        # Some share/view URLs use a view identifier that differs from the file
-        # id. Prefer the first playable audio/video item returned by the share.
         playable = next(
             (
                 item for item in assets
