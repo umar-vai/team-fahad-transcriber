@@ -1686,6 +1686,7 @@ init_bulk_url_state()
 uploaded = None
 
 if batch_page_mode:
+    bulk_link_rows: list[dict[str, str | int]] = []
     st.markdown("<div class='section-label'>01 · Batch transcription</div>", unsafe_allow_html=True)
     st.markdown("### Multiple URL transcription")
     st.caption(
