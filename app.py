@@ -978,6 +978,144 @@ def _download_remote_candidate(candidate: str, referer: str, folder: Path) -> Lo
     return LocalMediaSource(path=output, name='frameio_public_media.mp3', size=output.stat().st_size)
 
 
+def _frameio_browser_media_candidates(url: str) -> list[str]:
+    """Render a public Frame.io review page and collect browser-requested media URLs.
+
+    This is a best-effort fallback for third-party public review links whose media
+    source is injected by client-side JavaScript and therefore is absent from the
+    initial HTML response.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return []
+
+    chromium_path = (
+        shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+    )
+    if not chromium_path:
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        value = str(candidate or "").strip()
+        if not value or value.startswith(("blob:", "data:")):
+            return
+        if not value.startswith(("http://", "https://")):
+            return
+        if value in seen:
+            return
+        seen.add(value)
+        found.append(value)
+
+    media_suffixes = (
+        ".m3u8", ".mpd", ".mp4", ".mov", ".m4a", ".mp3", ".wav",
+        ".aac", ".webm", ".mkv", ".ts", ".m4s",
+    )
+    media_content_types = (
+        "video/", "audio/", "application/vnd.apple.mpegurl",
+        "application/x-mpegurl", "application/dash+xml",
+    )
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                executable_path=chromium_path,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--autoplay-policy=no-user-gesture-required",
+                    "--disable-background-networking",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36"
+                ),
+                viewport={"width": 1365, "height": 900},
+                ignore_https_errors=True,
+            )
+            page = context.new_page()
+
+            def on_request(request) -> None:
+                request_url = request.url
+                path = urllib.parse.urlparse(request_url).path.lower()
+                if any(path.endswith(ext) for ext in media_suffixes):
+                    add(request_url)
+
+            def on_response(response) -> None:
+                try:
+                    content_type = str(response.headers.get("content-type") or "").lower()
+                except Exception:
+                    content_type = ""
+                response_url = response.url
+                path = urllib.parse.urlparse(response_url).path.lower()
+                if any(content_type.startswith(prefix) for prefix in media_content_types):
+                    add(response_url)
+                elif any(path.endswith(ext) for ext in media_suffixes):
+                    add(response_url)
+
+            page.on("request", on_request)
+            page.on("response", on_response)
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            page.wait_for_timeout(5_000)
+
+            try:
+                page.locator("video").first.evaluate(
+                    "el => { el.muted = true; el.currentTime = 0; return el.play().catch(() => null); }"
+                )
+            except Exception:
+                pass
+
+            for selector in (
+                "button[aria-label*='Play' i]",
+                "button[title*='Play' i]",
+                "[role='button'][aria-label*='Play' i]",
+                "button:has-text('Play')",
+            ):
+                try:
+                    target = page.locator(selector).first
+                    if target.count() and target.is_visible():
+                        target.click(timeout=2_500)
+                        break
+                except Exception:
+                    continue
+
+            page.wait_for_timeout(10_000)
+
+            try:
+                dom_urls = page.eval_on_selector_all(
+                    "video, audio, source",
+                    "els => els.flatMap(el => [el.currentSrc || '', el.src || '']).filter(Boolean)",
+                )
+                for item in dom_urls or []:
+                    add(item)
+            except Exception:
+                pass
+
+            browser.close()
+    except Exception:
+        return found
+
+    preferred: list[str] = []
+    fragments: list[str] = []
+    for item in found:
+        path = urllib.parse.urlparse(item).path.lower()
+        if path.endswith((".ts", ".m4s")):
+            fragments.append(item)
+        else:
+            preferred.append(item)
+    return preferred + fragments
+
+
 def download_frameio_public_share_media(url: str, folder: Path) -> LocalMediaSource:
     """Best-effort fallback for third-party public review links that OAuth cannot access."""
     headers = {
@@ -1003,7 +1141,24 @@ def download_frameio_public_share_media(url: str, folder: Path) -> LocalMediaSou
         if media is not None:
             return media
 
-    raise RuntimeError('The public Frame.io page was reachable, but no downloadable/playable media source was exposed.')
+    # Modern Frame.io shares often inject the stream only after JavaScript hydrates
+    # the player. Render the public page in headless Chromium and collect the same
+    # media requests a normal browser can see.
+    browser_candidates = _frameio_browser_media_candidates(url)
+    for candidate in browser_candidates[:60]:
+        if candidate.startswith(url):
+            continue
+        media = _download_remote_candidate(candidate, url, folder)
+        if media is not None:
+            return media
+
+    if browser_candidates:
+        raise RuntimeError(
+            'The public Frame.io page loaded media requests in Chromium, but none of the exposed renditions could be downloaded or decoded.'
+        )
+    raise RuntimeError(
+        'The public Frame.io page was reachable, but neither the static page nor a headless browser exposed a downloadable/playable media source.'
+    )
 
 
 def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
