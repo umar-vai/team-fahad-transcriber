@@ -825,6 +825,7 @@ def handle_frameio_oauth_callback() -> None:
         st.error(str(exc))
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def resolve_frameio_url(url: str) -> str:
     """Resolve f.io short links to their canonical next.frame.io review URL."""
     value = str(url or "").strip()
@@ -978,6 +979,31 @@ def _download_remote_candidate(candidate: str, referer: str, folder: Path) -> Lo
     return LocalMediaSource(path=output, name='frameio_public_media.mp3', size=output.stat().st_size)
 
 
+def _frameio_get_cached_media_candidate(url: str) -> str | None:
+    cache = st.session_state.setdefault("_frameio_media_candidate_cache", {})
+    item = cache.get(url) or {}
+    expires_at = float(item.get("expires_at") or 0)
+    candidate = str(item.get("candidate") or "").strip()
+    if candidate and time.time() < expires_at:
+        return candidate
+    cache.pop(url, None)
+    return None
+
+
+def _frameio_set_cached_media_candidate(url: str, candidate: str) -> None:
+    value = str(candidate or "").strip()
+    if not value:
+        return
+    cache = st.session_state.setdefault("_frameio_media_candidate_cache", {})
+    # Keep this conservative because Frame.io media URLs are signed and expire.
+    cache[url] = {"candidate": value, "expires_at": time.time() + 8 * 60}
+
+
+def _frameio_drop_cached_media_candidate(url: str) -> None:
+    st.session_state.setdefault("_frameio_media_candidate_cache", {}).pop(url, None)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def _frameio_browser_media_candidates(url: str) -> list[str]:
     """Render a public Frame.io review page and collect browser-requested media URLs.
 
@@ -1045,6 +1071,20 @@ def _frameio_browser_media_candidates(url: str) -> list[str]:
             )
             page = context.new_page()
 
+            def route_handler(route) -> None:
+                try:
+                    if route.request.resource_type in {"image", "font", "stylesheet"}:
+                        route.abort()
+                    else:
+                        route.continue_()
+                except Exception:
+                    try:
+                        route.continue_()
+                    except Exception:
+                        pass
+
+            page.route("**/*", route_handler)
+
             def on_request(request) -> None:
                 request_url = request.url
                 path = urllib.parse.urlparse(request_url).path.lower()
@@ -1065,8 +1105,8 @@ def _frameio_browser_media_candidates(url: str) -> list[str]:
 
             page.on("request", on_request)
             page.on("response", on_response)
-            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-            page.wait_for_timeout(5_000)
+            page.goto(url, wait_until="domcontentloaded", timeout=25_000)
+            page.wait_for_timeout(900)
 
             try:
                 page.locator("video").first.evaluate(
@@ -1089,7 +1129,17 @@ def _frameio_browser_media_candidates(url: str) -> list[str]:
                 except Exception:
                     continue
 
-            page.wait_for_timeout(10_000)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                useful = False
+                for item in found:
+                    path = urllib.parse.urlparse(item).path.lower()
+                    if path.endswith((".m3u8", ".mpd", ".mp4", ".mov", ".m4a", ".mp3", ".wav", ".aac", ".webm", ".mkv")):
+                        useful = True
+                        break
+                if useful:
+                    break
+                page.wait_for_timeout(250)
 
             try:
                 dom_urls = page.eval_on_selector_all(
@@ -1117,7 +1167,14 @@ def _frameio_browser_media_candidates(url: str) -> list[str]:
 
 
 def download_frameio_public_share_media(url: str, folder: Path) -> LocalMediaSource:
-    """Best-effort fallback for third-party public review links that OAuth cannot access."""
+    """Resolve a public Frame.io review link, preferring cached/direct media before Chromium."""
+    cached_candidate = _frameio_get_cached_media_candidate(url)
+    if cached_candidate:
+        media = _download_remote_candidate(cached_candidate, url, folder)
+        if media is not None:
+            return media
+        _frameio_drop_cached_media_candidate(url)
+
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -1139,6 +1196,7 @@ def download_frameio_public_share_media(url: str, folder: Path) -> LocalMediaSou
             continue
         media = _download_remote_candidate(candidate, url, folder)
         if media is not None:
+            _frameio_set_cached_media_candidate(url, candidate)
             return media
 
     # Modern Frame.io shares often inject the stream only after JavaScript hydrates
@@ -1150,6 +1208,7 @@ def download_frameio_public_share_media(url: str, folder: Path) -> LocalMediaSou
             continue
         media = _download_remote_candidate(candidate, url, folder)
         if media is not None:
+            _frameio_set_cached_media_candidate(url, candidate)
             return media
 
     if browser_candidates:
