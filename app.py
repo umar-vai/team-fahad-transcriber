@@ -26,6 +26,7 @@ from google.genai import errors
 from moviepy import AudioFileClip, VideoFileClip
 import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
+import gdown
 
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
@@ -499,9 +500,89 @@ def normalize_link_media_to_mp3(source: Path, destination: Path) -> Path:
     return destination
 
 
+def google_drive_file_id(url: str) -> str | None:
+    """Extract a Google Drive file ID from common share/view/download URLs."""
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    host = (parsed.hostname or "").lower()
+    if host not in {"drive.google.com", "www.drive.google.com", "docs.google.com"}:
+        return None
+
+    match = re.search(r"/file/d/([a-zA-Z0-9_-]+)", parsed.path)
+    if match:
+        return match.group(1)
+
+    query_id = urllib.parse.parse_qs(parsed.query).get("id", [None])[0]
+    if query_id and re.fullmatch(r"[a-zA-Z0-9_-]+", query_id):
+        return query_id
+
+    return None
+
+
+def download_google_drive_media(url: str, folder: Path) -> LocalMediaSource:
+    """Download a shared Google Drive file without routing it through yt-dlp."""
+    file_id = google_drive_file_id(url)
+    if not file_id:
+        raise ValueError(
+            "This looks like a Google Drive link, but no file ID could be detected. "
+            "Please use the Drive file's Share link."
+        )
+
+    download_dir = folder / "google_drive_download"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    output = download_dir / "google_drive_source"
+
+    try:
+        result = gdown.download(
+            id=file_id,
+            output=str(output),
+            quiet=True,
+            fuzzy=True,
+            resume=False,
+        )
+    except UnicodeEncodeError as exc:
+        # Some hosted environments use an ASCII locale. Keep all downloader
+        # filenames/logging ASCII-only so Bangla/Unicode Drive titles cannot
+        # crash the request before the file is downloaded.
+        raise RuntimeError(
+            "Google Drive download hit a server text-encoding issue. "
+            "The app is configured to use an ASCII-safe temporary filename; "
+            "please retry once after the latest deployment finishes."
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not download the Google Drive file. "
+            f"Make sure the file is shared as 'Anyone with the link' or is otherwise publicly accessible. "
+            f"{str(exc)[:450]}"
+        ) from exc
+
+    downloaded = Path(result) if result else output
+    if not downloaded.exists() or downloaded.stat().st_size == 0:
+        raise RuntimeError(
+            "Google Drive did not return a downloadable file. "
+            "Check that the file is shared publicly and that the link points to a file, not a folder."
+        )
+
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    if downloaded.stat().st_size > max_bytes:
+        raise ValueError(f"Linked media is larger than the {MAX_UPLOAD_MB} MB limit.")
+
+    normalized = folder / "google_drive_media.mp3"
+    normalize_link_media_to_mp3(downloaded, normalized)
+
+    return LocalMediaSource(
+        path=normalized,
+        name="google_drive_media.mp3",
+        size=normalized.stat().st_size,
+    )
+
+
 def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
     """Download one public media URL with yt-dlp, then normalize it to MP3."""
     url = validate_public_media_url(url)
+
+    if google_drive_file_id(url):
+        return download_google_drive_media(url, folder)
+
     download_dir = folder / "link_download"
     download_dir.mkdir(parents=True, exist_ok=True)
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
@@ -525,6 +606,15 @@ def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
         "restrictfilenames": True,
         "progress_hooks": [progress_hook],
         "cachedir": False,
+        "logger": type(
+            "QuietUnicodeLogger",
+            (),
+            {
+                "debug": staticmethod(lambda msg: None),
+                "warning": staticmethod(lambda msg: None),
+                "error": staticmethod(lambda msg: None),
+            },
+        )(),
     }
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
@@ -1338,7 +1428,7 @@ with source_tabs[1]:
         placeholder="https://youtube.com/watch?v=… or https://example.com/video.mp4",
         key="media_link_input",
     )
-    st.caption("Direct MP4/MP3/M4A links and many sites supported by yt-dlp can be used. Private/login-only links may not work.")
+    st.caption("Google Drive file links, direct MP4/MP3/M4A links, and many sites supported by yt-dlp can be used. Private/login-only links may not work.")
 
 if uploaded is None and not media_link.strip():
     st.markdown(
