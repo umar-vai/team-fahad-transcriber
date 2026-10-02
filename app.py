@@ -34,6 +34,7 @@ TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
 MAX_UPLOAD_MB = 500
 MAX_ANALYSIS_CHARS = 120_000
+MAX_BULK_URLS = 50
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv"}
 AUDIO_MIME_TYPES = {
@@ -951,6 +952,78 @@ def make_zip_bytes(base_name: str, result: dict[str, Any], extras: dict[str, str
     return memory.getvalue()
 
 
+def sanitize_bulk_output_name(raw_name: str, index: int) -> str:
+    """Create a safe, human-readable VTT basename from the user's custom name."""
+    name = str(raw_name or "").strip()
+    if name.lower().endswith(".vtt"):
+        name = name[:-4]
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    return (name[:120].strip(" .") or f"Video {index:02d}")
+
+
+def unique_bulk_output_name(raw_name: str, index: int, used: set[str]) -> str:
+    """Keep ZIP filenames unique while preserving the requested custom name."""
+    base = sanitize_bulk_output_name(raw_name, index)
+    candidate = base
+    counter = 2
+    while candidate.lower() in used:
+        candidate = f"{base} ({counter})"
+        counter += 1
+    used.add(candidate.lower())
+    return candidate
+
+
+def make_bulk_vtt_zip_bytes(items: list[dict[str, Any]]) -> bytes:
+    """Create one ZIP containing one VTT file per successful URL."""
+    memory = io.BytesIO()
+    with zipfile.ZipFile(memory, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in items:
+            filename = str(item.get("filename") or "Video").strip()
+            vtt = str(item.get("vtt") or "")
+            if vtt:
+                zf.writestr(f"{filename}.vtt", vtt)
+    return memory.getvalue()
+
+
+def init_bulk_url_state() -> None:
+    """Initialize stable IDs for dynamically added URL/name rows."""
+    if "bulk_url_rows" not in st.session_state:
+        st.session_state["bulk_url_rows"] = [1]
+    if "bulk_url_next_id" not in st.session_state:
+        st.session_state["bulk_url_next_id"] = 2
+
+
+def add_bulk_url_row() -> None:
+    rows = st.session_state.setdefault("bulk_url_rows", [1])
+    if len(rows) >= MAX_BULK_URLS:
+        return
+    next_id = int(st.session_state.get("bulk_url_next_id", 2))
+    rows.append(next_id)
+    st.session_state["bulk_url_next_id"] = next_id + 1
+
+
+def remove_bulk_url_row(row_id: int) -> None:
+    rows = st.session_state.setdefault("bulk_url_rows", [1])
+    if len(rows) <= 1:
+        return
+    if row_id in rows:
+        rows.remove(row_id)
+    st.session_state.pop(f"bulk_url_{row_id}", None)
+    st.session_state.pop(f"bulk_name_{row_id}", None)
+
+
+def clear_bulk_url_rows() -> None:
+    for row_id in list(st.session_state.get("bulk_url_rows", [])):
+        st.session_state.pop(f"bulk_url_{row_id}", None)
+        st.session_state.pop(f"bulk_name_{row_id}", None)
+    st.session_state["bulk_url_rows"] = [1]
+    st.session_state["bulk_url_next_id"] = 2
+    st.session_state.pop("bulk_results", None)
+    st.session_state.pop("bulk_vtt_zip", None)
+    st.session_state.pop("bulk_zip_name", None)
+
+
 def reset_outputs() -> None:
     for key in [
         "result",
@@ -963,6 +1036,9 @@ def reset_outputs() -> None:
         "translation_output",
         "content_pack_output",
         "source_name",
+        "bulk_results",
+        "bulk_vtt_zip",
+        "bulk_zip_name",
     ]:
         st.session_state.pop(key, None)
     st.session_state["workspace_instance"] = st.session_state.get("workspace_instance", 0) + 1
@@ -1268,6 +1344,27 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
   border-radius: 10px !important;
 }}
 
+/* Bulk URL input */
+.bulk-url-head {{
+  display:grid;
+  grid-template-columns:minmax(0, 2fr) minmax(180px, 1fr);
+  gap:1rem;
+  padding:.75rem .9rem .35rem;
+  color:var(--tf-text);
+}}
+.bulk-url-head div {{
+  display:flex;
+  flex-direction:column;
+  gap:.15rem;
+}}
+.bulk-url-head span {{
+  color:var(--tf-muted);
+  font-size:.72rem;
+}}
+@media (max-width: 720px) {{
+  .bulk-url-head {{display:none;}}
+}}
+
 /* Status / alerts */
 [data-testid="stAlert"] {{border-radius:14px !important; border:1px solid var(--tf-border) !important;}}
 [data-testid="stStatusWidget"] {{border-radius:16px !important; border:1px solid var(--tf-border) !important; background:var(--tf-panel) !important;}}
@@ -1328,7 +1425,7 @@ st.markdown(
 <div class="hero">
   <div class="hero-top"><span class="brand-dot"></span><span class="brand-chip">Team Fahad AI Studio</span></div>
   <h1>Turn media into usable content.</h1>
-  <p>Upload once. Get a polished transcript, speaker-aware subtitles, summaries, translations and creator-ready deliverables from one clean workspace.</p>
+  <p>Upload a file or paste multiple media links. Get polished transcripts, speaker-aware subtitles, VTT files and client-ready deliverables from one clean workspace.</p>
   <div class="hero-badges">
     <span class="hero-badge">Audio + Video</span>
     <span class="hero-badge">Speaker Detection</span>
@@ -1406,10 +1503,16 @@ st.markdown("### Start with your media")
 
 vocab = [item.strip() for item in re.split(r"[,\n]", custom_vocab_text) if item.strip()]
 
-source_tabs = st.tabs(["Upload file", "Paste link"], key="source_input_tabs")
+init_bulk_url_state()
+
+source_tabs = st.tabs(
+    ["Upload file", "Paste link"],
+    key="source_input_tabs",
+    on_change="rerun",
+)
 
 uploaded = None
-media_link = ""
+bulk_link_rows: list[dict[str, str | int]] = []
 
 with source_tabs[0]:
     st.caption("Upload an audio or video file. Your selected transcription mode and language settings are applied automatically.")
@@ -1422,24 +1525,262 @@ with source_tabs[0]:
     )
 
 with source_tabs[1]:
-    st.caption("Paste a public media URL. The app downloads it temporarily, extracts audio, transcribes it, and removes the temporary files.")
-    media_link = st.text_input(
-        "Media URL",
-        placeholder="https://youtube.com/watch?v=… or https://example.com/video.mp4",
-        key="media_link_input",
+    st.caption(
+        "Paste one or more public media URLs. Each URL can have its own custom name, "
+        "and all successful VTT files can be downloaded together as one ZIP."
     )
-    st.caption("Google Drive file links, direct MP4/MP3/M4A links, and many sites supported by yt-dlp can be used. Private/login-only links may not work.")
 
-if uploaded is None and not media_link.strip():
     st.markdown(
         """
-        <div class="empty-card">
-          <strong>Ready when you are.</strong><br>
-          Upload a file or paste a media link to unlock transcription, speaker subtitles, AI summaries, translation and client-ready downloads.
+        <div class="bulk-url-head">
+          <div><strong>Media URL</strong><span>Public Google Drive, direct media, YouTube and other supported links</span></div>
+          <div><strong>Custom name</strong><span>This becomes the VTT filename</span></div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    for position, row_id in enumerate(st.session_state["bulk_url_rows"], start=1):
+        url_key = f"bulk_url_{row_id}"
+        name_key = f"bulk_name_{row_id}"
+        if name_key not in st.session_state:
+            st.session_state[name_key] = f"Video {position:02d}"
+
+        url_col, name_col, remove_col = st.columns(
+            [5.2, 2.5, 0.55],
+            vertical_alignment="bottom",
+            gap="small",
+        )
+        with url_col:
+            url_value = st.text_input(
+                f"Media URL {position}",
+                placeholder="https://drive.google.com/file/d/... or https://youtube.com/watch?v=...",
+                key=url_key,
+                label_visibility="collapsed",
+            )
+        with name_col:
+            name_value = st.text_input(
+                f"Custom name {position}",
+                placeholder=f"Video {position:02d}",
+                key=name_key,
+                label_visibility="collapsed",
+                max_chars=120,
+            )
+        with remove_col:
+            if st.button(
+                "×",
+                key=f"remove_bulk_url_{row_id}",
+                help="Remove this URL",
+                disabled=len(st.session_state["bulk_url_rows"]) <= 1,
+            ):
+                remove_bulk_url_row(row_id)
+                st.rerun()
+
+        bulk_link_rows.append(
+            {
+                "id": row_id,
+                "url": str(url_value or "").strip(),
+                "name": str(name_value or "").strip(),
+            }
+        )
+
+    add_col, clear_col, count_col = st.columns([1.35, 1.0, 1.65], vertical_alignment="center")
+    with add_col:
+        st.button(
+            "Add More URL",
+            icon=":material/add_link:",
+            on_click=add_bulk_url_row,
+            disabled=len(st.session_state["bulk_url_rows"]) >= MAX_BULK_URLS,
+            width="stretch",
+        )
+    with clear_col:
+        st.button(
+            "Clear URLs",
+            on_click=clear_bulk_url_rows,
+            width="stretch",
+        )
+    with count_col:
+        count_text = f"{len(st.session_state['bulk_url_rows'])} URL slot"
+        if len(st.session_state["bulk_url_rows"]) != 1:
+            count_text += "s"
+        st.caption(f"{count_text} • up to {MAX_BULK_URLS} per batch")
+
+    active_rows = [row for row in bulk_link_rows if row["url"]]
+    if active_rows:
+        st.info(
+            "Bulk URL processing always uses Detailed subtitles + speakers so every successful item "
+            "has reliable timestamped VTT output. Processing runs sequentially to reduce API spikes."
+        )
+
+        button_label = (
+            "Transcribe URL"
+            if len(active_rows) == 1
+            else f"Transcribe {len(active_rows)} URLs"
+        )
+
+        if st.button(
+            button_label,
+            type="primary",
+            disabled=not bool(transcription_api_keys),
+            use_container_width=True,
+            key="transcribe_bulk_links",
+        ):
+            reset_outputs()
+
+            prepared_items: list[dict[str, str | int]] = []
+            used_names: set[str] = set()
+            validation_errors: list[str] = []
+
+            for position, row in enumerate(active_rows, start=1):
+                url = str(row["url"])
+                custom_name = str(row["name"])
+                try:
+                    validate_public_media_url(url)
+                except Exception as exc:
+                    validation_errors.append(f"{position}. {exc}")
+                    continue
+
+                filename = unique_bulk_output_name(custom_name, position, used_names)
+                prepared_items.append(
+                    {
+                        "position": position,
+                        "url": url,
+                        "filename": filename,
+                    }
+                )
+
+            if validation_errors:
+                for message in validation_errors:
+                    st.error(message)
+
+            if prepared_items:
+                batch_results: list[dict[str, Any]] = []
+                progress = st.progress(
+                    0,
+                    text=f"Preparing {len(prepared_items)} URL{'s' if len(prepared_items) != 1 else ''}…",
+                )
+
+                with st.status(
+                    f"Processing {len(prepared_items)} URL{'s' if len(prepared_items) != 1 else ''}…",
+                    expanded=True,
+                    type="step",
+                ) as batch_status:
+                    for completed_index, item in enumerate(prepared_items, start=1):
+                        filename = str(item["filename"])
+                        batch_status.write(
+                            f"Processing {completed_index}/{len(prepared_items)} — {filename}"
+                        )
+
+                        try:
+                            with tempfile.TemporaryDirectory(prefix="team_fahad_bulk_") as link_dir:
+                                folder = Path(link_dir)
+                                linked_source = download_media_from_link(str(item["url"]), folder)
+                                result = transcribe_media(
+                                    uploaded=linked_source,
+                                    api_keys=transcription_api_keys,
+                                    language_codes=LANGUAGES[language_name],
+                                    mode="Detailed subtitles + speakers",
+                                    custom_vocabulary=[],
+                                )
+                                vtt = str(result.get("vtt") or "")
+                                if not vtt:
+                                    raise RuntimeError(
+                                        "Transcription completed but no timestamped VTT was returned."
+                                    )
+
+                                batch_results.append(
+                                    {
+                                        "filename": filename,
+                                        "vtt": vtt,
+                                        "duration": result.get("duration"),
+                                        "status": "Completed",
+                                    }
+                                )
+                                batch_status.write(
+                                    f"Completed — {filename}"
+                                )
+                        except errors.APIError as exc:
+                            code = getattr(exc, "code", "API")
+                            message = getattr(exc, "message", str(exc))
+                            batch_results.append(
+                                {
+                                    "filename": filename,
+                                    "status": "Failed",
+                                    "error": f"Gemini request failed ({code}): {message}",
+                                }
+                            )
+                            batch_status.write(f"Failed — {filename}: Gemini request error")
+                        except Exception as exc:
+                            batch_results.append(
+                                {
+                                    "filename": filename,
+                                    "status": "Failed",
+                                    "error": str(exc),
+                                }
+                            )
+                            batch_status.write(f"Failed — {filename}: {str(exc)[:220]}")
+
+                        progress_value = completed_index / len(prepared_items)
+                        progress.progress(
+                            progress_value,
+                            text=f"Processed {completed_index} of {len(prepared_items)}",
+                        )
+
+                    successful = [item for item in batch_results if item.get("status") == "Completed"]
+                    failed = [item for item in batch_results if item.get("status") == "Failed"]
+
+                    st.session_state["bulk_results"] = batch_results
+                    if successful:
+                        st.session_state["bulk_vtt_zip"] = make_bulk_vtt_zip_bytes(successful)
+                        st.session_state["bulk_zip_name"] = "Team-Fahad-Bulk-VTT.zip"
+
+                    if failed:
+                        batch_status.update(
+                            label=f"Batch finished • {len(successful)} completed • {len(failed)} failed",
+                            state="error" if not successful else "complete",
+                            expanded=False,
+                        )
+                    else:
+                        batch_status.update(
+                            label=f"Batch finished • {len(successful)} completed",
+                            state="complete",
+                            expanded=False,
+                        )
+
+                progress.progress(
+                    1.0,
+                    text=f"Finished • {len(successful)} of {len(prepared_items)} completed",
+                )
+
+    if st.session_state.get("bulk_results"):
+        results = st.session_state["bulk_results"]
+        completed_count = sum(item.get("status") == "Completed" for item in results)
+        failed_count = len(results) - completed_count
+
+        st.markdown("### Bulk transcription results")
+        summary_cols = st.columns(2)
+        summary_cols[0].metric("Completed", completed_count)
+        summary_cols[1].metric("Failed", failed_count)
+
+        for index, item in enumerate(results, start=1):
+            if item.get("status") == "Completed":
+                duration = item.get("duration")
+                duration_text = f" • {format_clock(float(duration))}" if duration else ""
+                st.success(f"{item.get('filename')}.vtt — Completed{duration_text}")
+            else:
+                st.error(f"{item.get('filename')}.vtt — Failed: {item.get('error', 'Unknown error')}")
+
+        if st.session_state.get("bulk_vtt_zip"):
+            st.download_button(
+                "Download all VTT files as ZIP",
+                data=st.session_state["bulk_vtt_zip"],
+                file_name=st.session_state.get("bulk_zip_name", "Team-Fahad-Bulk-VTT.zip"),
+                mime="application/zip",
+                type="primary",
+                use_container_width=True,
+                on_click="ignore",
+                key="download_bulk_vtt_zip",
+            )
 
 if uploaded is not None:
     size_mb = getattr(uploaded, "size", 0) / (1024 * 1024)
@@ -1592,6 +1933,20 @@ if result:
 
         docx_data = make_docx_bytes(APP_TITLE, sections)
         zip_data = make_zip_bytes(base_name, result, extras)
+
+        if st.session_state.get("bulk_vtt_zip"):
+            st.markdown("### Bulk URL VTT pack")
+            st.caption("The ZIP contains one VTT file per successful URL, using each URL's custom name.")
+            st.download_button(
+                "Download bulk VTT ZIP",
+                data=st.session_state["bulk_vtt_zip"],
+                file_name=st.session_state.get("bulk_zip_name", "Team-Fahad-Bulk-VTT.zip"),
+                mime="application/zip",
+                type="primary",
+                width="stretch",
+                on_click="ignore",
+                key="download_bulk_vtt_zip_workspace",
+            )
 
         st.write("Download a polished document or one ZIP containing every output currently generated.")
         dl1, dl2 = st.columns(2)
