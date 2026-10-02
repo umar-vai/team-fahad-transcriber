@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/frameio_oauth_patch.py'
+      - '.github/workflows/frameio-oauth-patch.yml'
 
 permissions:
   contents: write
