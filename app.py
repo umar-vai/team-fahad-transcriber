@@ -1236,7 +1236,11 @@ def render_access_gate() -> bool:
     return False
 
 
-st.set_page_config(page_title=APP_TITLE, page_icon="🎙️", layout="wide")
+batch_page_mode = bool(st.session_state.pop("_team_fahad_batch_page", False))
+PAGE_TITLE = "Batch Transcription · Team Fahad" if batch_page_mode else APP_TITLE
+# TEAM_FAHAD_SINGLE_BATCH_REFACTOR_V1
+
+st.set_page_config(page_title=PAGE_TITLE, page_icon="🎙️", layout="wide")
 
 
 @st.fragment(key="ai_client_tools")
@@ -1598,8 +1602,8 @@ st.markdown(
     f"""
 <div class="hero">
   <div class="hero-top"><span class="brand-dot"></span><span class="brand-chip">Team Fahad AI Studio</span></div>
-  <h1>Turn media into usable content.</h1>
-  <p>Upload a file or paste multiple media links. Get polished transcripts, speaker-aware subtitles, VTT files and client-ready deliverables from one clean workspace.</p>
+  <h1>{"Batch URL transcription." if batch_page_mode else "Turn media into usable content."}</h1>
+  <p>{"Paste multiple media links, assign custom VTT names, process them sequentially, and download all successful VTT files as one ZIP." if batch_page_mode else "Upload a file or paste one media link. Choose Smart Clean, Detailed Subtitles + Speakers, or Exact Verbatim from the same sidebar settings."}</p>
   <div class="hero-badges">
     <span class="hero-badge">Audio + Video</span>
     <span class="hero-badge">Speaker Detection</span>
@@ -1679,26 +1683,11 @@ vocab = [item.strip() for item in re.split(r"[,\n]", custom_vocab_text) if item.
 
 init_bulk_url_state()
 
-source_tabs = st.tabs(
-    ["Upload file", "Paste link"],
-    key="source_input_tabs",
-    on_change="rerun",
-)
-
 uploaded = None
-bulk_link_rows: list[dict[str, str | int]] = []
 
-with source_tabs[0]:
-    st.caption("Upload an audio or video file. Your selected transcription mode and language settings are applied automatically.")
-    uploaded = st.file_uploader(
-        "Upload audio or video",
-        type=["mp3", "wav", "m4a", "aac", "ogg", "flac", "mp4", "mov", "mkv"],
-        help=f"Maximum local upload size: {MAX_UPLOAD_MB} MB. Linked source downloads can be up to {MAX_LINK_SOURCE_MB // 1024} GB; Gemini receives extracted audio chunks up to {MAX_GEMINI_FILE_MB} MB.",
-        key="media_file_uploader",
-        max_upload_size=MAX_UPLOAD_MB,
-    )
-
-with source_tabs[1]:
+if batch_page_mode:
+    st.markdown("<div class='section-label'>01 · Batch transcription</div>", unsafe_allow_html=True)
+    st.markdown("### Multiple URL transcription")
     st.caption(
         "Paste one or more public media URLs. Each URL can have its own custom name, "
         "and all successful VTT files can be downloaded together as one ZIP."
@@ -1962,6 +1951,89 @@ with source_tabs[1]:
                 on_click="ignore",
                 key="download_bulk_vtt_zip",
             )
+    st.stop()
+
+source_tabs = st.tabs(
+    ["Upload file", "Paste link"],
+    key="source_input_tabs",
+    on_change="rerun",
+)
+
+with source_tabs[0]:
+    st.caption("Upload an audio or video file. Your selected transcription mode and language settings are applied automatically.")
+    uploaded = st.file_uploader(
+        "Upload audio or video",
+        type=["mp3", "wav", "m4a", "aac", "ogg", "flac", "mp4", "mov", "mkv"],
+        help=f"Maximum local upload size: {MAX_UPLOAD_MB} MB.",
+        key="media_file_uploader",
+        max_upload_size=MAX_UPLOAD_MB,
+    )
+
+with source_tabs[1]:
+    st.caption("Paste one public media URL. It uses the same Spoken language, Output mode, and custom vocabulary settings as file upload.")
+    single_media_link = st.text_input(
+        "Media URL",
+        placeholder="https://drive.google.com/file/d/... or https://youtube.com/watch?v=...",
+        type="url",
+        key="single_media_link",
+    )
+    st.caption(
+        "Supports public Google Drive file links, direct media links, YouTube and other supported sources. "
+        "Google Drive folder links are not single media files."
+    )
+
+    if single_media_link.strip():
+        c1, c2 = st.columns([0.72, 0.28])
+        c1.metric("Source", "Media link")
+        c2.metric(
+            "Mode",
+            "Detailed" if mode.startswith("Detailed") else ("Verbatim" if mode.startswith("Exact") else "Smart"),
+        )
+        if mode == "Detailed subtitles + speakers":
+            st.info("Detailed mode creates speaker labels plus SRT/VTT. Long linked recordings are automatically chunked and merged.")
+
+        if st.button(
+            "Transcribe link",
+            type="primary",
+            disabled=not bool(transcription_api_keys),
+            use_container_width=True,
+            key="transcribe_single_link",
+        ):
+            reset_outputs()
+            st.session_state["source_kind"] = "link"
+            status = st.status("Preparing linked media…", expanded=True)
+            try:
+                validate_public_media_url(single_media_link)
+                with tempfile.TemporaryDirectory(prefix="team_fahad_single_link_") as link_dir:
+                    folder = Path(link_dir)
+                    status.write("Downloading media securely…")
+                    linked_source = download_media_from_link(single_media_link, folder)
+                    status.write("Running speech-to-text…")
+                    if mode == "Detailed subtitles + speakers":
+                        result = transcribe_linked_media_with_chunks(
+                            uploaded=linked_source,
+                            api_keys=transcription_api_keys,
+                            language_codes=LANGUAGES[language_name],
+                        )
+                    else:
+                        result = transcribe_media(
+                            uploaded=linked_source,
+                            api_keys=transcription_api_keys,
+                            language_codes=LANGUAGES[language_name],
+                            mode=mode,
+                            custom_vocabulary=vocab,
+                        )
+                    st.session_state.result = result
+                    st.session_state.source_name = linked_source.name
+                status.update(label="Transcription complete", state="complete", expanded=False)
+            except errors.APIError as exc:
+                status.update(label="Transcription failed", state="error")
+                code = getattr(exc, "code", "API")
+                message = getattr(exc, "message", str(exc))
+                st.error(f"Gemini request failed ({code}): {message}")
+            except Exception as exc:
+                status.update(label="Transcription failed", state="error")
+                st.error(str(exc))
 
 if uploaded is not None:
     size_mb = getattr(uploaded, "size", 0) / (1024 * 1024)
@@ -2082,20 +2154,6 @@ if result:
 
         docx_data = make_docx_bytes(APP_TITLE, sections)
         zip_data = make_zip_bytes(base_name, result, extras)
-
-        if st.session_state.get("bulk_vtt_zip"):
-            st.markdown("### Bulk URL VTT pack")
-            st.caption("The ZIP contains one VTT file per successful URL, using each URL's custom name.")
-            st.download_button(
-                "Download bulk VTT ZIP",
-                data=st.session_state["bulk_vtt_zip"],
-                file_name=st.session_state.get("bulk_zip_name", "Team-Fahad-Bulk-VTT.zip"),
-                mime="application/zip",
-                type="primary",
-                width="stretch",
-                on_click="ignore",
-                key="download_bulk_vtt_zip_workspace",
-            )
 
         st.write("Download a polished document or one ZIP containing every output currently generated.")
         dl1, dl2 = st.columns(2)
