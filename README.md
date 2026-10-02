@@ -149,3 +149,9 @@ Start with a 1-3 minute MP3 or MP4.
 ## Production note
 
 This is a strong MVP/client-demo version. Before selling subscriptions at scale, add real authentication, a database, per-user usage metering, payment processing, and server-side rate limiting.
+
+## Media links
+
+The single-file transcriber also accepts a public media URL. It temporarily downloads the linked media, normalizes it to a Gemini-friendly MP3, runs the normal transcription pipeline, and removes the temporary files afterward.
+
+Direct MP4/MP3/M4A links and many sites supported by yt-dlp can work. Private, login-only, or platform-protected media may require additional access and may not be downloadable from the hosted app.
