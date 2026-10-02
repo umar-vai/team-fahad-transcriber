@@ -1,3 +1,4 @@
+# Trigger hotfix workflow.
 from pathlib import Path
 
 APP = Path('app.py')
@@ -35,8 +36,6 @@ s = s.replace(
 '''        is_frameio_link = bool(frameio_share_ids(single_media_link))\n        frameio_ready_for_link = (not is_frameio_link) or verify_frameio_connection()\n        if is_frameio_link and not frameio_ready_for_link:\n            if frameio_oauth_config():\n                st.warning("This is a Frame.io share link. Connect your Adobe/Frame.io account before transcribing it.")\n                st.link_button(\n                    "Connect Frame.io & return to this link",\n                    frameio_authorization_url(pending_url=single_media_link, return_to_batch=False),\n                    type="primary",\n                    use_container_width=True,\n                )\n            else:\n                st.error(\n                    "Frame.io OAuth credentials are missing. Add FRAMEIO_CLIENT_ID, "\n                    "FRAMEIO_CLIENT_SECRET and FRAMEIO_REDIRECT_URI to Streamlit Secrets."\n                )\n        c1, c2 = st.columns([0.72, 0.28])\n''',
 1)
 
-button_old = '''            disabled=not bool(transcription_api_keys),\n            use_container_width=True,\n            key="transcribe_single_link",\n'''
-button_new = '''            disabled=(not bool(transcription_api_keys)) or (bool(frameio_share_ids(single_media_link)) and not verify_frameio_connection()),\n            use_container_width=True,\n            key="transcribe_single_link",\n'''
 pos = s.find('key="transcribe_single_link"')
 if pos != -1:
     before = s[:pos]
