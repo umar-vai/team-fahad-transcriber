@@ -775,10 +775,11 @@ def verify_frameio_connection() -> bool:
         if response.status_code == 200:
             st.session_state["_frameio_verified_token"] = token_key
             return True
-    except requests.RequestException:
-        return False
-    st.session_state.pop("frameio_oauth_tokens", None)
-    st.session_state.pop("_frameio_verified_token", None)
+        st.session_state["frameio_verify_error"] = (
+            f"Frame.io /v4/me returned HTTP {response.status_code}: {response.text[:300]}"
+        )
+    except requests.RequestException as exc:
+        st.session_state["frameio_verify_error"] = f"Frame.io verification request failed: {exc}"
     return False
 
 
@@ -2038,7 +2039,7 @@ with st.sidebar:
     )
 
     if frameio_oauth_config():
-        frameio_ready = verify_frameio_connection()
+        frameio_ready = bool(get_frameio_access_token())
         if frameio_ready:
             st.success("Frame.io connected")
         else:
@@ -2371,7 +2372,7 @@ with source_tabs[1]:
 
     if single_media_link.strip():
         is_frameio_link = bool(frameio_share_ids(single_media_link))
-        frameio_ready_for_link = (not is_frameio_link) or verify_frameio_connection()
+        frameio_ready_for_link = (not is_frameio_link) or bool(get_frameio_access_token())
         if is_frameio_link and not frameio_ready_for_link:
             if frameio_oauth_config():
                 st.warning("This is a Frame.io share link. Connect your Adobe/Frame.io account before transcribing it.")
@@ -2398,7 +2399,7 @@ with source_tabs[1]:
         if st.button(
             "Transcribe link",
             type="primary",
-            disabled=(not bool(transcription_api_keys)) or (bool(frameio_share_ids(single_media_link)) and not verify_frameio_connection()),
+            disabled=(not bool(transcription_api_keys)) or (bool(frameio_share_ids(single_media_link)) and not bool(get_frameio_access_token())),
             use_container_width=True,
             key="transcribe_single_link",
         ):
