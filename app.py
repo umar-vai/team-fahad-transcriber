@@ -841,11 +841,11 @@ def frameio_share_ids(url: str) -> tuple[str, str] | None:
 
 
 def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
-    """Resolve a Frame.io V4 share/view URL with the official API and download a rendition."""
+    """Resolve a Frame.io V4 share/view URL using share-aware lookup first."""
     ids = frameio_share_ids(url)
     if not ids:
         raise ValueError("This does not look like a supported Frame.io share/view link.")
-    _, file_id = ids
+    share_id, view_id = ids
 
     token = get_frameio_access_token()
     if not token:
@@ -869,53 +869,90 @@ def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
         )
         if accounts_response.status_code in {401, 403}:
             st.session_state.pop("frameio_oauth_tokens", None)
-            st.session_state.pop("_frameio_verified_token", None)
             raise RuntimeError(
-                "Frame.io authorization is not valid for this account. Connect Frame.io again, "
-                "sign in with the Adobe account that can access this asset, then retry."
+                "Frame.io authorization is not valid for this account. Connect Frame.io again and retry."
             )
         accounts_response.raise_for_status()
         accounts = accounts_response.json().get("data", [])
     except requests.RequestException as exc:
-        st.session_state.pop("frameio_oauth_tokens", None)
-        st.session_state.pop("_frameio_verified_token", None)
-        raise RuntimeError(
-            "Frame.io authentication failed. Reconnect Frame.io from the app and try again."
-        ) from exc
+        raise RuntimeError("Could not authenticate with Frame.io.") from exc
     except ValueError as exc:
         raise RuntimeError("Frame.io returned an invalid accounts response.") from exc
 
     if not accounts:
-        raise RuntimeError("The configured Frame.io token has no accessible accounts.")
+        raise RuntimeError("The connected Adobe account has no accessible Frame.io accounts.")
 
-    file_data = None
     include = "media_links.efficient,media_links.high_quality,media_links.original"
+    file_data = None
+
+    # First resolve through the Share API. A /share/{share_id}/view/{view_id}
+    # URL is not guaranteed to be fetchable through the direct file endpoint.
     for account in accounts:
         account_id = str(account.get("id") or "").strip()
         if not account_id:
             continue
         try:
             response = requests.get(
-                f"https://api.frame.io/v4/accounts/{account_id}/files/{file_id}",
+                f"https://api.frame.io/v4/accounts/{account_id}/shares/{share_id}/assets",
                 headers=headers,
-                params={"include": include},
+                params={"include": include, "page_size": 100},
                 timeout=30,
             )
         except requests.RequestException:
             continue
 
-        if response.status_code == 200:
+        if response.status_code != 200:
+            continue
+        try:
+            assets = response.json().get("data", []) or []
+        except ValueError:
+            continue
+
+        exact = next((item for item in assets if str(item.get("id") or "") == view_id), None)
+        if exact:
+            file_data = exact
+            break
+
+        playable = next(
+            (
+                item for item in assets
+                if str(item.get("type") or "").lower() == "file"
+                and str(item.get("media_type") or "").lower().startswith(("audio/", "video/"))
+            ),
+            None,
+        )
+        if playable:
+            file_data = playable
+            break
+
+    # Fallback to direct file lookup for links that do use a real file id.
+    if not file_data:
+        for account in accounts:
+            account_id = str(account.get("id") or "").strip()
+            if not account_id:
+                continue
             try:
-                file_data = response.json().get("data") or {}
-            except ValueError:
-                file_data = None
-            if file_data:
-                break
+                response = requests.get(
+                    f"https://api.frame.io/v4/accounts/{account_id}/files/{view_id}",
+                    headers=headers,
+                    params={"include": include},
+                    timeout=30,
+                )
+            except requests.RequestException:
+                continue
+            if response.status_code == 200:
+                try:
+                    file_data = response.json().get("data") or {}
+                except ValueError:
+                    file_data = None
+                if file_data:
+                    break
 
     if not file_data:
         raise RuntimeError(
-            "The Frame.io link is valid, but the configured Frame.io token cannot access this asset. "
-            "Use a token from an account that has access to the shared file."
+            "This Frame.io share is visible in the browser, but the connected Adobe account cannot access "
+            "it through the Frame.io API. If this is a public review link from another workspace, the API "
+            "still requires the connected account to have access to that share/workspace."
         )
 
     media_links = file_data.get("media_links") or {}
@@ -928,8 +965,8 @@ def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
 
     if not rendition:
         raise RuntimeError(
-            "Frame.io did not return a downloadable rendition for this asset. "
-            "The file may still be processing, or downloads may be restricted."
+            "Frame.io resolved the shared asset, but did not return a downloadable media rendition. "
+            "Downloads may be disabled for this share or the asset may still be processing."
         )
 
     download_dir = folder / "frameio_download"
