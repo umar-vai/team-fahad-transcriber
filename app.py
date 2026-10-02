@@ -744,11 +744,7 @@ def refresh_frameio_access_token(refresh_token: str) -> dict[str, Any]:
 
 
 def get_frameio_access_token() -> str | None:
-    # Backward-compatible fixed token support, if explicitly configured.
-    fixed = str(secret_or_env("FRAMEIO_ACCESS_TOKEN") or "").strip()
-    if fixed:
-        return fixed
-
+    # OAuth Web App is the source of truth; do not silently use an old manual token.
     bundle = st.session_state.get("frameio_oauth_tokens") or {}
     token = str(bundle.get("access_token") or "").strip()
     expires_at = float(bundle.get("expires_at") or 0)
@@ -761,6 +757,29 @@ def get_frameio_access_token() -> str | None:
         st.session_state["frameio_oauth_tokens"] = refreshed
         return str(refreshed["access_token"])
     return None
+
+
+def verify_frameio_connection() -> bool:
+    token = get_frameio_access_token()
+    if not token:
+        return False
+    token_key = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    if st.session_state.get("_frameio_verified_token") == token_key:
+        return True
+    try:
+        response = requests.get(
+            "https://api.frame.io/v4/me",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20,
+        )
+        if response.status_code == 200:
+            st.session_state["_frameio_verified_token"] = token_key
+            return True
+    except requests.RequestException:
+        return False
+    st.session_state.pop("frameio_oauth_tokens", None)
+    st.session_state.pop("_frameio_verified_token", None)
+    return False
 
 
 def handle_frameio_oauth_callback() -> None:
@@ -847,11 +866,20 @@ def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
             params={"page_size": 100},
             timeout=30,
         )
+        if accounts_response.status_code in {401, 403}:
+            st.session_state.pop("frameio_oauth_tokens", None)
+            st.session_state.pop("_frameio_verified_token", None)
+            raise RuntimeError(
+                "Frame.io authorization is not valid for this account. Connect Frame.io again, "
+                "sign in with the Adobe account that can access this asset, then retry."
+            )
         accounts_response.raise_for_status()
         accounts = accounts_response.json().get("data", [])
     except requests.RequestException as exc:
+        st.session_state.pop("frameio_oauth_tokens", None)
+        st.session_state.pop("_frameio_verified_token", None)
         raise RuntimeError(
-            "Could not authenticate with Frame.io. Check FRAMEIO_ACCESS_TOKEN in Streamlit Secrets."
+            "Frame.io authentication failed. Reconnect Frame.io from the app and try again."
         ) from exc
     except ValueError as exc:
         raise RuntimeError("Frame.io returned an invalid accounts response.") from exc
@@ -2010,8 +2038,8 @@ with st.sidebar:
     )
 
     if frameio_oauth_config():
-        frameio_token = get_frameio_access_token()
-        if frameio_token:
+        frameio_ready = verify_frameio_connection()
+        if frameio_ready:
             st.success("Frame.io connected")
         else:
             try:
@@ -2342,9 +2370,11 @@ with source_tabs[1]:
     )
 
     if single_media_link.strip():
-        if frameio_share_ids(single_media_link) and not get_frameio_access_token():
+        is_frameio_link = bool(frameio_share_ids(single_media_link))
+        frameio_ready_for_link = (not is_frameio_link) or verify_frameio_connection()
+        if is_frameio_link and not frameio_ready_for_link:
             if frameio_oauth_config():
-                st.warning("Connect Frame.io once so this private share link can be resolved securely.")
+                st.warning("This is a Frame.io share link. Connect your Adobe/Frame.io account before transcribing it.")
                 st.link_button(
                     "Connect Frame.io & return to this link",
                     frameio_authorization_url(pending_url=single_media_link, return_to_batch=False),
@@ -2368,7 +2398,7 @@ with source_tabs[1]:
         if st.button(
             "Transcribe link",
             type="primary",
-            disabled=not bool(transcription_api_keys),
+            disabled=(not bool(transcription_api_keys)) or (bool(frameio_share_ids(single_media_link)) and not verify_frameio_connection()),
             use_container_width=True,
             key="transcribe_single_link",
         ):
