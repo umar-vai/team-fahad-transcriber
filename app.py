@@ -533,31 +533,42 @@ def download_google_drive_media(url: str, folder: Path) -> LocalMediaSource:
     download_dir.mkdir(parents=True, exist_ok=True)
     output = download_dir / "google_drive_source"
 
-    try:
-        result = gdown.download(
-            id=file_id,
-            output=str(output),
-            quiet=True,
-            fuzzy=True,
-            resume=True,
-            retries=3,
-        )
-    except UnicodeEncodeError as exc:
-        # Some hosted environments use an ASCII locale. Keep all downloader
-        # filenames/logging ASCII-only so Bangla/Unicode Drive titles cannot
-        # crash the request before the file is downloaded.
-        raise RuntimeError(
-            "Google Drive download hit a server text-encoding issue. "
-            "The app is configured to use an ASCII-safe temporary filename; "
-            "please retry once after the latest deployment finishes."
-        ) from exc
-    except Exception as exc:
+    # gdown does not accept a `retries` keyword. Retry at the application
+    # level instead, while allowing resumable downloads for large Drive files.
+    result = None
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            result = gdown.download(
+                id=file_id,
+                output=str(output),
+                quiet=True,
+                fuzzy=True,
+                resume=True,
+            )
+            if result:
+                break
+        except UnicodeEncodeError as exc:
+            # Some hosted environments use an ASCII locale. Keep all downloader
+            # filenames/logging ASCII-only so Bangla/Unicode Drive titles cannot
+            # crash the request before the file is downloaded.
+            raise RuntimeError(
+                "Google Drive download hit a server text-encoding issue. "
+                "The app uses an ASCII-safe temporary filename; please retry once "
+                "after the latest deployment finishes."
+            ) from exc
+        except Exception as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(1.5 * attempt)
+
+    if result is None and last_error is not None:
         raise RuntimeError(
             f"Could not download the Google Drive file. "
             f"Make sure the file is shared as 'Anyone with the link' → 'Viewer'. "
             f"If it is already public, Google may be throttling/quota-limiting the file. "
-            f"{str(exc)[:450]}"
-        ) from exc
+            f"{str(last_error)[:450]}"
+        ) from last_error
 
     downloaded = Path(result) if result else output
     if not downloaded.exists() or downloaded.stat().st_size == 0:
