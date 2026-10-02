@@ -33,7 +33,9 @@ APP_TITLE = "Video/Audio Transcriber by Team Fahad"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
 MAX_UPLOAD_MB = 500
-MAX_LINK_MB = 2048
+MAX_LINK_SOURCE_MB = 10_240
+MAX_GEMINI_FILE_MB = 2_048
+MAX_BULK_CHUNK_MINUTES = 25
 MAX_ANALYSIS_CHARS = 120_000
 MAX_BULK_URLS = 50
 
@@ -577,10 +579,10 @@ def download_google_drive_media(url: str, folder: Path) -> LocalMediaSource:
             "Check that the file is shared publicly and that the link points to a file, not a folder."
         )
 
-    max_bytes = MAX_LINK_MB * 1024 * 1024
+    max_bytes = MAX_LINK_SOURCE_MB * 1024 * 1024
     if downloaded.stat().st_size > max_bytes:
         raise ValueError(
-            f"Linked media is larger than the {MAX_LINK_MB} MB link limit. "
+            f"Linked source is larger than the {MAX_LINK_SOURCE_MB // 1024} GB download limit. "
             "Please use a smaller file."
         )
 
@@ -603,12 +605,12 @@ def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
 
     download_dir = folder / "link_download"
     download_dir.mkdir(parents=True, exist_ok=True)
-    max_bytes = MAX_LINK_MB * 1024 * 1024
+    max_bytes = MAX_LINK_SOURCE_MB * 1024 * 1024
 
     def progress_hook(data: dict[str, Any]) -> None:
         if int(data.get("downloaded_bytes") or 0) > max_bytes:
             raise yt_dlp.utils.DownloadError(
-                f"Linked media exceeds the {MAX_LINK_MB} MB limit."
+                f"Linked source exceeds the {MAX_LINK_SOURCE_MB // 1024} GB download limit."
             )
 
     ydl_opts: dict[str, Any] = {
@@ -663,7 +665,9 @@ def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
 
     source = max(candidates, key=lambda p: p.stat().st_size)
     if source.stat().st_size > max_bytes:
-        raise ValueError(f"Linked media is larger than the {MAX_UPLOAD_MB} MB limit.")
+        raise ValueError(
+            f"Linked source is larger than the {MAX_LINK_SOURCE_MB // 1024} GB download limit."
+        )
 
     title = str((info or {}).get("title") or source.stem or "linked_media").strip()
     safe_title = safe_name(title)[:100] or "linked_media"
@@ -723,8 +727,11 @@ def _transcribe_media_once(
         uploaded.size if isinstance(uploaded, LocalMediaSource)
         else getattr(uploaded, "size", 0)
     ) / (1024 * 1024)
-    if upload_size_mb > MAX_UPLOAD_MB:
-        raise ValueError(f"File is too large. Maximum allowed size is {MAX_UPLOAD_MB} MB.")
+    max_allowed_mb = MAX_GEMINI_FILE_MB if isinstance(uploaded, LocalMediaSource) else MAX_UPLOAD_MB
+    if upload_size_mb > max_allowed_mb:
+        raise ValueError(
+            f"File is too large. Maximum allowed size is {max_allowed_mb} MB."
+        )
 
     client = genai.Client(api_key=api_key)
     remote_file = None
@@ -829,6 +836,136 @@ def _transcribe_media_once(
             client.close()
         except Exception:
             pass
+
+
+def split_audio_into_chunks(source: Path, folder: Path, chunk_minutes: int = MAX_BULK_CHUNK_MINUTES) -> list[Path]:
+    """Split normalized linked audio into timestamp-safe chunks."""
+    chunk_seconds = chunk_minutes * 60
+    chunks_dir = folder / "transcription_chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    pattern = chunks_dir / "chunk_%03d.mp3"
+
+    command = [
+        ffmpeg_executable(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-f",
+        "segment",
+        "-segment_time",
+        str(chunk_seconds),
+        "-reset_timestamps",
+        "1",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "96k",
+        str(pattern),
+    ]
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "Splitting the linked audio timed out. Please use a shorter recording."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()
+        raise RuntimeError(
+            f"The linked audio could not be split into transcription chunks. {detail[:400]}"
+        ) from exc
+
+    chunks = sorted(p for p in chunks_dir.glob("chunk_*.mp3") if p.is_file() and p.stat().st_size > 0)
+    if not chunks:
+        raise RuntimeError("No usable transcription chunks were produced.")
+    return chunks
+
+
+def transcribe_linked_media_with_chunks(
+    uploaded: LocalMediaSource,
+    api_keys: list[str],
+    language_codes: list[str],
+) -> dict[str, Any]:
+    """Transcribe linked audio, chunking long recordings so VTT remains timestamped."""
+    source = uploaded.path
+    if not source.exists():
+        raise ValueError("The linked media file is no longer available.")
+
+    duration = media_duration(source, False)
+    chunk_limit = MAX_BULK_CHUNK_MINUTES * 60
+
+    if not duration or duration <= chunk_limit + 1:
+        return transcribe_media(
+            uploaded=uploaded,
+            api_keys=api_keys,
+            language_codes=language_codes,
+            mode="Detailed subtitles + speakers",
+            custom_vocabulary=[],
+        )
+
+    parent = source.parent
+    chunks = split_audio_into_chunks(source, parent)
+    merged_segments: list[Segment] = []
+    transcript_parts: list[str] = []
+    total_duration = 0.0
+
+    for index, chunk in enumerate(chunks):
+        chunk_source = LocalMediaSource(
+            path=chunk,
+            name=chunk.name,
+            size=chunk.stat().st_size,
+        )
+        chunk_result = transcribe_media(
+            uploaded=chunk_source,
+            api_keys=api_keys,
+            language_codes=language_codes,
+            mode="Detailed subtitles + speakers",
+            custom_vocabulary=[],
+        )
+        offset = total_duration
+        for segment in chunk_result.get("segments", []) or []:
+            merged_segments.append(
+                Segment(
+                    start=float(segment.start) + offset,
+                    end=float(segment.end) + offset,
+                    text=segment.text,
+                    speaker=segment.speaker,
+                )
+            )
+        transcript_text = str(chunk_result.get("transcript") or "").strip()
+        if transcript_text:
+            transcript_parts.append(transcript_text)
+        chunk_duration = float(chunk_result.get("duration") or 0.0)
+        if chunk_duration <= 0:
+            chunk_duration = media_duration(chunk, False) or 0.0
+        total_duration += chunk_duration
+
+    return {
+        "transcript": "\n\n".join(transcript_parts),
+        "words": [],
+        "segments": merged_segments,
+        "speaker_transcript": speaker_transcript(merged_segments),
+        "srt": segments_to_srt(merged_segments),
+        "vtt": segments_to_vtt(merged_segments),
+        "duration": duration,
+        "mode": "Detailed subtitles + speakers",
+        "language": next(
+            (name for name, codes in LANGUAGES.items() if codes == language_codes),
+            "Auto detect",
+        ),
+    }
 
 
 def transcribe_media(
@@ -1536,7 +1673,7 @@ with source_tabs[0]:
     uploaded = st.file_uploader(
         "Upload audio or video",
         type=["mp3", "wav", "m4a", "aac", "ogg", "flac", "mp4", "mov", "mkv"],
-        help=f"Maximum local upload size: {MAX_UPLOAD_MB} MB. Linked media can be up to {MAX_LINK_MB} MB.",
+        help=f"Maximum local upload size: {MAX_UPLOAD_MB} MB. Linked source downloads can be up to {MAX_LINK_SOURCE_MB // 1024} GB; Gemini receives extracted audio chunks up to {MAX_GEMINI_FILE_MB} MB.",
         key="media_file_uploader",
         max_upload_size=MAX_UPLOAD_MB,
     )
@@ -1554,7 +1691,7 @@ with source_tabs[1]:
     st.markdown(
         f"""
         <div class="bulk-url-head">
-          <div><strong>Media URL</strong><span>Google Drive, direct media, YouTube and other supported links • up to {MAX_LINK_MB} MB</span></div>
+          <div><strong>Media URL</strong><span>Google Drive, direct media, YouTube and other supported links • source up to {MAX_LINK_SOURCE_MB // 1024} GB</span></div>
           <div><strong>Custom name</strong><span>This becomes the VTT filename</span></div>
         </div>
         """,
@@ -1699,12 +1836,10 @@ with source_tabs[1]:
                             with tempfile.TemporaryDirectory(prefix="team_fahad_bulk_") as link_dir:
                                 folder = Path(link_dir)
                                 linked_source = download_media_from_link(str(item["url"]), folder)
-                                result = transcribe_media(
+                                result = transcribe_linked_media_with_chunks(
                                     uploaded=linked_source,
                                     api_keys=transcription_api_keys,
                                     language_codes=LANGUAGES[language_name],
-                                    mode="Detailed subtitles + speakers",
-                                    custom_vocabulary=[],
                                 )
                                 vtt = str(result.get("vtt") or "")
                                 if not vtt:
