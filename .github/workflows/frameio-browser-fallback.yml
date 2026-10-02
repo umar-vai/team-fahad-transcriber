@@ -1,0 +1,35 @@
+name: Frame.io browser fallback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/frameio-browser-fallback.py'
+      - '.github/workflows/frameio-browser-fallback.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply browser fallback patch
+        run: python .github/frameio-browser-fallback.py
+      - name: Validate Python
+        run: |
+          python -m py_compile app.py
+          git diff --check
+      - name: Commit patched app
+        run: |
+          if git diff --quiet -- app.py requirements.txt packages.txt; then
+            echo 'No changes needed'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py requirements.txt packages.txt
+          git commit -m 'Use headless browser for public Frame.io media discovery'
+          git push
