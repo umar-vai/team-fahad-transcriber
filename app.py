@@ -488,11 +488,11 @@ def normalize_link_media_to_mp3(source: Path, destination: Path) -> Path:
         str(destination),
     ]
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True, timeout=600)
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=1800)
     except FileNotFoundError as exc:
         raise RuntimeError("FFmpeg is not available on the server.") from exc
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Media conversion timed out. Please use a shorter recording.") from exc
+        raise RuntimeError("Media conversion timed out. Please use a smaller or shorter recording.") from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or "").strip()
         raise RuntimeError(f"The linked media could not be converted into audio. {detail[:400]}") from exc
@@ -1535,9 +1535,13 @@ with source_tabs[1]:
         "Paste one or more public media URLs. Each URL can have its own custom name, "
         "and all successful VTT files can be downloaded together as one ZIP."
     )
+    st.caption(
+        "For Google Drive, set the file to “Anyone with the link” → “Viewer”. "
+        "Private Drive files cannot be downloaded by the public app."
+    )
 
     st.markdown(
-        """
+        f"""
         <div class="bulk-url-head">
           <div><strong>Media URL</strong><span>Google Drive, direct media, YouTube and other supported links • up to {MAX_LINK_MB} MB</span></div>
           <div><strong>Custom name</strong><span>This becomes the VTT filename</span></div>
