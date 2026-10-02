@@ -1,0 +1,39 @@
+name: Add Frame.io OAuth support
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/frameio_oauth_patch.py'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply OAuth patch
+        run: python .github/frameio_oauth_patch.py
+
+      - name: Validate Python
+        run: |
+          python -m py_compile app.py pages/2_Batch_Transcription.py
+          git diff --check
+
+      - name: Commit changes
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py requirements.txt .streamlit/secrets.toml.example
+          git commit -m "Add Frame.io OAuth flow"
+          git push origin main
