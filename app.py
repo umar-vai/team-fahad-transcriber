@@ -1828,38 +1828,6 @@ if uploaded is not None:
                 status.update(label="Transcription failed", state="error")
                 st.error(str(exc))
 
-if media_link.strip():
-    if st.button("Transcribe from link", type="primary", disabled=not bool(transcription_api_keys), use_container_width=True, key="transcribe_media_link"):
-        reset_outputs()
-        st.session_state["source_kind"] = "link"
-        status = st.status("Preparing linked media…", expanded=True)
-        try:
-            with tempfile.TemporaryDirectory(prefix="team_fahad_link_") as link_dir:
-                folder = Path(link_dir)
-                status.write("Opening media link…")
-                linked_source = download_media_from_link(media_link, folder)
-                status.write(f"Media ready • {linked_source.name}")
-                status.write("Uploading securely for transcription…")
-                status.write("Running speech-to-text…")
-                result = transcribe_media(
-                    uploaded=linked_source,
-                    api_keys=transcription_api_keys,
-                    language_codes=LANGUAGES[language_name],
-                    mode=mode,
-                    custom_vocabulary=vocab,
-                )
-                st.session_state.result = result
-                st.session_state.source_name = linked_source.name
-                status.update(label="Transcription complete", state="complete", expanded=False)
-        except errors.APIError as exc:
-            status.update(label="Transcription failed", state="error")
-            code = getattr(exc, "code", "API")
-            message = getattr(exc, "message", str(exc))
-            st.error(f"Gemini request failed ({code}): {message}")
-        except Exception as exc:
-            status.update(label="Transcription failed", state="error")
-            st.error(str(exc))
-
 result = st.session_state.get("result")
 if result:
     source_name = st.session_state.get("source_name", "transcript")
