@@ -1769,8 +1769,9 @@ with source_tabs[1]:
     active_rows = [row for row in bulk_link_rows if row["url"]]
     if active_rows:
         st.info(
-            "Bulk URL processing always uses Detailed subtitles + speakers so every successful item "
-            "has reliable timestamped VTT output. Processing runs sequentially to reduce API spikes."
+            "Bulk URL processing uses timestamped speaker mode. Long recordings are automatically "
+            "split into 25-minute chunks and merged back into one VTT. Processing runs sequentially "
+            "to reduce API spikes."
         )
 
         button_label = (
