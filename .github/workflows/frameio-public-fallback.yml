@@ -1,0 +1,37 @@
+name: Frame.io public review fallback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/frameio_public_fallback_patch.py'
+      - '.github/workflows/frameio-public-fallback.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply public Frame.io fallback patch
+        run: python .github/frameio_public_fallback_patch.py
+      - name: Validate Python
+        run: |
+          python -m py_compile app.py
+          git diff --check
+      - name: Commit patched app
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Support third-party public Frame.io review links'
+          git push
