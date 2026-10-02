@@ -825,9 +825,37 @@ def handle_frameio_oauth_callback() -> None:
         st.error(str(exc))
 
 
+def resolve_frameio_url(url: str) -> str:
+    """Resolve f.io short links to their canonical next.frame.io review URL."""
+    value = str(url or "").strip()
+    parsed = urllib.parse.urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if host not in {"f.io", "www.f.io"}:
+        return value
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        response = requests.get(
+            value,
+            headers=headers,
+            allow_redirects=True,
+            stream=True,
+            timeout=20,
+        )
+        final_url = str(response.url or value).strip()
+        response.close()
+        return final_url
+    except requests.RequestException:
+        return value
+
+
 def frameio_share_ids(url: str) -> tuple[str, str] | None:
-    """Return (share_id, file_id) for Frame.io V4 share/view links."""
-    parsed = urllib.parse.urlparse(str(url or "").strip())
+    """Return (share_id, file_id) for Frame.io V4 share/view links, including f.io short links."""
+    resolved = resolve_frameio_url(url)
+    parsed = urllib.parse.urlparse(resolved)
     host = (parsed.hostname or "").lower()
     if host not in {"next.frame.io", "www.next.frame.io"}:
         return None
@@ -980,6 +1008,7 @@ def download_frameio_public_share_media(url: str, folder: Path) -> LocalMediaSou
 
 def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
     """Resolve Frame.io links: public review fallback first, authenticated V4 API second."""
+    url = resolve_frameio_url(url)
     ids = frameio_share_ids(url)
     if not ids:
         raise ValueError("This does not look like a supported Frame.io share/view link.")
@@ -1158,8 +1187,16 @@ def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
 
 
 def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
-    """Download one public media URL with yt-dlp, then normalize it to MP3."""
+    """Download one public media URL, routing Frame.io short links before yt-dlp."""
     url = validate_public_media_url(url)
+
+    # f.io short links redirect to next.frame.io. Resolve them before source
+    # detection so they never fall through to yt-dlp as an unsupported URL.
+    parsed_host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if parsed_host in {"f.io", "www.f.io"}:
+        resolved_frameio_url = resolve_frameio_url(url)
+        if resolved_frameio_url != url:
+            url = validate_public_media_url(resolved_frameio_url)
 
     if google_drive_folder_id(url):
         raise ValueError(
