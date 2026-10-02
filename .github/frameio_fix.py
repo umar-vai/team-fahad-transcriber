@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Trigger v2: apply Frame.io support after workflow creation.
 APP = Path("app.py")
 SECRETS = Path(".streamlit/secrets.toml.example")
 
@@ -69,7 +70,6 @@ def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
         raise RuntimeError("The configured Frame.io token has no accessible accounts.")
 
     file_data = None
-    last_status = None
     include = "media_links.efficient,media_links.high_quality,media_links.original"
     for account in accounts:
         account_id = str(account.get("id") or "").strip()
@@ -85,7 +85,6 @@ def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
         except requests.RequestException:
             continue
 
-        last_status = response.status_code
         if response.status_code == 200:
             try:
                 file_data = response.json().get("data") or {}
@@ -93,11 +92,6 @@ def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
                 file_data = None
             if file_data:
                 break
-        if response.status_code not in {403, 404}:
-            try:
-                response.raise_for_status()
-            except requests.RequestException:
-                pass
 
     if not file_data:
         raise RuntimeError(
