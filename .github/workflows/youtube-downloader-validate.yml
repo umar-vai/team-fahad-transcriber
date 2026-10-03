@@ -1,0 +1,19 @@
+name: Validate YouTube downloader
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pages/3_YouTube_Downloader.py'
+      - '.github/workflows/youtube-downloader-validate.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile page
+        run: python -m py_compile pages/3_YouTube_Downloader.py
+      - name: Check whitespace
+        run: git diff --check
