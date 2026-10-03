@@ -1,8 +1,10 @@
 # Team Fahad YouTube Downloader — Desktop App
 
-A portable Windows desktop build of the local downloader. The app uses the PC's own internet connection and saves files to:
+A portable Windows desktop build of the local downloader. By default, files are saved to:
 
 `Downloads/Team Fahad YouTube`
+
+The desktop app now includes a **Save Location** control. Use **Choose folder** to select any folder or drive, including another disk or an external drive. The selected folder is remembered for future launches. Use **Default** to switch back to the standard Team Fahad download folder.
 
 ## Build locally
 
