@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import queue
 import re
@@ -14,11 +15,13 @@ import customtkinter as ctk
 import yt_dlp
 from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 APP_NAME = "Team Fahad YouTube Downloader"
-APP_VERSION = "2.0"
-DOWNLOAD_DIR = Path.home() / "Downloads" / "Team Fahad YouTube"
+APP_VERSION = "2.1"
+DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "Team Fahad YouTube"
+CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / "TeamFahadDownloader"
+CONFIG_FILE = CONFIG_DIR / "settings.json"
 YOUTUBE_RE = re.compile(r"^https?://(?:(?:www\.|m\.|music\.)?youtube\.com|youtu\.be)/", re.I)
 
 # Midnight-tech palette
@@ -59,6 +62,28 @@ def format_duration(seconds: Any) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
+def load_download_dir() -> Path:
+    try:
+        payload = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        raw = str(payload.get("download_dir") or "").strip()
+        if raw:
+            return Path(raw).expanduser()
+    except Exception:
+        pass
+    return DEFAULT_DOWNLOAD_DIR
+
+
+def save_download_dir(path: Path) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(
+            json.dumps({"download_dir": str(path)}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 def human_bytes(value: Any) -> str:
     try:
         size = float(value or 0)
@@ -87,6 +112,7 @@ class DownloaderApp(ctk.CTk):
         self.thumbnail_image: ctk.CTkImage | None = None
         self.last_file: Path | None = None
         self.is_busy = False
+        self.download_dir = load_download_dir()
 
         self.url_var = ctk.StringVar()
         self.name_var = ctk.StringVar()
@@ -94,6 +120,7 @@ class DownloaderApp(ctk.CTk):
         self.video_quality_var = ctk.StringVar(value="720p")
         self.audio_format_var = ctk.StringVar(value="MP3")
         self.audio_quality_var = ctk.StringVar(value="192")
+        self.download_dir_var = ctk.StringVar(value=str(self.download_dir))
 
         self._center_window()
         self._build_ui()
@@ -382,7 +409,55 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             placeholder_text="Video title will appear here",
         )
-        self.name_entry.grid(row=3, column=0, sticky="ew", pady=(7, 0))
+        self.name_entry.grid(row=3, column=0, sticky="ew", pady=(7, 14))
+
+        ctk.CTkLabel(left, text="SAVE LOCATION", text_color=MUTED, font=("Segoe UI Semibold", 9)).grid(row=4, column=0, sticky="w")
+        folder_row = ctk.CTkFrame(left, fg_color="transparent")
+        folder_row.grid(row=5, column=0, sticky="ew", pady=(7, 0))
+        folder_row.grid_columnconfigure(0, weight=1)
+
+        self.folder_entry = ctk.CTkEntry(
+            folder_row,
+            textvariable=self.download_dir_var,
+            height=42,
+            corner_radius=10,
+            fg_color=SURFACE_2,
+            border_color="#2A4169",
+            border_width=1,
+            text_color="#AFC0D9",
+            state="readonly",
+        )
+        self.folder_entry.grid(row=0, column=0, sticky="ew")
+
+        self.choose_folder_button = ctk.CTkButton(
+            folder_row,
+            text="Choose folder",
+            width=112,
+            height=42,
+            corner_radius=10,
+            fg_color=SURFACE_3,
+            hover_color="#1B3153",
+            border_width=1,
+            border_color="#2A4169",
+            text_color=TEXT,
+            command=self.choose_download_folder,
+        )
+        self.choose_folder_button.grid(row=0, column=1, padx=(8, 0))
+
+        self.reset_folder_button = ctk.CTkButton(
+            folder_row,
+            text="Default",
+            width=74,
+            height=42,
+            corner_radius=10,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.reset_download_folder,
+        )
+        self.reset_folder_button.grid(row=0, column=2, padx=(8, 0))
 
         right = ctk.CTkFrame(card, fg_color=SURFACE_2, corner_radius=14, border_width=1, border_color="#23385A")
         right.grid(row=1, column=1, sticky="nsew", padx=(10, 18), pady=(16, 18))
@@ -564,12 +639,13 @@ class DownloaderApp(ctk.CTk):
         footer.grid(row=5, column=0, sticky="ew", pady=(2, 12))
         footer.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
+        self.save_location_label = ctk.CTkLabel(
             footer,
-            text=f"SAVE LOCATION  •  {DOWNLOAD_DIR}",
+            text=f"SAVE LOCATION  •  {self.download_dir}",
             text_color="#637696",
             font=("Segoe UI", 9),
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self.save_location_label.grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             footer,
             text="Use only for content you own or have permission to download.",
@@ -610,6 +686,10 @@ class DownloaderApp(ctk.CTk):
         self.read_button.configure(state=state)
         self.paste_button.configure(state=state)
         self.download_button.configure(state=state)
+        if hasattr(self, "choose_folder_button"):
+            self.choose_folder_button.configure(state=state)
+        if hasattr(self, "reset_folder_button"):
+            self.reset_folder_button.configure(state=state)
 
     def _set_status(self, text: str, kind: str = "ready") -> None:
         palette = {
@@ -677,7 +757,7 @@ class DownloaderApp(ctk.CTk):
         if not YOUTUBE_RE.match(url):
             messagebox.showerror(APP_NAME, "Please paste a valid YouTube or youtu.be URL.")
             return
-        DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        self.download_dir.mkdir(parents=True, exist_ok=True)
         name = safe_filename(self.name_var.get(), "youtube_download")
         mode = self.mode_var.get()
         self.progress.set(0)
@@ -685,9 +765,13 @@ class DownloaderApp(ctk.CTk):
         self.speed_label.configure(text="Starting…")
         self._set_status("Connecting to YouTube…", "working")
         self._set_busy(True)
-        threading.Thread(target=self._download_worker, args=(url, mode, name), daemon=True).start()
+        threading.Thread(
+            target=self._download_worker,
+            args=(url, mode, name, self.download_dir),
+            daemon=True,
+        ).start()
 
-    def _download_worker(self, url: str, mode: str, name: str) -> None:
+    def _download_worker(self, url: str, mode: str, name: str, download_dir: Path) -> None:
         def hook(data: dict[str, Any]) -> None:
             status = data.get("status")
             if status == "downloading":
@@ -708,7 +792,7 @@ class DownloaderApp(ctk.CTk):
             elif status == "finished":
                 self.events.put(("status", "Download finished. Finalizing file…"))
 
-        outtmpl = str(DOWNLOAD_DIR / f"{name}.%(ext)s")
+        outtmpl = str(download_dir / f"{name}.%(ext)s")
         ffmpeg_path = get_ffmpeg_exe()
         opts: dict[str, Any] = {
             "outtmpl": outtmpl,
@@ -763,7 +847,7 @@ class DownloaderApp(ctk.CTk):
 
                 candidates = [
                     path
-                    for path in DOWNLOAD_DIR.glob(f"{name}.*")
+                    for path in download_dir.glob(f"{name}.*")
                     if path.is_file() and path.suffix.lower() not in {".part", ".ytdl", ".temp", ".tmp"}
                 ]
                 if candidates:
@@ -847,12 +931,38 @@ class DownloaderApp(ctk.CTk):
             pass
         self.after(120, self._drain_events)
 
+    def choose_download_folder(self) -> None:
+        if self.is_busy:
+            return
+        initial = self.download_dir if self.download_dir.exists() else self.download_dir.parent
+        selected = filedialog.askdirectory(
+            title="Choose download folder",
+            initialdir=str(initial),
+            mustexist=True,
+        )
+        if not selected:
+            return
+        self.download_dir = Path(selected)
+        self.download_dir_var.set(str(self.download_dir))
+        save_download_dir(self.download_dir)
+        self.save_location_label.configure(text=f"SAVE LOCATION  •  {self.download_dir}")
+        self._set_status("Download folder updated", "ready")
+
+    def reset_download_folder(self) -> None:
+        if self.is_busy:
+            return
+        self.download_dir = DEFAULT_DOWNLOAD_DIR
+        self.download_dir_var.set(str(self.download_dir))
+        save_download_dir(self.download_dir)
+        self.save_location_label.configure(text=f"SAVE LOCATION  •  {self.download_dir}")
+        self._set_status("Default download folder restored", "ready")
+
     def open_download_folder(self) -> None:
-        DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        self.download_dir.mkdir(parents=True, exist_ok=True)
         try:
-            os.startfile(str(DOWNLOAD_DIR))  # type: ignore[attr-defined]
+            os.startfile(str(self.download_dir))  # type: ignore[attr-defined]
         except AttributeError:
-            subprocess.Popen(["xdg-open", str(DOWNLOAD_DIR)])
+            subprocess.Popen(["xdg-open", str(self.download_dir)])
 
     def open_last_file(self) -> None:
         if not self.last_file or not self.last_file.exists():
