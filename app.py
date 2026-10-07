@@ -353,6 +353,42 @@ def extract_word_annotations(interaction: Any) -> list[WordInfo]:
     return [w for w in words if w.text]
 
 
+def extract_generate_content_transcription(response: Any) -> tuple[str, list[WordInfo]]:
+    """Parse Gemini Generate Content transcription text, speakers and word timestamps."""
+    words: list[WordInfo] = []
+    text_parts: list[str] = []
+
+    for candidate in getattr(response, "candidates", []) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", []) or []:
+            transcription = getattr(part, "audio_transcription", None)
+            if not transcription:
+                continue
+
+            segment_text = str(getattr(transcription, "text", "") or "").strip()
+            if segment_text:
+                text_parts.append(segment_text)
+
+            speaker = str(getattr(transcription, "speaker_label", "") or "").strip() or None
+            for word_info in getattr(transcription, "words", []) or []:
+                word = str(getattr(word_info, "word", "") or "").strip()
+                if not word:
+                    continue
+                words.append(
+                    WordInfo(
+                        text=word,
+                        speaker=speaker,
+                        start=parse_offset(getattr(word_info, "start_offset", None)),
+                        end=parse_offset(getattr(word_info, "end_offset", None)),
+                    )
+                )
+
+    transcript = str(getattr(response, "text", "") or "").strip()
+    if not transcript:
+        transcript = "\n".join(text_parts).strip()
+    return transcript, words
+
+
 def make_segments(words: list[WordInfo], max_duration: float = 7.0, max_chars: int = 88) -> list[Segment]:
     """Turn word annotations into readable subtitle-sized segments."""
     timed = [w for w in words if w.start is not None and w.end is not None]
@@ -1604,20 +1640,35 @@ def _transcribe_media_once(
             if custom_vocabulary and mode != "Detailed subtitles + speakers":
                 transcription_config["custom_vocabulary"] = custom_vocabulary[:100]
 
-            input_item = {
-                "type": "audio",
-                "uri": remote_file.uri,
-                "mime_type": getattr(remote_file, "mime_type", mime_type) or mime_type,
+            # The Interactions API began returning a backend 400 error on
+            # gemini-3.5-transcribe ("Thinking is not enabled for this model")
+            # on 2026-10-07 even when no thinking config is supplied. Use the
+            # supported Generate Content transcription endpoint instead.
+            audio_transcription_config: dict[str, Any] = {
+                "language_codes": language_codes,
             }
+            if mode == "Smart clean transcript":
+                audio_transcription_config["mode"] = "SMART"
+            else:
+                audio_transcription_config["mode"] = "VERBATIM"
+
+            if mode == "Detailed subtitles + speakers":
+                audio_transcription_config["diarization"] = True
+                audio_transcription_config["word_timestamp"] = True
+
+            if custom_vocabulary and mode != "Detailed subtitles + speakers":
+                audio_transcription_config["custom_vocabulary"] = custom_vocabulary[:100]
 
             last_error: Exception | None = None
-            interaction = None
+            response = None
             for attempt in range(2):
                 try:
-                    interaction = client.interactions.create(
+                    response = client.models.generate_content(
                         model=TRANSCRIBE_MODEL,
-                        input=[input_item],
-                        generation_config={"transcription_config": transcription_config},
+                        contents=[remote_file],
+                        config={
+                            "audio_transcription_config": audio_transcription_config,
+                        },
                     )
                     break
                 except errors.APIError as exc:
@@ -1627,14 +1678,13 @@ def _transcribe_media_once(
                         raise
                     time.sleep(5)
 
-            if interaction is None:
+            if response is None:
                 raise RuntimeError(f"Transcription request failed: {last_error}")
 
-            transcript = str(getattr(interaction, "output_text", "") or "").strip()
+            transcript, words = extract_generate_content_transcription(response)
             if not transcript:
                 raise RuntimeError("Gemini returned an empty transcription.")
 
-            words = extract_word_annotations(interaction)
             segments = make_segments(words)
 
             return {
