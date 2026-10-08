@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -9,11 +10,13 @@ import json
 import io
 import ipaddress
 import os
+import queue
 import re
 import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.parse
 import zipfile
@@ -23,19 +26,22 @@ from typing import Any
 
 import streamlit as st
 import streamlit.components.v1 as components
+import av
 from docx import Document
 from google import genai
-from google.genai import errors
+from google.genai import errors, types
 from moviepy import AudioFileClip, VideoFileClip
 import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
 import gdown
 import requests
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
+LIVE_TRANSCRIBE_MODEL = "gemini-3.8-live"
 MAX_UPLOAD_MB = 500
 MAX_LINK_SOURCE_MB = 10_240
 MAX_GEMINI_FILE_MB = 2_048
@@ -107,6 +113,323 @@ def secret_or_env(name: str) -> Any | None:
         pass
     value = os.getenv(name)
     return value if value else None
+
+
+
+def live_rtc_configuration() -> dict[str, Any]:
+    """Build WebRTC ICE config, optionally adding a private TURN server from secrets."""
+    ice_servers: list[dict[str, Any]] = [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+    ]
+    turn_url = str(secret_or_env("LIVE_TURN_URL") or "").strip()
+    if turn_url:
+        turn_server: dict[str, Any] = {"urls": [turn_url]}
+        username = str(secret_or_env("LIVE_TURN_USERNAME") or "").strip()
+        credential = str(secret_or_env("LIVE_TURN_CREDENTIAL") or "").strip()
+        if username:
+            turn_server["username"] = username
+        if credential:
+            turn_server["credential"] = credential
+        ice_servers.append(turn_server)
+    return {"iceServers": ice_servers}
+
+
+class LiveTranscriptionBridge:
+    """Thread-safe bridge from browser WebRTC audio frames to Gemini Live."""
+
+    def __init__(self) -> None:
+        self.audio_queue: queue.Queue[bytes | None] = queue.Queue(maxsize=240)
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+        self.text_parts: list[str] = []
+        self.status = "idle"
+        self.error = ""
+        self.started_at: float | None = None
+        self.stopped_at: float | None = None
+        self.frames_received = 0
+        self.dropped_frames = 0
+        self.session_id = 0
+
+    def reset(self) -> None:
+        self.stop()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.5)
+        with self.lock:
+            self.text_parts = []
+            self.status = "idle"
+            self.error = ""
+            self.started_at = None
+            self.stopped_at = None
+            self.frames_received = 0
+            self.dropped_frames = 0
+            self.session_id += 1
+        self.stop_event.clear()
+        while True:
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def start(self, api_keys: list[str]) -> None:
+        if self.thread and self.thread.is_alive():
+            return
+        if not api_keys:
+            with self.lock:
+                self.status = "error"
+                self.error = "No Gemini API key is configured for live transcription."
+            return
+        self.stop_event.clear()
+        with self.lock:
+            self.status = "connecting"
+            self.error = ""
+            self.started_at = time.time()
+            self.stopped_at = None
+        self.thread = threading.Thread(
+            target=self._thread_main,
+            args=(list(api_keys),),
+            daemon=True,
+            name=f"team-fahad-live-{self.session_id}",
+        )
+        self.thread.start()
+
+    def stop(self) -> None:
+        if self.stop_event.is_set():
+            return
+        self.stop_event.set()
+        with self.lock:
+            if self.status in {"connecting", "listening"}:
+                self.status = "finalizing"
+        try:
+            self.audio_queue.put_nowait(None)
+        except queue.Full:
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.audio_queue.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def push_audio_frame(self, frame: av.AudioFrame) -> av.AudioFrame:
+        """Resample browser microphone audio to Gemini's preferred 16 kHz mono PCM."""
+        try:
+            resampled = self.resampler.resample(frame)
+            for output_frame in resampled:
+                payload = output_frame.to_ndarray().tobytes()
+                if not payload:
+                    continue
+                try:
+                    self.audio_queue.put_nowait(payload)
+                except queue.Full:
+                    # Prefer current speech over stale buffered audio when the network is slow.
+                    try:
+                        self.audio_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self.audio_queue.put_nowait(payload)
+                    except queue.Full:
+                        pass
+                    with self.lock:
+                        self.dropped_frames += 1
+                with self.lock:
+                    self.frames_received += 1
+        except Exception as exc:
+            with self.lock:
+                if not self.error:
+                    self.error = f"Microphone audio conversion failed: {exc}"
+        return frame
+
+    def append_transcript(self, text: str) -> None:
+        chunk = str(text or "")
+        if not chunk:
+            return
+        with self.lock:
+            if self.text_parts and self.text_parts[-1] == chunk:
+                return
+            self.text_parts.append(chunk)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            now = self.stopped_at or time.time()
+            elapsed = max(0.0, now - self.started_at) if self.started_at else 0.0
+            return {
+                "text": "".join(self.text_parts).strip(),
+                "status": self.status,
+                "error": self.error,
+                "elapsed": elapsed,
+                "frames_received": self.frames_received,
+                "dropped_frames": self.dropped_frames,
+                "session_id": self.session_id,
+                "running": bool(self.thread and self.thread.is_alive()),
+            }
+
+    def _thread_main(self, api_keys: list[str]) -> None:
+        last_error: Exception | None = None
+        for index, api_key in enumerate(api_keys):
+            if self.stop_event.is_set():
+                break
+            try:
+                asyncio.run(self._run_live_session(api_key))
+                return
+            except Exception as exc:
+                last_error = exc
+                # Only fail over automatically when another key exists and the stream
+                # has not intentionally been stopped.
+                if self.stop_event.is_set() or index == len(api_keys) - 1:
+                    break
+
+        with self.lock:
+            if self.stop_event.is_set() and self.text_parts:
+                self.status = "complete"
+            else:
+                self.status = "error"
+                self.error = str(last_error or "Live transcription stopped unexpectedly.")
+            self.stopped_at = time.time()
+
+    async def _run_live_session(self, api_key: str) -> None:
+        client = genai.Client(api_key=api_key)
+        config = types.LiveConnectConfig(
+            response_modalities=["TEXT"],
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+        )
+
+        try:
+            async with client.aio.live.connect(
+                model=LIVE_TRANSCRIBE_MODEL,
+                config=config,
+            ) as session:
+                with self.lock:
+                    self.status = "listening"
+
+                async def sender() -> None:
+                    while True:
+                        chunk = await asyncio.to_thread(self.audio_queue.get)
+                        if chunk is None:
+                            try:
+                                await session.send_realtime_input(audio_stream_end=True)
+                            except Exception:
+                                pass
+                            return
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                data=chunk,
+                                mime_type="audio/pcm;rate=16000",
+                            )
+                        )
+
+                async def receiver() -> None:
+                    while True:
+                        turn = session.receive()
+                        async for response in turn:
+                            content = getattr(response, "server_content", None)
+                            if content is None:
+                                continue
+                            transcription = getattr(content, "input_transcription", None)
+                            if transcription is not None:
+                                self.append_transcript(getattr(transcription, "text", "") or "")
+                        if self.stop_event.is_set():
+                            return
+
+                sender_task = asyncio.create_task(sender())
+                receiver_task = asyncio.create_task(receiver())
+
+                while not self.stop_event.is_set():
+                    if receiver_task.done():
+                        await receiver_task
+                        if not self.stop_event.is_set():
+                            raise RuntimeError("Gemini Live transcription stream ended unexpectedly.")
+                        break
+                    if sender_task.done():
+                        await sender_task
+                        break
+                    await asyncio.sleep(0.1)
+
+                if self.stop_event.is_set() and not sender_task.done():
+                    try:
+                        self.audio_queue.put_nowait(None)
+                    except queue.Full:
+                        pass
+
+                try:
+                    await asyncio.wait_for(sender_task, timeout=3.0)
+                except asyncio.TimeoutError:
+                    sender_task.cancel()
+
+                try:
+                    await asyncio.wait_for(receiver_task, timeout=7.0)
+                except asyncio.TimeoutError:
+                    receiver_task.cancel()
+
+                with self.lock:
+                    self.status = "complete"
+                    self.stopped_at = time.time()
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def live_result_from_snapshot(snapshot: dict[str, Any], language_name: str) -> dict[str, Any]:
+    return {
+        "transcript": str(snapshot.get("text") or "").strip(),
+        "words": [],
+        "segments": [],
+        "speaker_transcript": "",
+        "srt": "",
+        "vtt": "",
+        "duration": float(snapshot.get("elapsed") or 0.0),
+        "mode": "Live transcription",
+        "language": language_name,
+    }
+
+
+@st.fragment(run_every=0.5)
+def render_live_transcription_monitor(bridge: LiveTranscriptionBridge, language_name: str) -> None:
+    snapshot = bridge.snapshot()
+    status = str(snapshot.get("status") or "idle")
+    text_value = str(snapshot.get("text") or "")
+
+    status_labels = {
+        "idle": "Ready",
+        "connecting": "Connecting to Gemini Live…",
+        "listening": "Listening · transcript updates while you speak",
+        "finalizing": "Finalizing the last words…",
+        "complete": "Live transcription complete",
+        "error": "Live transcription failed",
+    }
+    label = status_labels.get(status, status.title())
+    st.caption(
+        f"{label} · {format_clock(float(snapshot.get('elapsed') or 0.0))}"
+        + (
+            f" · {int(snapshot.get('dropped_frames') or 0)} delayed audio frames skipped"
+            if snapshot.get("dropped_frames")
+            else ""
+        )
+    )
+
+    if snapshot.get("error"):
+        st.error(str(snapshot["error"]))
+
+    if text_value:
+        st.markdown("#### Live transcript")
+        st.code(text_value, language=None, wrap_lines=True)
+    elif status in {"connecting", "listening", "finalizing"}:
+        st.info("Start speaking. Your words will appear here as Gemini receives them.")
+    else:
+        st.caption("Your live transcript will appear here.")
+
+    committed_id = st.session_state.get("live_committed_session_id")
+    if status == "complete" and text_value and committed_id != snapshot.get("session_id"):
+        st.session_state.result = live_result_from_snapshot(snapshot, language_name)
+        st.session_state.source_name = "live_voice_transcript.txt"
+        st.session_state["source_kind"] = "live_voice"
+        st.session_state["live_committed_session_id"] = snapshot.get("session_id")
+        st.rerun()
 
 
 def normalize_key_list(value: Any | None) -> list[str]:
@@ -2955,71 +3278,155 @@ with source_tabs[1]:
 
 
 with source_tabs[2]:
-    st.caption(
-        "Record a voice note directly from your microphone. When you stop recording, "
-        "the new recording is transcribed automatically using the selected language and output mode."
-    )
-    voice_note = st.audio_input(
-        "Record voice note",
-        sample_rate=16000,
-        key="voice_note_recorder",
-        help="16 kHz is optimized for speech transcription.",
+    quick_voice_tab, live_transcribe_tab = st.tabs(
+        ["Quick Voice Note", "Live Transcription"],
+        key="voice_mode_tabs",
+        on_change="ignore",
     )
 
-    if voice_note is not None:
-        voice_bytes = voice_note.getvalue()
-        voice_signature = hashlib.sha256(voice_bytes).hexdigest()
-        voice_size_mb = len(voice_bytes) / (1024 * 1024)
-
-        v1, v2, v3 = st.columns(3)
-        v1.metric("Source", "Microphone")
-        v2.metric("Size", f"{voice_size_mb:.2f} MB")
-        v3.metric(
-            "Mode",
-            "Detailed" if mode.startswith("Detailed") else ("Verbatim" if mode.startswith("Exact") else "Smart"),
+    with quick_voice_tab:
+        st.caption(
+            "Record a voice note directly from your microphone. When you stop recording, "
+            "the new recording is transcribed automatically using the selected language and output mode."
+        )
+        voice_note = st.audio_input(
+            "Record voice note",
+            sample_rate=16000,
+            key="voice_note_recorder",
+            help="16 kHz is optimized for speech transcription.",
         )
 
-        already_processed = st.session_state.get("last_voice_note_signature") == voice_signature
-        retry_voice = False
-        if already_processed:
-            st.success("This voice note has been transcribed.")
-            retry_voice = st.button(
-                "Transcribe again with current settings",
-                use_container_width=True,
-                key="retranscribe_voice_note",
-                disabled=not bool(transcription_api_keys),
+        if voice_note is not None:
+            voice_bytes = voice_note.getvalue()
+            voice_signature = hashlib.sha256(voice_bytes).hexdigest()
+            voice_size_mb = len(voice_bytes) / (1024 * 1024)
+
+            v1, v2, v3 = st.columns(3)
+            v1.metric("Source", "Microphone")
+            v2.metric("Size", f"{voice_size_mb:.2f} MB")
+            v3.metric(
+                "Mode",
+                "Detailed" if mode.startswith("Detailed") else ("Verbatim" if mode.startswith("Exact") else "Smart"),
             )
 
-        should_process_voice = bool(transcription_api_keys) and (not already_processed or retry_voice)
-        if should_process_voice:
-            reset_outputs()
-            st.session_state["source_kind"] = "voice_note"
-            status = st.status("Transcribing voice note…", expanded=True)
-            try:
-                status.write("Reading microphone recording…")
-                voice_note.seek(0)
-                status.write("Running speech-to-text…")
-                result = transcribe_media(
-                    uploaded=voice_note,
-                    api_keys=transcription_api_keys,
-                    language_codes=LANGUAGES[language_name],
-                    mode=mode,
-                    custom_vocabulary=vocab,
+            already_processed = st.session_state.get("last_voice_note_signature") == voice_signature
+            retry_voice = False
+            if already_processed:
+                st.success("This voice note has been transcribed.")
+                retry_voice = st.button(
+                    "Transcribe again with current settings",
+                    use_container_width=True,
+                    key="retranscribe_voice_note",
+                    disabled=not bool(transcription_api_keys),
                 )
-                st.session_state.result = result
-                st.session_state.source_name = "voice_note.wav"
-                st.session_state["last_voice_note_signature"] = voice_signature
-                status.update(label="Voice note transcribed", state="complete", expanded=False)
-            except errors.APIError as exc:
-                status.update(label="Voice transcription failed", state="error")
-                code = getattr(exc, "code", "API")
-                message = getattr(exc, "message", str(exc))
-                st.error(f"Gemini request failed ({code}): {message}")
-            except Exception as exc:
-                status.update(label="Voice transcription failed", state="error")
-                st.error(str(exc))
-        elif not transcription_api_keys:
-            st.warning("No transcription API key is configured.")
+
+            should_process_voice = bool(transcription_api_keys) and (not already_processed or retry_voice)
+            if should_process_voice:
+                reset_outputs()
+                st.session_state["source_kind"] = "voice_note"
+                status = st.status("Transcribing voice note…", expanded=True)
+                try:
+                    status.write("Reading microphone recording…")
+                    voice_note.seek(0)
+                    status.write("Running speech-to-text…")
+                    result = transcribe_media(
+                        uploaded=voice_note,
+                        api_keys=transcription_api_keys,
+                        language_codes=LANGUAGES[language_name],
+                        mode=mode,
+                        custom_vocabulary=vocab,
+                    )
+                    st.session_state.result = result
+                    st.session_state.source_name = "voice_note.wav"
+                    st.session_state["last_voice_note_signature"] = voice_signature
+                    status.update(label="Voice note transcribed", state="complete", expanded=False)
+                except errors.APIError as exc:
+                    status.update(label="Voice transcription failed", state="error")
+                    code = getattr(exc, "code", "API")
+                    message = getattr(exc, "message", str(exc))
+                    st.error(f"Gemini request failed ({code}): {message}")
+                except Exception as exc:
+                    status.update(label="Voice transcription failed", state="error")
+                    st.error(str(exc))
+            elif not transcription_api_keys:
+                st.warning("No transcription API key is configured.")
+
+    with live_transcribe_tab:
+        st.caption(
+            "True live mode keeps the microphone open and streams 16 kHz PCM audio to Gemini Live. "
+            "The transcript updates while you are speaking and is sent to the normal workspace after Stop."
+        )
+        st.info(
+            "Live mode prioritizes low latency, so it produces a plain real-time transcript. "
+            "For speaker labels/SRT/VTT, use Quick Voice Note or upload the finished recording in Detailed mode."
+        )
+
+        bridge = st.session_state.get("live_transcription_bridge")
+        if not isinstance(bridge, LiveTranscriptionBridge):
+            bridge = LiveTranscriptionBridge()
+            st.session_state["live_transcription_bridge"] = bridge
+
+        if not transcription_api_keys:
+            st.warning("Configure a Gemini transcription API key before starting Live Transcription.")
+
+        webrtc_ctx = webrtc_streamer(
+            key="team_fahad_live_voice",
+            mode=WebRtcMode.SENDONLY,
+            audio_frame_callback=bridge.push_audio_frame,
+            rtc_configuration=live_rtc_configuration(),
+            media_stream_constraints={
+                "video": False,
+                "audio": {
+                    "channelCount": 1,
+                    "echoCancellation": True,
+                    "noiseSuppression": True,
+                    "autoGainControl": True,
+                },
+            },
+            media_toggle_controls=False,
+            async_processing=True,
+            desired_playing_state=None,
+        )
+
+        is_live_playing = bool(webrtc_ctx.state.playing)
+        was_live_playing = bool(st.session_state.get("live_webrtc_was_playing", False))
+
+        if is_live_playing and not was_live_playing:
+            reset_outputs()
+            bridge.reset()
+            st.session_state.pop("live_committed_session_id", None)
+            bridge.start(transcription_api_keys)
+
+        if not is_live_playing and was_live_playing:
+            bridge.stop()
+
+        st.session_state["live_webrtc_was_playing"] = is_live_playing
+
+        render_live_transcription_monitor(bridge, language_name)
+
+        live_snapshot = bridge.snapshot()
+        if not is_live_playing and not live_snapshot.get("running") and live_snapshot.get("text"):
+            live_action_1, live_action_2 = st.columns(2)
+            with live_action_1:
+                if st.button(
+                    "Use current live transcript in workspace",
+                    use_container_width=True,
+                    key="commit_live_transcript_manual",
+                ):
+                    st.session_state.result = live_result_from_snapshot(live_snapshot, language_name)
+                    st.session_state.source_name = "live_voice_transcript.txt"
+                    st.session_state["source_kind"] = "live_voice"
+                    st.session_state["live_committed_session_id"] = live_snapshot.get("session_id")
+                    st.rerun()
+            with live_action_2:
+                if st.button(
+                    "Clear live transcript",
+                    use_container_width=True,
+                    key="clear_live_transcript",
+                ):
+                    bridge.reset()
+                    st.session_state.pop("live_committed_session_id", None)
+                    st.rerun()
 
 if uploaded is not None:
     size_mb = getattr(uploaded, "size", 0) / (1024 * 1024)
