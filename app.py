@@ -162,12 +162,17 @@ def live_rtc_configuration() -> dict[str, Any]:
                 "credential": "openrelayproject",
             },
             {
+                "urls": ["turn:openrelay.metered.ca:80?transport=tcp"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+            {
                 "urls": ["turn:openrelay.metered.ca:443"],
                 "username": "openrelayproject",
                 "credential": "openrelayproject",
             },
             {
-                "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+                "urls": ["turns:openrelay.metered.ca:443?transport=tcp"],
                 "username": "openrelayproject",
                 "credential": "openrelayproject",
             },
@@ -3499,11 +3504,13 @@ with source_tabs[2]:
                         "For production reliability, add a private Cloudflare Realtime TURN key in Streamlit Secrets."
                     )
 
+                live_rtc_config = live_rtc_configuration()
                 webrtc_ctx = webrtc_streamer(
                     key="team_fahad_live_voice",
                     mode=WebRtcMode.SENDONLY,
                     audio_frame_callback=bridge.push_audio_frame,
-                    rtc_configuration=live_rtc_configuration(),
+                    frontend_rtc_configuration=live_rtc_config,
+                    server_rtc_configuration=live_rtc_config,
                     media_stream_constraints={
                         "video": False,
                         "audio": {
@@ -3515,6 +3522,8 @@ with source_tabs[2]:
                     },
                     media_toggle_controls=False,
                     async_processing=True,
+                    sendback_audio=False,
+                    sendback_video=False,
                     on_audio_ended=bridge.stop,
                 )
 
