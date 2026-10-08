@@ -3385,7 +3385,7 @@ with source_tabs[2]:
             },
             media_toggle_controls=False,
             async_processing=True,
-            desired_playing_state=None,
+            on_audio_ended=bridge.stop,
         )
 
         is_live_playing = bool(webrtc_ctx.state.playing)
