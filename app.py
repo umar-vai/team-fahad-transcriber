@@ -1907,6 +1907,21 @@ Do not invent facts.\n\nTRANSCRIPT:\n""" + transcript,
     )
 
 
+def generate_explanation(api_keys: list[str], result: dict[str, Any]) -> str:
+    transcript = transcript_for_analysis(result)
+    return ai_text(
+        api_keys,
+        """Explain the transcript below clearly and accurately. Use the same main language as the transcript.
+Structure the answer so it is easy to understand:
+- What is being discussed
+- Important context or meaning
+- Key points in simple language
+- Any terms or ideas that may need clarification
+Do not invent facts or add claims that are not supported by the transcript.\n\nTRANSCRIPT:\n""" + transcript,
+        purpose="Explanation",
+    )
+
+
 def generate_translation(api_keys: list[str], result: dict[str, Any], target: str) -> str:
     transcript = transcript_for_analysis(result)
     return ai_text(
@@ -2056,11 +2071,13 @@ def reset_outputs() -> None:
         "summary",
         "translation",
         "content_pack",
+        "explanation",
         "translation_target",
         "translation_target_selector",
         "summary_output",
         "translation_output",
         "content_pack_output",
+        "explanation_output",
         "source_name",
         "bulk_results",
         "bulk_vtt_zip",
@@ -2103,7 +2120,7 @@ def render_ai_client_tools(result: dict[str, Any], content_api_keys: list[str]) 
     st.subheader("Turn the transcript into client-ready deliverables")
     st.caption("These are generated only when you click a button, so you control extra API usage.")
 
-    col_a, col_b = st.columns(2)
+    col_a, col_b, col_c = st.columns(3)
     with col_a:
         if st.button(
             "Generate summary + key points",
@@ -2118,6 +2135,19 @@ def render_ai_client_tools(result: dict[str, Any], content_api_keys: list[str]) 
                     st.error(f"Summary failed: {exc}")
 
     with col_b:
+        if st.button(
+            "Explain transcript",
+            use_container_width=True,
+            disabled=not bool(content_api_keys),
+            key="generate_explanation",
+        ):
+            with st.spinner("Explaining transcript…"):
+                try:
+                    st.session_state.explanation = generate_explanation(content_api_keys, result)
+                except Exception as exc:
+                    st.error(f"Explanation failed: {exc}")
+
+    with col_c:
         if st.button(
             "Generate creator content pack",
             use_container_width=True,
@@ -2157,6 +2187,16 @@ def render_ai_client_tools(result: dict[str, Any], content_api_keys: list[str]) 
             key="summary_output",
         )
         render_copy_button(st.session_state.summary, "Copy TXT")
+
+    if st.session_state.get("explanation"):
+        st.markdown("### Explanation")
+        st.text_area(
+            "Explanation",
+            st.session_state.explanation,
+            height=320,
+            key="explanation_output",
+        )
+        render_copy_button(st.session_state.explanation, "Copy TXT")
 
     if st.session_state.get("translation"):
         label = st.session_state.get("translation_target", "Translation")
@@ -2826,7 +2866,7 @@ if batch_page_mode:
     st.stop()
 
 source_tabs = st.tabs(
-    ["Upload file", "Paste link"],
+    ["Upload file", "Paste link", "Live voice"],
     key="source_input_tabs",
     on_change="rerun",
 )
@@ -2912,6 +2952,74 @@ with source_tabs[1]:
             except Exception as exc:
                 status.update(label="Transcription failed", state="error")
                 st.error(str(exc))
+
+
+with source_tabs[2]:
+    st.caption(
+        "Record a voice note directly from your microphone. When you stop recording, "
+        "the new recording is transcribed automatically using the selected language and output mode."
+    )
+    voice_note = st.audio_input(
+        "Record voice note",
+        sample_rate=16000,
+        key="voice_note_recorder",
+        help="16 kHz is optimized for speech transcription.",
+    )
+
+    if voice_note is not None:
+        voice_bytes = voice_note.getvalue()
+        voice_signature = hashlib.sha256(voice_bytes).hexdigest()
+        voice_size_mb = len(voice_bytes) / (1024 * 1024)
+
+        v1, v2, v3 = st.columns(3)
+        v1.metric("Source", "Microphone")
+        v2.metric("Size", f"{voice_size_mb:.2f} MB")
+        v3.metric(
+            "Mode",
+            "Detailed" if mode.startswith("Detailed") else ("Verbatim" if mode.startswith("Exact") else "Smart"),
+        )
+
+        already_processed = st.session_state.get("last_voice_note_signature") == voice_signature
+        retry_voice = False
+        if already_processed:
+            st.success("This voice note has been transcribed.")
+            retry_voice = st.button(
+                "Transcribe again with current settings",
+                use_container_width=True,
+                key="retranscribe_voice_note",
+                disabled=not bool(transcription_api_keys),
+            )
+
+        should_process_voice = bool(transcription_api_keys) and (not already_processed or retry_voice)
+        if should_process_voice:
+            reset_outputs()
+            st.session_state["source_kind"] = "voice_note"
+            status = st.status("Transcribing voice note…", expanded=True)
+            try:
+                status.write("Reading microphone recording…")
+                voice_note.seek(0)
+                status.write("Running speech-to-text…")
+                result = transcribe_media(
+                    uploaded=voice_note,
+                    api_keys=transcription_api_keys,
+                    language_codes=LANGUAGES[language_name],
+                    mode=mode,
+                    custom_vocabulary=vocab,
+                )
+                st.session_state.result = result
+                st.session_state.source_name = "voice_note.wav"
+                st.session_state["last_voice_note_signature"] = voice_signature
+                status.update(label="Voice note transcribed", state="complete", expanded=False)
+            except errors.APIError as exc:
+                status.update(label="Voice transcription failed", state="error")
+                code = getattr(exc, "code", "API")
+                message = getattr(exc, "message", str(exc))
+                st.error(f"Gemini request failed ({code}): {message}")
+            except Exception as exc:
+                status.update(label="Voice transcription failed", state="error")
+                st.error(str(exc))
+        elif not transcription_api_keys:
+            st.warning("No transcription API key is configured.")
 
 if uploaded is not None:
     size_mb = getattr(uploaded, "size", 0) / (1024 * 1024)
@@ -3017,6 +3125,7 @@ if result:
     with tab_downloads:
         extras = {
             "summary": st.session_state.get("summary", ""),
+            "explanation": st.session_state.get("explanation", ""),
             f"translation_{str(st.session_state.get('translation_target', '')).lower()}": st.session_state.get("translation", ""),
             "content_pack": st.session_state.get("content_pack", ""),
         }
@@ -3025,6 +3134,8 @@ if result:
             sections.append(("Speaker Transcript", result.get("speaker_transcript", "")))
         if st.session_state.get("summary"):
             sections.append(("Summary & Key Points", st.session_state.summary))
+        if st.session_state.get("explanation"):
+            sections.append(("Explanation", st.session_state.explanation))
         if st.session_state.get("translation"):
             sections.append((f"Translation - {st.session_state.get('translation_target', '')}", st.session_state.translation))
         if st.session_state.get("content_pack"):
