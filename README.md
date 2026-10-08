@@ -173,3 +173,15 @@ LIVE_TURN_CREDENTIAL = "..."
 ```
 
 Gemini API keys remain server-side; they are not exposed to the browser.
+
+
+### Recommended TURN for Streamlit Cloud
+
+For reliable WebRTC on Streamlit Community Cloud, configure Cloudflare Realtime TURN in Streamlit Secrets:
+
+```toml
+CLOUDFLARE_TURN_KEY_ID = "..."
+CLOUDFLARE_TURN_KEY_API_TOKEN = "..."
+```
+
+The app also supports `LIVE_TURN_URL` / `LIVE_TURN_USERNAME` / `LIVE_TURN_CREDENTIAL`. Without a private TURN credential it uses STUN plus a best-effort public OpenRelay fallback for testing.
