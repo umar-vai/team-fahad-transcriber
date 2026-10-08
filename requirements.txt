@@ -11,3 +11,5 @@ yt-dlp-ejs>=0.3.2,<0.4
 gdown>=5.2.0,<6.0
 requests>=2.31,<3.0
 playwright>=1.55,<2.0
+
+streamlit-webrtc>=0.78.1,<1.0
