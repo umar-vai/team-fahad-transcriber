@@ -3450,80 +3450,118 @@ with source_tabs[2]:
 
     with live_transcribe_tab:
         st.caption(
-            "True live mode keeps the microphone open and streams 16 kHz PCM audio to Gemini Live. "
-            "The transcript updates while you are speaking and is sent to the normal workspace after Stop."
+            "True live mode keeps the microphone open and streams 16 kHz PCM audio to Gemini Live Transcribe. "
+            "Interim words update while you are speaking, then finalized text is sent to the normal workspace after Stop."
         )
         st.info(
-            "Live mode prioritizes low latency, so it produces a plain real-time transcript. "
-            "For speaker labels/SRT/VTT, use Quick Voice Note or upload the finished recording in Detailed mode."
+            "Live sessions support Smart or Verbatim transcription with language hints and custom vocabulary. "
+            "Speaker labels and word-level SRT/VTT are still created with Quick Voice Note or uploaded media in Detailed mode."
         )
 
-        bridge = st.session_state.get("live_transcription_bridge")
-        if not isinstance(bridge, LiveTranscriptionBridge):
-            bridge = LiveTranscriptionBridge()
-            st.session_state["live_transcription_bridge"] = bridge
+        try:
+            import av as _live_av  # noqa: F401
+            from streamlit_webrtc import WebRtcMode, webrtc_streamer
+            live_dependencies_ready = True
+        except Exception as exc:
+            live_dependencies_ready = False
+            st.error(
+                "Live microphone dependencies are still installing on this deployment. "
+                f"Please wait for the latest Streamlit rebuild and refresh. ({exc})"
+            )
 
-        if not transcription_api_keys:
-            st.warning("Configure a Gemini transcription API key before starting Live Transcription.")
+        if live_dependencies_ready:
+            try:
+                bridge = st.session_state.get("live_transcription_bridge")
+                if not isinstance(bridge, LiveTranscriptionBridge):
+                    bridge = LiveTranscriptionBridge()
+                    st.session_state["live_transcription_bridge"] = bridge
+            except Exception as exc:
+                bridge = None
+                st.error(f"Could not initialize live microphone audio: {exc}")
 
-        webrtc_ctx = webrtc_streamer(
-            key="team_fahad_live_voice",
-            mode=WebRtcMode.SENDONLY,
-            audio_frame_callback=bridge.push_audio_frame,
-            rtc_configuration=live_rtc_configuration(),
-            media_stream_constraints={
-                "video": False,
-                "audio": {
-                    "channelCount": 1,
-                    "echoCancellation": True,
-                    "noiseSuppression": True,
-                    "autoGainControl": True,
-                },
-            },
-            media_toggle_controls=False,
-            async_processing=True,
-            on_audio_ended=bridge.stop,
-        )
+            if bridge is not None:
+                if not transcription_api_keys:
+                    st.warning("Configure a Gemini transcription API key before starting Live Transcription.")
 
-        is_live_playing = bool(webrtc_ctx.state.playing)
-        was_live_playing = bool(st.session_state.get("live_webrtc_was_playing", False))
+                live_mode = "SMART" if mode == "Smart clean transcript" else "VERBATIM"
+                live_vocab = vocab if mode != "Detailed subtitles + speakers" else []
+                if mode == "Detailed subtitles + speakers":
+                    st.caption(
+                        "Detailed speaker mode is not available during a live stream, so this session will use Verbatim live transcription."
+                    )
 
-        if is_live_playing and not was_live_playing:
-            reset_outputs()
-            bridge.reset()
-            st.session_state.pop("live_committed_session_id", None)
-            bridge.start(transcription_api_keys)
-
-        if not is_live_playing and was_live_playing:
-            bridge.stop()
-
-        st.session_state["live_webrtc_was_playing"] = is_live_playing
-
-        render_live_transcription_monitor(bridge, language_name)
-
-        live_snapshot = bridge.snapshot()
-        if not is_live_playing and not live_snapshot.get("running") and live_snapshot.get("text"):
-            live_action_1, live_action_2 = st.columns(2)
-            with live_action_1:
-                if st.button(
-                    "Use current live transcript in workspace",
-                    use_container_width=True,
-                    key="commit_live_transcript_manual",
+                if (
+                    not secret_or_env("CLOUDFLARE_TURN_KEY_ID")
+                    and not secret_or_env("LIVE_TURN_URL")
                 ):
-                    st.session_state.result = live_result_from_snapshot(live_snapshot, language_name)
-                    st.session_state.source_name = "live_voice_transcript.txt"
-                    st.session_state["source_kind"] = "live_voice"
-                    st.session_state["live_committed_session_id"] = live_snapshot.get("session_id")
-                    st.rerun()
-            with live_action_2:
-                if st.button(
-                    "Clear live transcript",
-                    use_container_width=True,
-                    key="clear_live_transcript",
-                ):
+                    st.caption(
+                        "Network relay: using the public OpenRelay fallback for this test. "
+                        "For production reliability, add a private Cloudflare Realtime TURN key in Streamlit Secrets."
+                    )
+
+                webrtc_ctx = webrtc_streamer(
+                    key="team_fahad_live_voice",
+                    mode=WebRtcMode.SENDONLY,
+                    audio_frame_callback=bridge.push_audio_frame,
+                    rtc_configuration=live_rtc_configuration(),
+                    media_stream_constraints={
+                        "video": False,
+                        "audio": {
+                            "channelCount": 1,
+                            "echoCancellation": True,
+                            "noiseSuppression": True,
+                            "autoGainControl": True,
+                        },
+                    },
+                    media_toggle_controls=False,
+                    async_processing=True,
+                    on_audio_ended=bridge.stop,
+                )
+
+                is_live_playing = bool(webrtc_ctx.state.playing)
+                was_live_playing = bool(st.session_state.get("live_webrtc_was_playing", False))
+
+                if is_live_playing and not was_live_playing:
+                    reset_outputs()
                     bridge.reset()
                     st.session_state.pop("live_committed_session_id", None)
-                    st.rerun()
+                    bridge.start(
+                        transcription_api_keys,
+                        LANGUAGES[language_name],
+                        live_mode,
+                        live_vocab,
+                    )
+
+                if not is_live_playing and was_live_playing:
+                    bridge.stop()
+
+                st.session_state["live_webrtc_was_playing"] = is_live_playing
+
+                render_live_transcription_monitor(bridge, language_name)
+
+                live_snapshot = bridge.snapshot()
+                if not is_live_playing and not live_snapshot.get("running") and live_snapshot.get("text"):
+                    live_action_1, live_action_2 = st.columns(2)
+                    with live_action_1:
+                        if st.button(
+                            "Use current live transcript in workspace",
+                            use_container_width=True,
+                            key="commit_live_transcript_manual",
+                        ):
+                            st.session_state.result = live_result_from_snapshot(live_snapshot, language_name)
+                            st.session_state.source_name = "live_voice_transcript.txt"
+                            st.session_state["source_kind"] = "live_voice"
+                            st.session_state["live_committed_session_id"] = live_snapshot.get("session_id")
+                            st.rerun()
+                    with live_action_2:
+                        if st.button(
+                            "Clear live transcript",
+                            use_container_width=True,
+                            key="clear_live_transcript",
+                        ):
+                            bridge.reset()
+                            st.session_state.pop("live_committed_session_id", None)
+                            st.rerun()
 
 if uploaded is not None:
     size_mb = getattr(uploaded, "size", 0) / (1024 * 1024)
