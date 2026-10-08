@@ -1,0 +1,26 @@
+name: Validate Transcriber
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app.py"
+      - "requirements.txt"
+      - ".github/workflows/validate-transcriber.yml"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile app
+        run: python -m py_compile app.py pages/2_Batch_Transcription.py
+      - name: Import live dependencies
+        run: python -c "import av, streamlit_webrtc; from google.genai import types; print('live deps ok')"
