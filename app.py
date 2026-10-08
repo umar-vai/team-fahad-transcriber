@@ -26,7 +26,6 @@ from typing import Any
 
 import streamlit as st
 import streamlit.components.v1 as components
-import av
 from docx import Document
 from google import genai
 from google.genai import errors, types
@@ -35,13 +34,12 @@ import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
 import gdown
 import requests
-from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
-LIVE_TRANSCRIBE_MODEL = "gemini-3.8-live"
+LIVE_TRANSCRIBE_MODEL = "gemini-3.5-transcribe-live"
 MAX_UPLOAD_MB = 500
 MAX_LINK_SOURCE_MB = 10_240
 MAX_GEMINI_FILE_MB = 2_048
@@ -117,10 +115,30 @@ def secret_or_env(name: str) -> Any | None:
 
 
 def live_rtc_configuration() -> dict[str, Any]:
-    """Build WebRTC ICE config, optionally adding a private TURN server from secrets."""
+    """Build a relay-capable WebRTC ICE configuration for hosted Streamlit."""
+    # Prefer a private Cloudflare Realtime TURN key when configured. This is the
+    # recommended production path for streamlit-webrtc on restrictive networks.
+    cloudflare_key_id = str(secret_or_env("CLOUDFLARE_TURN_KEY_ID") or "").strip()
+    cloudflare_token = str(secret_or_env("CLOUDFLARE_TURN_KEY_API_TOKEN") or "").strip()
+    if cloudflare_key_id and cloudflare_token:
+        try:
+            from streamlit_webrtc.credentials import get_cloudflare_ice_servers
+
+            servers = get_cloudflare_ice_servers(
+                turn_key_id=cloudflare_key_id,
+                turn_key_api_token=cloudflare_token,
+            )
+            if servers:
+                return {"iceServers": servers}
+        except Exception:
+            pass
+
     ice_servers: list[dict[str, Any]] = [
         {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun.relay.metered.ca:80"]},
     ]
+
+    # Optional private/custom TURN server.
     turn_url = str(secret_or_env("LIVE_TURN_URL") or "").strip()
     if turn_url:
         turn_server: dict[str, Any] = {"urls": [turn_url]}
@@ -131,19 +149,46 @@ def live_rtc_configuration() -> dict[str, Any]:
         if credential:
             turn_server["credential"] = credential
         ice_servers.append(turn_server)
+        return {"iceServers": ice_servers}
+
+    # Best-effort public relay fallback so Community Cloud can connect on many
+    # NAT/firewall combinations without additional setup. A private Cloudflare
+    # or custom TURN credential remains the recommended production option.
+    ice_servers.extend(
+        [
+            {
+                "urls": ["turn:openrelay.metered.ca:80"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+            {
+                "urls": ["turn:openrelay.metered.ca:443"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+            {
+                "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+        ]
+    )
     return {"iceServers": ice_servers}
 
 
 class LiveTranscriptionBridge:
-    """Thread-safe bridge from browser WebRTC audio frames to Gemini Live."""
+    """Thread-safe bridge from browser WebRTC audio frames to Gemini Live Transcribe."""
 
     def __init__(self) -> None:
+        import av as av_module
+
         self.audio_queue: queue.Queue[bytes | None] = queue.Queue(maxsize=240)
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
-        self.resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
-        self.text_parts: list[str] = []
+        self.resampler = av_module.AudioResampler(format="s16", layout="mono", rate=16000)
+        self.final_text_parts: list[str] = []
+        self.interim_text = ""
         self.status = "idle"
         self.error = ""
         self.started_at: float | None = None
@@ -151,13 +196,17 @@ class LiveTranscriptionBridge:
         self.frames_received = 0
         self.dropped_frames = 0
         self.session_id = 0
+        self.language_codes: list[str] = []
+        self.custom_vocabulary: list[str] = []
+        self.live_mode = "VERBATIM"
 
     def reset(self) -> None:
         self.stop()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=1.5)
         with self.lock:
-            self.text_parts = []
+            self.final_text_parts = []
+            self.interim_text = ""
             self.status = "idle"
             self.error = ""
             self.started_at = None
@@ -172,7 +221,13 @@ class LiveTranscriptionBridge:
             except queue.Empty:
                 break
 
-    def start(self, api_keys: list[str]) -> None:
+    def start(
+        self,
+        api_keys: list[str],
+        language_codes: list[str],
+        live_mode: str,
+        custom_vocabulary: list[str],
+    ) -> None:
         if self.thread and self.thread.is_alive():
             return
         if not api_keys:
@@ -180,6 +235,10 @@ class LiveTranscriptionBridge:
                 self.status = "error"
                 self.error = "No Gemini API key is configured for live transcription."
             return
+
+        self.language_codes = list(language_codes)
+        self.live_mode = "SMART" if str(live_mode).upper() == "SMART" else "VERBATIM"
+        self.custom_vocabulary = list(custom_vocabulary[:100])
         self.stop_event.clear()
         with self.lock:
             self.status = "connecting"
@@ -213,7 +272,7 @@ class LiveTranscriptionBridge:
             except queue.Full:
                 pass
 
-    def push_audio_frame(self, frame: av.AudioFrame) -> av.AudioFrame:
+    def push_audio_frame(self, frame: Any) -> Any:
         """Resample browser microphone audio to Gemini's preferred 16 kHz mono PCM."""
         try:
             resampled = self.resampler.resample(frame)
@@ -224,7 +283,6 @@ class LiveTranscriptionBridge:
                 try:
                     self.audio_queue.put_nowait(payload)
                 except queue.Full:
-                    # Prefer current speech over stale buffered audio when the network is slow.
                     try:
                         self.audio_queue.get_nowait()
                     except queue.Empty:
@@ -243,21 +301,30 @@ class LiveTranscriptionBridge:
                     self.error = f"Microphone audio conversion failed: {exc}"
         return frame
 
-    def append_transcript(self, text: str) -> None:
-        chunk = str(text or "")
+    def set_interim_transcript(self, text: str) -> None:
+        with self.lock:
+            self.interim_text = str(text or "").strip()
+
+    def commit_transcript(self, text: str) -> None:
+        chunk = str(text or "").strip()
         if not chunk:
             return
         with self.lock:
-            if self.text_parts and self.text_parts[-1] == chunk:
-                return
-            self.text_parts.append(chunk)
+            if not self.final_text_parts or self.final_text_parts[-1] != chunk:
+                self.final_text_parts.append(chunk)
+            self.interim_text = ""
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             now = self.stopped_at or time.time()
             elapsed = max(0.0, now - self.started_at) if self.started_at else 0.0
+            final_text = " ".join(part for part in self.final_text_parts if part).strip()
+            interim = self.interim_text.strip()
+            display_text = (final_text + (" " if final_text and interim else "") + interim).strip()
             return {
-                "text": "".join(self.text_parts).strip(),
+                "text": display_text,
+                "final_text": final_text,
+                "interim_text": interim,
                 "status": self.status,
                 "error": self.error,
                 "elapsed": elapsed,
@@ -277,13 +344,12 @@ class LiveTranscriptionBridge:
                 return
             except Exception as exc:
                 last_error = exc
-                # Only fail over automatically when another key exists and the stream
-                # has not intentionally been stopped.
                 if self.stop_event.is_set() or index == len(api_keys) - 1:
                     break
 
+        snapshot = self.snapshot()
         with self.lock:
-            if self.stop_event.is_set() and self.text_parts:
+            if self.stop_event.is_set() and snapshot.get("text"):
                 self.status = "complete"
             else:
                 self.status = "error"
@@ -292,9 +358,18 @@ class LiveTranscriptionBridge:
 
     async def _run_live_session(self, api_key: str) -> None:
         client = genai.Client(api_key=api_key)
+        transcription_kwargs: dict[str, Any] = {
+            "language_codes": self.language_codes,
+            "mode": self.live_mode,
+        }
+        if self.custom_vocabulary:
+            transcription_kwargs["custom_vocabulary"] = self.custom_vocabulary
+
         config = types.LiveConnectConfig(
             response_modalities=["TEXT"],
-            input_audio_transcription=types.AudioTranscriptionConfig(),
+            input_audio_transcription=types.AudioTranscriptionConfig(
+                **transcription_kwargs,
+            ),
         )
 
         try:
@@ -328,9 +403,18 @@ class LiveTranscriptionBridge:
                             content = getattr(response, "server_content", None)
                             if content is None:
                                 continue
-                            transcription = getattr(content, "input_transcription", None)
-                            if transcription is not None:
-                                self.append_transcript(getattr(transcription, "text", "") or "")
+
+                            interim = getattr(content, "interim_input_transcription", None)
+                            if interim is not None:
+                                self.set_interim_transcript(
+                                    getattr(interim, "text", "") or ""
+                                )
+
+                            final = getattr(content, "input_transcription", None)
+                            if final is not None:
+                                self.commit_transcript(
+                                    getattr(final, "text", "") or ""
+                                )
                         if self.stop_event.is_set():
                             return
 
@@ -359,12 +443,16 @@ class LiveTranscriptionBridge:
                 except asyncio.TimeoutError:
                     sender_task.cancel()
 
+                # Give Gemini enough time to emit the final input transcription.
                 try:
-                    await asyncio.wait_for(receiver_task, timeout=7.0)
+                    await asyncio.wait_for(receiver_task, timeout=8.0)
                 except asyncio.TimeoutError:
                     receiver_task.cancel()
 
                 with self.lock:
+                    if self.interim_text and not self.final_text_parts:
+                        self.final_text_parts.append(self.interim_text)
+                        self.interim_text = ""
                     self.status = "complete"
                     self.stopped_at = time.time()
         finally:
@@ -388,7 +476,7 @@ def live_result_from_snapshot(snapshot: dict[str, Any], language_name: str) -> d
     }
 
 
-@st.fragment(run_every=0.5)
+@st.fragment(run_every=0.35)
 def render_live_transcription_monitor(bridge: LiveTranscriptionBridge, language_name: str) -> None:
     snapshot = bridge.snapshot()
     status = str(snapshot.get("status") or "idle")
@@ -396,8 +484,8 @@ def render_live_transcription_monitor(bridge: LiveTranscriptionBridge, language_
 
     status_labels = {
         "idle": "Ready",
-        "connecting": "Connecting to Gemini Live…",
-        "listening": "Listening · transcript updates while you speak",
+        "connecting": "Connecting to Gemini Live Transcribe…",
+        "listening": "Listening · live words update while you speak",
         "finalizing": "Finalizing the last words…",
         "complete": "Live transcription complete",
         "error": "Live transcription failed",
@@ -417,9 +505,18 @@ def render_live_transcription_monitor(bridge: LiveTranscriptionBridge, language_
 
     if text_value:
         st.markdown("#### Live transcript")
-        st.code(text_value, language=None, wrap_lines=True)
+        st.text_area(
+            "Live transcript text",
+            text_value,
+            height=250,
+            disabled=True,
+            label_visibility="collapsed",
+            key=f"live_text_{snapshot.get('session_id')}",
+        )
+        if snapshot.get("interim_text"):
+            st.caption("Listening… the last words are still being finalized.")
     elif status in {"connecting", "listening", "finalizing"}:
-        st.info("Start speaking. Your words will appear here as Gemini receives them.")
+        st.info("Start speaking. Your words will appear here while you talk.")
     else:
         st.caption("Your live transcript will appear here.")
 
