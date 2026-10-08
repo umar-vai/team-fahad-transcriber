@@ -6,6 +6,7 @@ A Streamlit app for client-ready video/audio transcription using the Gemini API.
 
 - Audio and video upload
 - Browser microphone voice-note recording with automatic transcription
+- True live microphone transcription with Gemini Live + WebRTC
 - Video-to-audio extraction
 - Automatic language detection, including mixed-language speech
 - Bangla, English, Arabic, and Hindi language hints
@@ -157,3 +158,18 @@ This is a strong MVP/client-demo version. Before selling subscriptions at scale,
 The single-file transcriber also accepts a public media URL. It temporarily downloads the linked media, normalizes it to a Gemini-friendly MP3, runs the normal transcription pipeline, and removes the temporary files afterward.
 
 Direct MP4/MP3/M4A links and many sites supported by yt-dlp can work. Private, login-only, or platform-protected media may require additional access and may not be downloadable from the hosted app.
+
+
+## Live transcription
+
+The **Live voice → Live Transcription** mode uses browser WebRTC microphone streaming and Gemini Live input-audio transcription. Audio is resampled to 16 kHz mono PCM on the server and the transcript updates while the user speaks.
+
+A public STUN server is configured by default. On restrictive networks, add a TURN service in Streamlit Secrets:
+
+```toml
+LIVE_TURN_URL = "turn:your-turn-server.example.com:3478"
+LIVE_TURN_USERNAME = "..."
+LIVE_TURN_CREDENTIAL = "..."
+```
+
+Gemini API keys remain server-side; they are not exposed to the browser.
