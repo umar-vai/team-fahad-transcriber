@@ -5,6 +5,7 @@ A Streamlit app for client-ready video/audio transcription using the Gemini API.
 ## Included features
 
 - Audio and video upload
+- Browser microphone voice-note recording with automatic transcription
 - Video-to-audio extraction
 - Automatic language detection, including mixed-language speech
 - Bangla, English, Arabic, and Hindi language hints
@@ -15,6 +16,7 @@ A Streamlit app for client-ready video/audio transcription using the Gemini API.
 - Speaker/timestamp transcript
 - Optional custom vocabulary for names and technical terms
 - AI summary + key points
+- Explain transcript in clear language
 - Full translation to Bangla / English / Arabic / Hindi
 - Creator content pack: titles, descriptions, hooks, tags, CTA, and chapters when timestamps are available
 - TXT, SRT, VTT, DOCX, and complete ZIP downloads
