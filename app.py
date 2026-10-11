@@ -2422,34 +2422,25 @@ def _transcribe_media_once(
             if custom_vocabulary and mode != "Detailed subtitles + speakers":
                 transcription_config["custom_vocabulary"] = custom_vocabulary[:100]
 
-            # The Interactions API began returning a backend 400 error on
-            # gemini-3.5-transcribe ("Thinking is not enabled for this model")
-            # on 2026-10-07 even when no thinking config is supplied. Use the
-            # supported Generate Content transcription endpoint instead.
-            audio_transcription_config: dict[str, Any] = {
-                "language_codes": language_codes,
+            # Use the model's documented Interactions API. The temporary
+            # Oct 7, 2026 backend regression ("Thinking is not enabled") was
+            # fixed by Google on Oct 9. Detailed diarization and word timestamps
+            # are configured inside the verbatim mode object on this endpoint.
+            input_item = {
+                "type": "audio",
+                "uri": remote_file.uri,
+                "mime_type": getattr(remote_file, "mime_type", mime_type) or mime_type,
             }
-            if mode == "Smart clean transcript":
-                audio_transcription_config["mode"] = "SMART"
-            else:
-                audio_transcription_config["mode"] = "VERBATIM"
-
-            if mode == "Detailed subtitles + speakers":
-                audio_transcription_config["diarization"] = True
-                audio_transcription_config["word_timestamp"] = True
-
-            if custom_vocabulary and mode != "Detailed subtitles + speakers":
-                audio_transcription_config["custom_vocabulary"] = custom_vocabulary[:100]
 
             last_error: Exception | None = None
-            response = None
+            interaction = None
             for attempt in range(2):
                 try:
-                    response = client.models.generate_content(
+                    interaction = client.interactions.create(
                         model=TRANSCRIBE_MODEL,
-                        contents=[remote_file],
-                        config={
-                            "audio_transcription_config": audio_transcription_config,
+                        input=[input_item],
+                        generation_config={
+                            "transcription_config": transcription_config,
                         },
                     )
                     break
@@ -2460,13 +2451,14 @@ def _transcribe_media_once(
                         raise
                     time.sleep(5)
 
-            if response is None:
+            if interaction is None:
                 raise RuntimeError(f"Transcription request failed: {last_error}")
 
-            transcript, words = extract_generate_content_transcription(response)
+            transcript = str(getattr(interaction, "output_text", "") or "").strip()
             if not transcript:
                 raise RuntimeError("Gemini returned an empty transcription.")
 
+            words = extract_word_annotations(interaction)
             segments = make_segments(words)
 
             return {
