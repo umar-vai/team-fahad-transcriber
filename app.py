@@ -2778,6 +2778,7 @@ def transcribe_linked_media_with_chunks(
             (name for name, codes in LANGUAGES.items() if codes == language_codes),
             "Auto detect",
         ),
+        "compatibility_notice": "",
     }
 
 
@@ -4140,6 +4141,9 @@ if result:
         st.success(f"Completed • Media duration: {format_clock(result['duration'])}")
     else:
         st.success("Completed")
+
+    if result.get("compatibility_notice"):
+        st.info(str(result["compatibility_notice"]))
 
     st.markdown("<div class='section-label' style='margin-top:1.2rem'>02 · Workspace</div>", unsafe_allow_html=True)
     st.markdown("### Your transcription workspace")
