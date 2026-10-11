@@ -778,6 +778,57 @@ def extract_word_annotations(interaction: Any) -> list[WordInfo]:
     return [w for w in words if w.text]
 
 
+def merge_speaker_labels_into_timed_words(
+    timed_words: list[WordInfo],
+    speaker_words: list[WordInfo],
+) -> list[WordInfo]:
+    """Merge diarization labels from a second pass onto timestamped words."""
+    if not timed_words or not speaker_words:
+        return timed_words
+
+    def norm(value: str) -> str:
+        return re.sub(r"[^\w]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+    merged: list[WordInfo] = []
+    speaker_index = 0
+    last_speaker: str | None = None
+
+    for timed in timed_words:
+        target = norm(timed.text)
+        matched_speaker: str | None = None
+
+        # Search a short window so punctuation/tokenization differences do not
+        # cause speaker labels to drift across the whole transcript.
+        best_index: int | None = None
+        for idx in range(speaker_index, min(len(speaker_words), speaker_index + 8)):
+            candidate = speaker_words[idx]
+            if target and norm(candidate.text) == target:
+                best_index = idx
+                matched_speaker = candidate.speaker
+                break
+
+        if best_index is not None:
+            speaker_index = best_index + 1
+            if matched_speaker:
+                last_speaker = matched_speaker
+        elif speaker_index < len(speaker_words):
+            candidate = speaker_words[speaker_index]
+            matched_speaker = candidate.speaker
+            speaker_index += 1
+            if matched_speaker:
+                last_speaker = matched_speaker
+
+        merged.append(
+            WordInfo(
+                text=timed.text,
+                speaker=matched_speaker or last_speaker or timed.speaker,
+                start=timed.start,
+                end=timed.end,
+            )
+        )
+    return merged
+
+
 def extract_generate_content_transcription(response: Any) -> tuple[str, list[WordInfo]]:
     """Parse Gemini Generate Content transcription text, speakers and word timestamps."""
     words: list[WordInfo] = []
@@ -2432,33 +2483,148 @@ def _transcribe_media_once(
                 "mime_type": getattr(remote_file, "mime_type", mime_type) or mime_type,
             }
 
-            last_error: Exception | None = None
+            def create_interaction(config: dict[str, Any]) -> Any:
+                last_error: Exception | None = None
+                for attempt in range(2):
+                    try:
+                        return client.interactions.create(
+                            model=TRANSCRIBE_MODEL,
+                            input=[input_item],
+                            generation_config={
+                                "transcription_config": config,
+                            },
+                        )
+                    except errors.APIError as exc:
+                        last_error = exc
+                        code = getattr(exc, "code", None)
+                        if code != 503 or attempt == 1:
+                            raise
+                        time.sleep(5)
+                raise RuntimeError(f"Transcription request failed: {last_error}")
+
+            compatibility_notice = ""
             interaction = None
-            for attempt in range(2):
-                try:
-                    interaction = client.interactions.create(
-                        model=TRANSCRIBE_MODEL,
-                        input=[input_item],
-                        generation_config={
-                            "transcription_config": transcription_config,
-                        },
-                    )
-                    break
-                except errors.APIError as exc:
-                    last_error = exc
-                    code = getattr(exc, "code", None)
-                    if code != 503 or attempt == 1:
-                        raise
-                    time.sleep(5)
+            words: list[WordInfo] = []
+
+            try:
+                interaction = create_interaction(transcription_config)
+                words = extract_word_annotations(interaction)
+            except errors.APIError as exc:
+                code = getattr(exc, "code", None)
+                message = str(getattr(exc, "message", "") or exc).lower()
+
+                # Some Gemini projects/backends have intermittently rejected the
+                # combined Detailed payload even though it is documented. Keep
+                # the normal one-pass path first, then degrade gracefully to
+                # feature-isolated passes so the user still gets timestamps,
+                # speaker labels and a usable VTT instead of a hard 400.
+                if detailed and code == 400 and (
+                    "invalid" in message or "argument" in message or "request" in message
+                ):
+                    base_mode = {"type": "verbatim"}
+
+                    # First retry the documented combined features without an
+                    # explicit language hint. Auto-detection avoids backend
+                    # validation edge cases on some projects.
+                    combined_no_language = {
+                        "mode": {
+                            **base_mode,
+                            "diarization_mode": "speaker",
+                            "timestamp_granularities": ["word"],
+                        }
+                    }
+                    try:
+                        interaction = create_interaction(combined_no_language)
+                        words = extract_word_annotations(interaction)
+                        compatibility_notice = (
+                            "Detailed transcription used automatic language detection "
+                            "because Gemini rejected the same request with a language hint."
+                        )
+                    except errors.APIError as combined_exc:
+                        if getattr(combined_exc, "code", None) != 400:
+                            raise
+
+                        timestamp_interaction = None
+                        diarization_interaction = None
+                        timestamp_error: Exception | None = None
+                        diarization_error: Exception | None = None
+
+                        try:
+                            timestamp_interaction = create_interaction(
+                                {
+                                    "mode": {
+                                        **base_mode,
+                                        "timestamp_granularities": ["word"],
+                                    }
+                                }
+                            )
+                        except Exception as split_exc:
+                            timestamp_error = split_exc
+
+                        try:
+                            diarization_interaction = create_interaction(
+                                {
+                                    "mode": {
+                                        **base_mode,
+                                        "diarization_mode": "speaker",
+                                    }
+                                }
+                            )
+                        except Exception as split_exc:
+                            diarization_error = split_exc
+
+                        if timestamp_interaction is None and diarization_interaction is None:
+                            # Preserve the most useful original API error rather
+                            # than hiding it behind the compatibility attempts.
+                            raise combined_exc
+
+                        if timestamp_interaction is not None:
+                            interaction = timestamp_interaction
+                            timed_words = extract_word_annotations(timestamp_interaction)
+                        else:
+                            timed_words = []
+
+                        speaker_words = (
+                            extract_word_annotations(diarization_interaction)
+                            if diarization_interaction is not None
+                            else []
+                        )
+
+                        if timed_words and speaker_words:
+                            words = merge_speaker_labels_into_timed_words(
+                                timed_words,
+                                speaker_words,
+                            )
+                            compatibility_notice = (
+                                "Gemini rejected combined speaker+timestamp processing, "
+                                "so the app completed two compatible passes and merged "
+                                "speaker labels with word timestamps automatically."
+                            )
+                        elif timed_words:
+                            words = timed_words
+                            compatibility_notice = (
+                                "Gemini accepted word timestamps but rejected speaker "
+                                "diarization for this request. Subtitles are available "
+                                "without reliable speaker labels."
+                            )
+                        else:
+                            interaction = diarization_interaction
+                            words = speaker_words
+                            compatibility_notice = (
+                                "Gemini accepted speaker diarization but rejected word "
+                                "timestamps for this request. The transcript is available, "
+                                "but timestamped subtitles may be unavailable."
+                            )
+                else:
+                    raise
 
             if interaction is None:
-                raise RuntimeError(f"Transcription request failed: {last_error}")
+                raise RuntimeError("Gemini returned no transcription interaction.")
 
             transcript = str(getattr(interaction, "output_text", "") or "").strip()
             if not transcript:
                 raise RuntimeError("Gemini returned an empty transcription.")
 
-            words = extract_word_annotations(interaction)
             segments = make_segments(words)
 
             return {
@@ -2471,6 +2637,7 @@ def _transcribe_media_once(
                 "duration": duration,
                 "mode": mode,
                 "language": next((name for name, codes in LANGUAGES.items() if codes == language_codes), "Auto detect"),
+                "compatibility_notice": compatibility_notice,
             }
     finally:
         if remote_file is not None:
