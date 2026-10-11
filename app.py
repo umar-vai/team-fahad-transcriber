@@ -1861,6 +1861,341 @@ def download_frameio_media(url: str, folder: Path) -> LocalMediaSource:
     )
 
 
+
+def is_facebook_media_url(url: str) -> bool:
+    """Detect Facebook post/reel/video/share URLs handled by the dedicated fallback."""
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    host = (parsed.hostname or "").lower().lstrip("www.")
+    return host in {"facebook.com", "m.facebook.com", "mbasic.facebook.com", "fb.watch"} or host.endswith(".facebook.com")
+
+
+def _facebook_cookie_text() -> str:
+    """Load an optional Netscape-format Facebook cookie export from server-side secrets."""
+    raw = str(
+        secret_or_env("FACEBOOK_COOKIES")
+        or secret_or_env("YTDLP_COOKIES")
+        or ""
+    ).strip()
+    if raw:
+        return raw
+
+    encoded = str(
+        secret_or_env("FACEBOOK_COOKIES_B64")
+        or secret_or_env("YTDLP_COOKIES_B64")
+        or ""
+    ).strip()
+    if not encoded:
+        return ""
+    try:
+        return base64.b64decode(encoded).decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def _write_ytdlp_cookie_file(folder: Path) -> Path | None:
+    text = _facebook_cookie_text()
+    if not text:
+        return None
+    cookie_file = folder / "browser_cookies.txt"
+    if not text.startswith("# Netscape HTTP Cookie File"):
+        text = "# Netscape HTTP Cookie File\n" + text
+    cookie_file.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+    return cookie_file
+
+
+def _netscape_cookies_for_playwright(cookie_text: str) -> list[dict[str, Any]]:
+    cookies: list[dict[str, Any]] = []
+    for raw_line in str(cookie_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        elif line.startswith("#"):
+            continue
+
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, _include_subdomains, path, secure, expires, name = parts[:6]
+        value = "\t".join(parts[6:])
+        if not domain or not name:
+            continue
+
+        item: dict[str, Any] = {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path or "/",
+            "secure": str(secure).upper() == "TRUE",
+        }
+        try:
+            expiry = int(expires)
+            if expiry > 0:
+                item["expires"] = expiry
+        except Exception:
+            pass
+        cookies.append(item)
+    return cookies
+
+
+def _facebook_static_media_candidates(page_text: str) -> list[str]:
+    """Extract CDN/video candidates exposed in Facebook's HTML/JSON payload."""
+    normalized = str(page_text or "")
+    normalized = normalized.replace("\\/", "/")
+    for old, new in {
+        "\\u0026": "&", "\\u003d": "=", "\\u003D": "=",
+        "\\u002F": "/", "\\u002f": "/", "\\u003A": ":",
+        "\\u003a": ":", "&amp;": "&",
+    }.items():
+        normalized = normalized.replace(old, new)
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    # Facebook has used these field names across several page/player payloads.
+    field_patterns = (
+        r'"(?:browser_native_hd_url|browser_native_sd_url|playable_url_quality_hd|playable_url|hd_src|sd_src)"\s*:\s*"([^"]+)"',
+        r'<meta[^>]+property=["\']og:video(?::url|:secure_url)?["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:video(?::url|:secure_url)?["\']',
+        r'<source[^>]+src=["\']([^"\']+)["\']',
+    )
+    for pattern in field_patterns:
+        for match in re.findall(pattern, normalized, flags=re.I):
+            candidate = _frameio_decode_embedded_url(match).rstrip("),]}")
+            if candidate.startswith(("http://", "https://")) and candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+
+    # Also inspect all embedded URLs, preferring Facebook CDN media.
+    for item in _frameio_public_media_candidates(normalized):
+        lower = item.lower()
+        if any(token in lower for token in ("fbcdn.net", ".mp4", ".m3u8", ".mpd", "video")):
+            if item not in seen:
+                seen.add(item)
+                candidates.append(item)
+
+    return candidates
+
+
+def _facebook_browser_media_candidates(url: str) -> list[str]:
+    """Render a public Facebook post and capture media requests made by the player."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return []
+
+    chromium_path = (
+        shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+    )
+    if not chromium_path:
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        value = _frameio_decode_embedded_url(candidate)
+        if not value.startswith(("http://", "https://")) or value.startswith(("blob:", "data:")):
+            return
+        if value in seen:
+            return
+        lower = value.lower()
+        if not any(token in lower for token in (
+            "fbcdn.net", ".mp4", ".m3u8", ".mpd", ".m4a", ".mp3", "video"
+        )):
+            return
+        seen.add(value)
+        found.append(value)
+
+    media_content_types = (
+        "video/", "audio/", "application/vnd.apple.mpegurl",
+        "application/x-mpegurl", "application/dash+xml",
+    )
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                executable_path=chromium_path,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--autoplay-policy=no-user-gesture-required",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36"
+                ),
+                viewport={"width": 1365, "height": 900},
+                ignore_https_errors=True,
+                locale="en-US",
+            )
+
+            cookie_text = _facebook_cookie_text()
+            if cookie_text:
+                try:
+                    cookies = _netscape_cookies_for_playwright(cookie_text)
+                    if cookies:
+                        context.add_cookies(cookies)
+                except Exception:
+                    pass
+
+            page = context.new_page()
+
+            def on_request(request) -> None:
+                add(request.url)
+
+            def on_response(response) -> None:
+                try:
+                    content_type = str(response.headers.get("content-type") or "").lower()
+                except Exception:
+                    content_type = ""
+                if any(content_type.startswith(prefix) for prefix in media_content_types):
+                    add(response.url)
+                else:
+                    add(response.url)
+
+            page.on("request", on_request)
+            page.on("response", on_response)
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(1_500)
+
+            # Dismiss common public-page prompts where possible.
+            for selector in (
+                "button:has-text('Allow all cookies')",
+                "button:has-text('Allow essential and optional cookies')",
+                "button:has-text('Not now')",
+                "[aria-label='Close']",
+            ):
+                try:
+                    target = page.locator(selector).first
+                    if target.count() and target.is_visible():
+                        target.click(timeout=1_500)
+                except Exception:
+                    pass
+
+            for selector in (
+                "video",
+                "div[role='button'][aria-label*='Play' i]",
+                "button[aria-label*='Play' i]",
+            ):
+                try:
+                    target = page.locator(selector).first
+                    if target.count() and target.is_visible():
+                        if selector == "video":
+                            target.evaluate(
+                                "el => { el.muted = true; return el.play().catch(() => null); }"
+                            )
+                        else:
+                            target.click(timeout=2_500)
+                        break
+                except Exception:
+                    continue
+
+            deadline = time.monotonic() + 7.0
+            while time.monotonic() < deadline:
+                if any(
+                    token in candidate.lower()
+                    for candidate in found
+                    for token in ("fbcdn.net", ".mp4", ".m3u8", ".mpd")
+                ):
+                    break
+                page.wait_for_timeout(300)
+
+            try:
+                dom_urls = page.eval_on_selector_all(
+                    "video, audio, source",
+                    "els => els.flatMap(el => [el.currentSrc || '', el.src || '']).filter(Boolean)",
+                )
+                for item in dom_urls or []:
+                    add(item)
+            except Exception:
+                pass
+
+            try:
+                html_text = page.content()
+                for item in _facebook_static_media_candidates(html_text):
+                    add(item)
+            except Exception:
+                pass
+
+            browser.close()
+    except Exception:
+        return found
+
+    return found
+
+
+def download_facebook_public_fallback(url: str, folder: Path) -> LocalMediaSource:
+    """Best-effort resolver for public Facebook posts when yt-dlp's extractor breaks."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    candidates: list[str] = []
+    try:
+        session = requests.Session()
+        cookie_text = _facebook_cookie_text()
+        if cookie_text:
+            for item in _netscape_cookies_for_playwright(cookie_text):
+                try:
+                    session.cookies.set(
+                        item["name"],
+                        item["value"],
+                        domain=item.get("domain"),
+                        path=item.get("path", "/"),
+                    )
+                except Exception:
+                    pass
+        response = session.get(url, headers=headers, allow_redirects=True, timeout=(20, 45))
+        if response.ok:
+            candidates.extend(_facebook_static_media_candidates(response.text))
+            url = response.url or url
+    except requests.RequestException:
+        pass
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates + _facebook_browser_media_candidates(url):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+
+    for candidate in ordered[:80]:
+        media = _download_remote_candidate(candidate, url, folder)
+        if media is not None:
+            return LocalMediaSource(
+                path=media.path,
+                name="facebook_media.mp3",
+                size=media.size,
+            )
+
+    if _facebook_cookie_text():
+        raise RuntimeError(
+            "Facebook opened the post, but no playable media source could be resolved. "
+            "The configured Facebook cookies may be expired, or Facebook may be blocking "
+            "media delivery from the Streamlit Cloud server."
+        )
+    raise RuntimeError(
+        "Facebook's current public-page format could not expose the video to the hosted app. "
+        "This is a known Facebook/yt-dlp extractor problem. If the post is visible only after "
+        "Facebook login, add a Netscape-format cookie export to Streamlit Secrets as "
+        "FACEBOOK_COOKIES (or FACEBOOK_COOKIES_B64), then retry."
+    )
+
+
 def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
     """Download one public media URL, routing Frame.io short links before yt-dlp."""
     url = validate_public_media_url(url)
