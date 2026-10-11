@@ -3672,7 +3672,7 @@ with source_tabs[1]:
         key="single_media_link",
     )
     st.caption(
-        "Supports public Google Drive file links, Frame.io share links, direct media links, YouTube and other supported sources. "
+        "Supports public Google Drive files, Frame.io shares, Facebook posts/reels, direct media links, YouTube and other supported sources. "
         "Google Drive folder links are not single media files."
     )
 
