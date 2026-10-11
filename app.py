@@ -2468,6 +2468,189 @@ def prepare_audio(source: Path, extension: str, folder: Path) -> tuple[Path, str
     return source, AUDIO_MIME_TYPES[extension], duration
 
 
+def flash_audio_transcription_fallback(
+    client: genai.Client,
+    input_item: dict[str, Any],
+    mode: str,
+    duration: float | None,
+    language_codes: list[str],
+    custom_vocabulary: list[str],
+) -> dict[str, Any]:
+    """Fallback transcription using Gemini Flash audio understanding.
+
+    Google documents Gemini Flash as able to transcribe uploaded audio and to
+    return structured speaker/timestamp segments. This keeps the app usable when
+    the dedicated Transcribe model rejects an otherwise valid audio request.
+    """
+    language_hint = (
+        ", ".join(language_codes)
+        if language_codes
+        else "auto-detect all spoken languages and preserve code-switching"
+    )
+    vocab_hint = ""
+    if custom_vocabulary:
+        vocab_hint = (
+            "\nPrefer these spellings when they match the audio: "
+            + ", ".join(custom_vocabulary[:100])
+        )
+
+    if mode == "Detailed subtitles + speakers":
+        schema = {
+            "type": "object",
+            "properties": {
+                "transcript": {"type": "string"},
+                "segments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "speaker": {"type": "string"},
+                            "start_seconds": {"type": "number"},
+                            "end_seconds": {"type": "number"},
+                            "text": {"type": "string"},
+                        },
+                        "required": [
+                            "speaker",
+                            "start_seconds",
+                            "end_seconds",
+                            "text",
+                        ],
+                    },
+                },
+            },
+            "required": ["transcript", "segments"],
+        }
+        prompt = f"""Transcribe this audio accurately in the original spoken language(s).
+Language guidance: {language_hint}.
+Identify distinct speakers consistently as Speaker 1, Speaker 2, etc.
+Return segment-level timestamps in seconds from the beginning of the audio.
+Do not translate, summarize, omit speech, or invent content.
+Keep each segment reasonably short for subtitle use.
+The transcript field must contain the complete transcript.
+{vocab_hint}""".strip()
+
+        interaction = client.interactions.create(
+            model=CONTENT_MODEL,
+            input=[
+                {"type": "text", "text": prompt},
+                input_item,
+            ],
+            response_format=schema,
+        )
+        raw = str(getattr(interaction, "output_text", "") or "").strip()
+        if not raw:
+            raise RuntimeError("Gemini Flash returned an empty detailed transcription.")
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Gemini Flash returned an invalid structured transcription."
+            ) from exc
+
+        transcript = str(payload.get("transcript") or "").strip()
+        segments: list[Segment] = []
+        for item in payload.get("segments") or []:
+            try:
+                start = max(0.0, float(item.get("start_seconds") or 0.0))
+                end = max(start, float(item.get("end_seconds") or start))
+            except (TypeError, ValueError):
+                continue
+            text_value = str(item.get("text") or "").strip()
+            if not text_value:
+                continue
+            speaker = str(item.get("speaker") or "").strip() or None
+            segments.append(
+                Segment(
+                    start=start,
+                    end=end,
+                    text=text_value,
+                    speaker=speaker,
+                )
+            )
+
+        if duration and segments:
+            cleaned: list[Segment] = []
+            for segment in segments:
+                start = min(max(0.0, segment.start), float(duration))
+                end = min(max(start, segment.end), float(duration))
+                if end <= start:
+                    end = min(float(duration), start + 0.5)
+                if end > start:
+                    cleaned.append(
+                        Segment(
+                            start=start,
+                            end=end,
+                            text=segment.text,
+                            speaker=segment.speaker,
+                        )
+                    )
+            segments = cleaned
+
+        if not transcript and segments:
+            transcript = "\n".join(segment.text for segment in segments).strip()
+        if not transcript:
+            raise RuntimeError("Gemini Flash returned no usable transcript.")
+
+        if not segments:
+            segments = approximate_segments_from_transcript(transcript, duration)
+
+        return {
+            "transcript": transcript,
+            "words": [],
+            "segments": segments,
+            "speaker_transcript": speaker_transcript(segments),
+            "srt": segments_to_srt(segments),
+            "vtt": segments_to_vtt(segments),
+            "compatibility_notice": (
+                "The dedicated Gemini Transcribe model rejected this audio request, "
+                "so the app automatically used Gemini Flash audio understanding. "
+                "Speaker labels and timestamps are segment-level rather than word-level."
+            ),
+        }
+
+    if mode == "Smart clean transcript":
+        prompt = f"""Generate a complete clean transcript of this audio.
+Language guidance: {language_hint}.
+Preserve every factual statement, name, number, and meaning.
+Remove filler words, stutters, false starts, and duplicate fragments.
+Add natural punctuation and paragraphing.
+Do not summarize, translate, explain, or add any information.
+Return only the transcript.
+{vocab_hint}""".strip()
+    else:
+        prompt = f"""Generate a complete verbatim transcript of this audio.
+Language guidance: {language_hint}.
+Preserve fillers, repetitions, false starts, names, numbers, and wording as spoken.
+Do not summarize, translate, explain, clean up, or add information.
+Return only the transcript.
+{vocab_hint}""".strip()
+
+    interaction = client.interactions.create(
+        model=CONTENT_MODEL,
+        input=[
+            {"type": "text", "text": prompt},
+            input_item,
+        ],
+    )
+    transcript = str(getattr(interaction, "output_text", "") or "").strip()
+    if not transcript:
+        raise RuntimeError("Gemini Flash returned an empty transcription.")
+
+    return {
+        "transcript": transcript,
+        "words": [],
+        "segments": [],
+        "speaker_transcript": "",
+        "srt": "",
+        "vtt": "",
+        "compatibility_notice": (
+            "The dedicated Gemini Transcribe model rejected this audio request, "
+            "so the app automatically used Gemini Flash audio transcription."
+        ),
+    }
+
+
 def _transcribe_media_once(
     uploaded: Any,
     api_key: str,
@@ -2572,150 +2755,76 @@ def _transcribe_media_once(
             compatibility_notice = ""
             interaction = None
             words: list[WordInfo] = []
+            transcript = ""
+            segments: list[Segment] = []
 
             try:
                 interaction = create_interaction(transcription_config)
+                transcript = str(getattr(interaction, "output_text", "") or "").strip()
                 words = extract_word_annotations(interaction)
+                segments = make_segments(words)
             except errors.APIError as exc:
                 code = getattr(exc, "code", None)
                 message = str(getattr(exc, "message", "") or exc).lower()
 
-                # Some Gemini projects/backends have intermittently rejected the
-                # combined Detailed payload even though it is documented. Keep
-                # the normal one-pass path first, then degrade gracefully to
-                # feature-isolated passes so the user still gets timestamps,
-                # speaker labels and a usable VTT instead of a hard 400.
-                if detailed and code == 400 and (
+                if code == 400 and (
                     "invalid" in message or "argument" in message or "request" in message
                 ):
-                    base_mode = {"type": "verbatim"}
-
-                    # First retry the documented combined features without an
-                    # explicit language hint. Auto-detection avoids backend
-                    # validation edge cases on some projects.
-                    combined_no_language = {
-                        "mode": {
-                            **base_mode,
-                            "diarization_mode": "speaker",
-                            "timestamp_granularities": ["word"],
-                        }
-                    }
+                    # First confirm whether only the optional Transcribe settings
+                    # are rejected. If the minimal dedicated request also fails,
+                    # move to the documented Gemini Flash audio-understanding path.
                     try:
-                        interaction = create_interaction(combined_no_language)
-                        words = extract_word_annotations(interaction)
-                        compatibility_notice = (
-                            "Detailed transcription used automatic language detection "
-                            "because Gemini rejected the same request with a language hint."
-                        )
-                    except errors.APIError as combined_exc:
-                        if getattr(combined_exc, "code", None) != 400:
-                            raise
-
-                        timestamp_interaction = None
-                        diarization_interaction = None
-                        timestamp_error: Exception | None = None
-                        diarization_error: Exception | None = None
-
-                        try:
-                            timestamp_interaction = create_interaction(
-                                {
-                                    "mode": {
-                                        **base_mode,
-                                        "timestamp_granularities": ["word"],
-                                    }
-                                }
-                            )
-                        except Exception as split_exc:
-                            timestamp_error = split_exc
-
-                        try:
-                            diarization_interaction = create_interaction(
-                                {
-                                    "mode": {
-                                        **base_mode,
-                                        "diarization_mode": "speaker",
-                                    }
-                                }
-                            )
-                        except Exception as split_exc:
-                            diarization_error = split_exc
-
-                        if timestamp_interaction is None and diarization_interaction is None:
-                            # Preserve the most useful original API error rather
-                            # than hiding it behind the compatibility attempts.
-                            raise combined_exc
-
-                        if timestamp_interaction is not None:
-                            interaction = timestamp_interaction
-                            timed_words = extract_word_annotations(timestamp_interaction)
-                        else:
-                            timed_words = []
-
-                        speaker_words = (
-                            extract_word_annotations(diarization_interaction)
-                            if diarization_interaction is not None
-                            else []
-                        )
-
-                        if timed_words and speaker_words:
-                            words = merge_speaker_labels_into_timed_words(
-                                timed_words,
-                                speaker_words,
-                            )
-                            compatibility_notice = (
-                                "Gemini rejected combined speaker+timestamp processing, "
-                                "so the app completed two compatible passes and merged "
-                                "speaker labels with word timestamps automatically."
-                            )
-                        elif timed_words:
-                            words = timed_words
-                            compatibility_notice = (
-                                "Gemini accepted word timestamps but rejected speaker "
-                                "diarization for this request. Subtitles are available "
-                                "without reliable speaker labels."
-                            )
-                        else:
-                            interaction = diarization_interaction
-                            words = speaker_words
-                            compatibility_notice = (
-                                "Gemini accepted speaker diarization but rejected word "
-                                "timestamps for this request. The transcript is available, "
-                                "but timestamped subtitles may be unavailable."
-                            )
-                else:
-                    # Smart/verbatim requests can also hit a backend validation
-                    # regression on transcription_config. Retry the exact same
-                    # uploaded audio with no optional transcription_config,
-                    # which the official API supports as default verbatim.
-                    if code == 400 and (
-                        "invalid" in message or "argument" in message or "request" in message
-                    ):
                         interaction = create_interaction(None)
+                        transcript = str(
+                            getattr(interaction, "output_text", "") or ""
+                        ).strip()
                         words = extract_word_annotations(interaction)
+                        segments = make_segments(words)
                         compatibility_notice = (
                             "Gemini rejected the optional transcription settings, "
-                            "so the app retried with the model's minimal supported request."
+                            "so the app retried with the dedicated model's minimal request."
                         )
-                    else:
-                        raise
+                    except errors.APIError as minimal_exc:
+                        minimal_code = getattr(minimal_exc, "code", None)
+                        if minimal_code != 400:
+                            raise
 
-            if interaction is None:
-                raise RuntimeError("Gemini returned no transcription interaction.")
+                        fallback = flash_audio_transcription_fallback(
+                            client=client,
+                            input_item=input_item,
+                            mode=mode,
+                            duration=duration,
+                            language_codes=language_codes,
+                            custom_vocabulary=custom_vocabulary,
+                        )
+                        transcript = str(fallback.get("transcript") or "").strip()
+                        words = list(fallback.get("words") or [])
+                        segments = list(fallback.get("segments") or [])
+                        compatibility_notice = str(
+                            fallback.get("compatibility_notice") or ""
+                        )
+                else:
+                    raise
 
-            transcript = str(getattr(interaction, "output_text", "") or "").strip()
+            if not transcript and interaction is not None:
+                transcript = str(getattr(interaction, "output_text", "") or "").strip()
             if not transcript:
                 raise RuntimeError("Gemini returned an empty transcription.")
 
-            # If Smart mode had to fall back to the minimal verbatim endpoint,
-            # preserve the Smart user experience with a second text-only cleanup
-            # pass. This does not re-transcribe or invent new content.
-            if mode == "Smart clean transcript" and compatibility_notice:
+            # If Smart mode had to use the minimal dedicated endpoint, preserve
+            # Smart cleanup without re-transcribing the audio.
+            if (
+                mode == "Smart clean transcript"
+                and interaction is not None
+                and compatibility_notice
+                and "Gemini Flash" not in compatibility_notice
+            ):
                 try:
                     cleaned = _ai_text_once(
                         api_key,
                         """Clean the transcript below for readability while preserving every factual statement, name, number, and meaning.
 Remove filler words, stutters, obvious false starts and duplicate fragments. Add natural punctuation and paragraphing.
-Do not summarize, shorten ideas, add facts, or change the language. Return only the cleaned transcript.
+Do not summarize, shorten ideas, add facts, translate, or change the language. Return only the cleaned transcript.
 
 TRANSCRIPT:
 """ + transcript,
@@ -2730,22 +2839,16 @@ TRANSCRIPT:
                         " Smart cleanup was unavailable, so the verbatim transcript is shown."
                     )
 
-            segments = make_segments(words)
-
-            # Last-resort Detailed compatibility: if Gemini accepts the audio
-            # only without diarization/timestamp config, keep the transcript
-            # useful and generate clearly-marked approximate subtitle timing.
             if detailed and not segments:
                 segments = approximate_segments_from_transcript(transcript, duration)
                 if segments:
                     compatibility_notice = (
-                        "Gemini's detailed speaker/timestamp configuration was unavailable "
-                        "for this request. The transcript completed successfully; SRT/VTT "
-                        "timings are approximate and speaker labels are unavailable."
-                    )
-                elif not compatibility_notice:
-                    compatibility_notice = (
-                        "Gemini returned the transcript without speaker/timestamp annotations."
+                        compatibility_notice + " "
+                        if compatibility_notice
+                        else ""
+                    ) + (
+                        "Exact timestamp annotations were unavailable, so SRT/VTT "
+                        "timings are approximate."
                     )
 
             return {
@@ -2757,7 +2860,10 @@ TRANSCRIPT:
                 "vtt": segments_to_vtt(segments),
                 "duration": duration,
                 "mode": mode,
-                "language": next((name for name, codes in LANGUAGES.items() if codes == language_codes), "Auto detect"),
+                "language": next(
+                    (name for name, codes in LANGUAGES.items() if codes == language_codes),
+                    "Auto detect",
+                ),
                 "compatibility_notice": compatibility_notice,
             }
     finally:
