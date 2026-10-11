@@ -2258,11 +2258,28 @@ def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
     if ffmpeg:
         ydl_opts["ffmpeg_location"] = ffmpeg
 
+    cookie_file = _write_ytdlp_cookie_file(folder)
+    if cookie_file is not None:
+        ydl_opts["cookiefile"] = str(cookie_file)
+
+    is_facebook = is_facebook_media_url(url)
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except yt_dlp.utils.DownloadError as exc:
         message = str(exc).strip()
+
+        # Facebook has a known upstream extractor regression where public
+        # posts/reels can return "Cannot parse data" even on current yt-dlp.
+        # Fall back to the actual browser-visible player/CDN requests instead
+        # of failing the transcription workflow immediately.
+        if is_facebook:
+            try:
+                return download_facebook_public_fallback(url, folder)
+            except Exception as fallback_exc:
+                raise RuntimeError(str(fallback_exc)) from exc
+
         if "No supported JavaScript runtime" in message:
             raise RuntimeError(
                 "This platform needs a supported JavaScript runtime for link extraction. "
@@ -2270,6 +2287,11 @@ def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
             ) from exc
         raise RuntimeError(f"Could not download media from that link. {message[:500]}") from exc
     except Exception as exc:
+        if is_facebook:
+            try:
+                return download_facebook_public_fallback(url, folder)
+            except Exception as fallback_exc:
+                raise RuntimeError(str(fallback_exc)) from exc
         raise RuntimeError(f"Could not process that media link: {exc}") from exc
 
     candidates = [
