@@ -910,6 +910,71 @@ def make_segments(words: list[WordInfo], max_duration: float = 7.0, max_chars: i
     return [s for s in segments if s.text]
 
 
+def approximate_segments_from_transcript(
+    transcript: str,
+    duration: float | None,
+    max_chars: int = 90,
+) -> list[Segment]:
+    """Create coarse subtitle timings when Gemini's timestamp API is unavailable.
+
+    Timings are distributed proportionally across the known media duration.
+    These are intentionally marked as approximate by the caller.
+    """
+    text = re.sub(r"\s+", " ", str(transcript or "")).strip()
+    if not text or not duration or duration <= 0:
+        return []
+
+    raw_parts = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?।])\s+", text)
+        if part.strip()
+    ]
+    chunks: list[str] = []
+    for part in raw_parts or [text]:
+        if len(part) <= max_chars:
+            chunks.append(part)
+            continue
+        words = part.split()
+        current: list[str] = []
+        current_len = 0
+        for word in words:
+            projected = current_len + (1 if current else 0) + len(word)
+            if current and projected > max_chars:
+                chunks.append(" ".join(current))
+                current = [word]
+                current_len = len(word)
+            else:
+                current.append(word)
+                current_len = projected
+        if current:
+            chunks.append(" ".join(current))
+
+    if not chunks:
+        return []
+
+    weights = [max(1, len(re.sub(r"\s+", "", chunk))) for chunk in chunks]
+    total_weight = float(sum(weights))
+    cursor = 0.0
+    segments: list[Segment] = []
+    for index, (chunk, weight) in enumerate(zip(chunks, weights)):
+        if index == len(chunks) - 1:
+            end = float(duration)
+        else:
+            end = min(float(duration), cursor + float(duration) * (weight / total_weight))
+        if end <= cursor:
+            end = min(float(duration), cursor + 0.5)
+        segments.append(
+            Segment(
+                start=cursor,
+                end=end,
+                text=chunk,
+                speaker=None,
+            )
+        )
+        cursor = end
+    return [segment for segment in segments if segment.text and segment.end > segment.start]
+
+
 def speaker_transcript(segments: list[Segment]) -> str:
     if not segments:
         return ""
@@ -2483,17 +2548,19 @@ def _transcribe_media_once(
                 "mime_type": getattr(remote_file, "mime_type", mime_type) or mime_type,
             }
 
-            def create_interaction(config: dict[str, Any]) -> Any:
+            def create_interaction(config: dict[str, Any] | None = None) -> Any:
                 last_error: Exception | None = None
                 for attempt in range(2):
                     try:
-                        return client.interactions.create(
-                            model=TRANSCRIBE_MODEL,
-                            input=[input_item],
-                            generation_config={
+                        kwargs: dict[str, Any] = {
+                            "model": TRANSCRIBE_MODEL,
+                            "input": [input_item],
+                        }
+                        if config is not None:
+                            kwargs["generation_config"] = {
                                 "transcription_config": config,
-                            },
-                        )
+                            }
+                        return client.interactions.create(**kwargs)
                     except errors.APIError as exc:
                         last_error = exc
                         code = getattr(exc, "code", None)
@@ -2616,7 +2683,21 @@ def _transcribe_media_once(
                                 "but timestamped subtitles may be unavailable."
                             )
                 else:
-                    raise
+                    # Smart/verbatim requests can also hit a backend validation
+                    # regression on transcription_config. Retry the exact same
+                    # uploaded audio with no optional transcription_config,
+                    # which the official API supports as default verbatim.
+                    if code == 400 and (
+                        "invalid" in message or "argument" in message or "request" in message
+                    ):
+                        interaction = create_interaction(None)
+                        words = extract_word_annotations(interaction)
+                        compatibility_notice = (
+                            "Gemini rejected the optional transcription settings, "
+                            "so the app retried with the model's minimal supported request."
+                        )
+                    else:
+                        raise
 
             if interaction is None:
                 raise RuntimeError("Gemini returned no transcription interaction.")
@@ -2625,7 +2706,47 @@ def _transcribe_media_once(
             if not transcript:
                 raise RuntimeError("Gemini returned an empty transcription.")
 
+            # If Smart mode had to fall back to the minimal verbatim endpoint,
+            # preserve the Smart user experience with a second text-only cleanup
+            # pass. This does not re-transcribe or invent new content.
+            if mode == "Smart clean transcript" and compatibility_notice:
+                try:
+                    cleaned = _ai_text_once(
+                        api_key,
+                        """Clean the transcript below for readability while preserving every factual statement, name, number, and meaning.
+Remove filler words, stutters, obvious false starts and duplicate fragments. Add natural punctuation and paragraphing.
+Do not summarize, shorten ideas, add facts, or change the language. Return only the cleaned transcript.
+
+TRANSCRIPT:
+""" + transcript,
+                    )
+                    if cleaned.strip():
+                        transcript = cleaned.strip()
+                        compatibility_notice += (
+                            " Smart cleanup was then applied as a text-only pass."
+                        )
+                except Exception:
+                    compatibility_notice += (
+                        " Smart cleanup was unavailable, so the verbatim transcript is shown."
+                    )
+
             segments = make_segments(words)
+
+            # Last-resort Detailed compatibility: if Gemini accepts the audio
+            # only without diarization/timestamp config, keep the transcript
+            # useful and generate clearly-marked approximate subtitle timing.
+            if detailed and not segments:
+                segments = approximate_segments_from_transcript(transcript, duration)
+                if segments:
+                    compatibility_notice = (
+                        "Gemini's detailed speaker/timestamp configuration was unavailable "
+                        "for this request. The transcript completed successfully; SRT/VTT "
+                        "timings are approximate and speaker labels are unavailable."
+                    )
+                elif not compatibility_notice:
+                    compatibility_notice = (
+                        "Gemini returned the transcript without speaker/timestamp annotations."
+                    )
 
             return {
                 "transcript": transcript,
