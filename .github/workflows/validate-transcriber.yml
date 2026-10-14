@@ -2,7 +2,7 @@ name: Validate Transcriber
 
 on:
   push:
-    branches: [main, fix/youtube-po-provider-20261014]
+    branches: [main]
     paths:
       - "app.py"
       - "requirements.txt"
