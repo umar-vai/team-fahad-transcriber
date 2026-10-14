@@ -2519,8 +2519,8 @@ def _youtube_base_ydl_opts(
 def download_youtube_media(url: str, folder: Path) -> LocalMediaSource:
     """Download YouTube audio with current PO-token/403-aware fallbacks.
 
-    For public videos we prefer a normal extraction first, then Safari HLS,
-    which currently avoids GVS PO-token enforcement, then the embedded client.
+    When a PO-token provider is available, prefer mweb with a fresh token.
+    Otherwise retain the normal, Safari HLS, embedded, and Android VR routes.
     """
     download_root = folder / "youtube_download"
     download_root.mkdir(parents=True, exist_ok=True)
