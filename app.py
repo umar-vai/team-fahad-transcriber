@@ -2312,6 +2312,288 @@ def download_facebook_public_fallback(url: str, folder: Path) -> LocalMediaSourc
     )
 
 
+
+def is_youtube_media_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    host = (parsed.hostname or "").lower().lstrip("www.")
+    return host in {
+        "youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+    } or host.endswith(".youtube.com")
+
+
+def _decode_secret_text(plain_key: str, b64_key: str) -> str:
+    raw = str(secret_or_env(plain_key) or "").strip()
+    if raw:
+        return raw
+    encoded = str(secret_or_env(b64_key) or "").strip()
+    if not encoded:
+        return ""
+    try:
+        return base64.b64decode(encoded).decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def _youtube_cookie_text() -> str:
+    return (
+        _decode_secret_text("YOUTUBE_COOKIES", "YOUTUBE_COOKIES_B64")
+        or _decode_secret_text("YTDLP_COOKIES", "YTDLP_COOKIES_B64")
+    )
+
+
+def _write_cookie_text(folder: Path, filename: str, text: str) -> Path | None:
+    value = str(text or "").strip()
+    if not value:
+        return None
+    path = folder / filename
+    if not value.startswith("# Netscape HTTP Cookie File"):
+        value = "# Netscape HTTP Cookie File\n" + value
+    path.write_text(value + ("\n" if not value.endswith("\n") else ""), encoding="utf-8")
+    return path
+
+
+def _supported_ytdlp_js_runtimes() -> dict[str, dict[str, str]]:
+    """Return only JS runtimes new enough for current yt-dlp EJS."""
+    runtimes: dict[str, dict[str, str]] = {}
+
+    def version_tuple(executable: str) -> tuple[int, int]:
+        try:
+            result = subprocess.run(
+                [executable, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            match = re.search(r"(\d+)\.(\d+)", (result.stdout or "") + " " + (result.stderr or ""))
+            return (int(match.group(1)), int(match.group(2))) if match else (0, 0)
+        except Exception:
+            return (0, 0)
+
+    deno = shutil.which("deno")
+    if deno and version_tuple(deno) >= (2, 3):
+        runtimes["deno"] = {"path": deno}
+
+    node = shutil.which("node")
+    if node and version_tuple(node) >= (22, 0):
+        runtimes["node"] = {"path": node}
+
+    qjs = shutil.which("qjs")
+    if qjs:
+        runtimes["quickjs"] = {"path": qjs}
+
+    return runtimes
+
+
+def _youtube_base_ydl_opts(
+    output_template: str,
+    max_bytes: int,
+    progress_hook: Any,
+    cookie_file: Path | None,
+) -> dict[str, Any]:
+    opts: dict[str, Any] = {
+        "outtmpl": output_template,
+        "noplaylist": True,
+        "max_filesize": max_bytes,
+        "socket_timeout": 30,
+        "retries": 4,
+        "fragment_retries": 5,
+        "extractor_retries": 3,
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+        "progress_hooks": [progress_hook],
+        "cachedir": False,
+        "concurrent_fragment_downloads": 2,
+        "remote_components": ["ejs:github"],
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/18.5 Safari/605.1.15"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "logger": type(
+            "QuietYoutubeLogger",
+            (),
+            {
+                "debug": staticmethod(lambda msg: None),
+                "warning": staticmethod(lambda msg: None),
+                "error": staticmethod(lambda msg: None),
+            },
+        )(),
+    }
+    runtimes = _supported_ytdlp_js_runtimes()
+    if runtimes:
+        opts["js_runtimes"] = runtimes
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        opts["ffmpeg_location"] = ffmpeg
+    if cookie_file is not None:
+        opts["cookiefile"] = str(cookie_file)
+
+    provider_url = str(secret_or_env("YOUTUBE_PO_PROVIDER_URL") or "").strip()
+    if provider_url:
+        opts.setdefault("extractor_args", {})["youtubepot-bgutilhttp"] = {
+            "base_url": [provider_url]
+        }
+    return opts
+
+
+def download_youtube_media(url: str, folder: Path) -> LocalMediaSource:
+    """Download YouTube audio with current PO-token/403-aware fallbacks.
+
+    For public videos we prefer a normal extraction first, then Safari HLS,
+    which currently avoids GVS PO-token enforcement, then the embedded client.
+    """
+    download_root = folder / "youtube_download"
+    download_root.mkdir(parents=True, exist_ok=True)
+    max_bytes = MAX_LINK_SOURCE_MB * 1024 * 1024
+
+    def progress_hook(data: dict[str, Any]) -> None:
+        if int(data.get("downloaded_bytes") or 0) > max_bytes:
+            raise yt_dlp.utils.DownloadError(
+                f"Linked source exceeds the {MAX_LINK_SOURCE_MB // 1024} GB download limit."
+            )
+
+    cookie_file = _write_cookie_text(
+        folder,
+        "youtube_cookies.txt",
+        _youtube_cookie_text(),
+    )
+
+    # YouTube's current PO-token rollout can 403 regular CDN URLs. The
+    # web_safari HLS path is intentionally second because yt-dlp currently
+    # documents its HLS delivery as not requiring a GVS PO token.
+    strategies: list[tuple[str, str, dict[str, list[str]]]] = [
+        (
+            "default",
+            "bestaudio[ext=m4a]/bestaudio/best",
+            {},
+        ),
+        (
+            "safari_hls",
+            "bestaudio[protocol^=m3u8]/best[protocol^=m3u8]/bestaudio/best",
+            {"youtube": {"player_client": ["web_safari"]}},
+        ),
+        (
+            "embedded",
+            "bestaudio/best",
+            {"youtube": {"player_client": ["web_embedded"]}},
+        ),
+        (
+            "android_vr",
+            "bestaudio/best",
+            {"youtube": {"player_client": ["android_vr"]}},
+        ),
+    ]
+
+    provider_url = str(secret_or_env("YOUTUBE_PO_PROVIDER_URL") or "").strip()
+    if provider_url:
+        strategies.insert(
+            1,
+            (
+                "mweb_po",
+                "bestaudio/best",
+                {
+                    "youtube": {"player_client": ["mweb"]},
+                    "youtubepot-bgutilhttp": {"base_url": [provider_url]},
+                },
+            ),
+        )
+
+    errors_seen: list[str] = []
+    successful_info: dict[str, Any] | None = None
+    successful_source: Path | None = None
+
+    for strategy_name, format_selector, extractor_args in strategies:
+        strategy_dir = download_root / strategy_name
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        opts = _youtube_base_ydl_opts(
+            str(strategy_dir / "source.%(ext)s"),
+            max_bytes,
+            progress_hook,
+            cookie_file,
+        )
+        opts["format"] = format_selector
+
+        merged_args = dict(opts.get("extractor_args") or {})
+        for key, value in extractor_args.items():
+            merged_args[key] = value
+        if merged_args:
+            opts["extractor_args"] = merged_args
+
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+
+            candidates = [
+                p for p in strategy_dir.iterdir()
+                if p.is_file() and p.suffix.lower() not in {".part", ".ytdl"}
+            ]
+            if not candidates:
+                errors_seen.append(f"{strategy_name}: no downloaded media file")
+                continue
+
+            source = max(candidates, key=lambda p: p.stat().st_size)
+            if source.stat().st_size <= 0:
+                errors_seen.append(f"{strategy_name}: downloaded file was empty")
+                continue
+            if source.stat().st_size > max_bytes:
+                raise ValueError(
+                    f"Linked source is larger than the {MAX_LINK_SOURCE_MB // 1024} GB download limit."
+                )
+
+            successful_info = info or {}
+            successful_source = source
+            break
+        except yt_dlp.utils.DownloadError as exc:
+            errors_seen.append(f"{strategy_name}: {str(exc).strip()[:220]}")
+        except Exception as exc:
+            errors_seen.append(f"{strategy_name}: {str(exc).strip()[:220]}")
+
+    if successful_source is None:
+        cookie_note = (
+            " A YouTube cookie export is configured, but it may be expired or tied to a blocked session."
+            if cookie_file is not None
+            else " For videos that require login, add a Netscape cookie export as YOUTUBE_COOKIES or YOUTUBE_COOKIES_B64."
+        )
+        provider_note = (
+            ""
+            if provider_url
+            else " For maximum reliability on hosted servers, configure a PO-token provider URL as YOUTUBE_PO_PROVIDER_URL."
+        )
+        detail = " | ".join(errors_seen[-4:])
+        raise RuntimeError(
+            "YouTube blocked all available public playback routes for this hosted server. "
+            "The app tried the normal client, Safari HLS, embedded, and Android VR fallbacks."
+            + cookie_note
+            + provider_note
+            + (f" Last attempts: {detail}" if detail else "")
+        )
+
+    title = str(
+        (successful_info or {}).get("title")
+        or successful_source.stem
+        or "youtube_media"
+    ).strip()
+    safe_title = safe_name(title)[:100] or "youtube_media"
+    normalized = folder / f"{safe_title}.mp3"
+    normalize_link_media_to_mp3(successful_source, normalized)
+
+    return LocalMediaSource(
+        path=normalized,
+        name=f"{safe_title}.mp3",
+        size=normalized.stat().st_size,
+    )
+
+
 def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
     """Download one public media URL, routing Frame.io short links before yt-dlp."""
     url = validate_public_media_url(url)
@@ -2336,6 +2618,9 @@ def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
 
     if frameio_share_ids(url):
         return download_frameio_media(url, folder)
+
+    if is_youtube_media_url(url):
+        return download_youtube_media(url, folder)
 
     download_dir = folder / "link_download"
     download_dir.mkdir(parents=True, exist_ok=True)
