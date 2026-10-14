@@ -2594,6 +2594,316 @@ def download_youtube_media(url: str, folder: Path) -> LocalMediaSource:
     )
 
 
+
+def _select_youtube_caption_track(
+    info: dict[str, Any],
+    language_codes: list[str],
+) -> tuple[str, dict[str, Any]] | None:
+    """Choose the best manual/automatic caption track for transcription fallback."""
+    manual = dict(info.get("subtitles") or {})
+    automatic = dict(info.get("automatic_captions") or {})
+
+    requested: list[str] = []
+    for code in language_codes:
+        normalized = str(code or "").strip()
+        if not normalized:
+            continue
+        requested.extend(
+            [
+                normalized,
+                normalized.lower(),
+                normalized.split("-")[0],
+                normalized.split("_")[0],
+            ]
+        )
+
+    preferred_keys: list[str] = []
+    preferred_keys.extend(requested)
+
+    source_lang = str(info.get("language") or "").strip()
+    if source_lang:
+        preferred_keys.extend(
+            [
+                source_lang,
+                source_lang.lower(),
+                source_lang.split("-")[0],
+            ]
+        )
+
+    # YouTube often exposes the source automatic captions as "*-orig".
+    for mapping in (manual, automatic):
+        for key in mapping:
+            if str(key).endswith("-orig"):
+                preferred_keys.append(str(key))
+
+    preferred_keys.extend(["bn", "en", "en-US", "en-GB", "ar", "hi"])
+
+    def pick(mapping: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        if not mapping:
+            return None
+
+        ordered_keys: list[str] = []
+        seen: set[str] = set()
+        for candidate in preferred_keys + list(mapping.keys()):
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if key in mapping:
+                ordered_keys.append(key)
+
+        for lang_key in ordered_keys:
+            entries = mapping.get(lang_key) or []
+            if not isinstance(entries, list):
+                continue
+            # JSON3 preserves timing/text cleanly. VTT is the next-best fallback.
+            ranked = sorted(
+                (entry for entry in entries if isinstance(entry, dict) and entry.get("url")),
+                key=lambda entry: (
+                    0 if str(entry.get("ext") or "").lower() == "json3" else
+                    1 if str(entry.get("ext") or "").lower() == "vtt" else
+                    2
+                ),
+            )
+            if ranked:
+                return lang_key, ranked[0]
+        return None
+
+    return pick(manual) or pick(automatic)
+
+
+def _segments_from_youtube_json3(payload: dict[str, Any]) -> list[Segment]:
+    segments: list[Segment] = []
+    for event in payload.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        segs = event.get("segs") or []
+        if not isinstance(segs, list):
+            continue
+        text_value = "".join(
+            str(seg.get("utf8") or "")
+            for seg in segs
+            if isinstance(seg, dict)
+        )
+        text_value = re.sub(r"\s+", " ", text_value).strip()
+        if not text_value:
+            continue
+        try:
+            start = max(0.0, float(event.get("tStartMs") or 0.0) / 1000.0)
+            duration = max(0.0, float(event.get("dDurationMs") or 0.0) / 1000.0)
+        except (TypeError, ValueError):
+            continue
+        end = start + max(duration, 0.2)
+        segments.append(
+            Segment(
+                start=start,
+                end=end,
+                text=text_value,
+                speaker=None,
+            )
+        )
+    return segments
+
+
+def _segments_from_vtt_text(vtt_text: str) -> list[Segment]:
+    """Parse WebVTT cues while collapsing YouTube rolling-caption duplicates."""
+    def parse_timecode(value: str) -> float | None:
+        raw = value.strip().split()[0]
+        parts = raw.replace(",", ".").split(":")
+        try:
+            if len(parts) == 3:
+                h, m, s = parts
+                return float(h) * 3600 + float(m) * 60 + float(s)
+            if len(parts) == 2:
+                m, s = parts
+                return float(m) * 60 + float(s)
+        except ValueError:
+            return None
+        return None
+
+    cleaned = str(vtt_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    blocks = re.split(r"\n{2,}", cleaned)
+    raw_segments: list[Segment] = []
+
+    for block in blocks:
+        lines = [line.strip() for line in block.split("\n") if line.strip()]
+        if not lines or lines[0].upper().startswith("WEBVTT"):
+            continue
+
+        time_index = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        if time_index is None:
+            continue
+
+        left, right = lines[time_index].split("-->", 1)
+        start = parse_timecode(left)
+        end = parse_timecode(right)
+        if start is None or end is None:
+            continue
+
+        text_lines = lines[time_index + 1 :]
+        text_value = " ".join(text_lines)
+        text_value = re.sub(r"<[^>]+>", "", text_value)
+        text_value = (
+            text_value.replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+        )
+        text_value = re.sub(r"\s+", " ", text_value).strip()
+        if not text_value:
+            continue
+
+        raw_segments.append(
+            Segment(
+                start=max(0.0, start),
+                end=max(start + 0.1, end),
+                text=text_value,
+                speaker=None,
+            )
+        )
+
+    # YouTube auto-captions often repeat the previous rolling line. Drop exact
+    # duplicates and cues fully contained in the immediately following cue.
+    deduped: list[Segment] = []
+    for segment in raw_segments:
+        if deduped and segment.text == deduped[-1].text:
+            deduped[-1] = Segment(
+                start=deduped[-1].start,
+                end=max(deduped[-1].end, segment.end),
+                text=segment.text,
+                speaker=None,
+            )
+            continue
+        if deduped and segment.text.startswith(deduped[-1].text) and len(segment.text) > len(deduped[-1].text):
+            previous = deduped[-1]
+            deduped[-1] = Segment(
+                start=previous.start,
+                end=max(previous.end, segment.end),
+                text=segment.text,
+                speaker=None,
+            )
+            continue
+        deduped.append(segment)
+
+    return deduped
+
+
+def fetch_youtube_caption_result(
+    url: str,
+    folder: Path,
+    mode: str,
+    language_codes: list[str],
+) -> dict[str, Any] | None:
+    """Use public YouTube subtitles when media CDN downloads are blocked.
+
+    This path intentionally does not download the audio/video file. It is a
+    transcription-only fallback for hosted servers that receive 403 responses
+    from YouTube media URLs.
+    """
+    max_bytes = MAX_LINK_SOURCE_MB * 1024 * 1024
+
+    def noop_progress(_data: dict[str, Any]) -> None:
+        return None
+
+    cookie_file = _write_cookie_text(
+        folder,
+        "youtube_caption_cookies.txt",
+        _youtube_cookie_text(),
+    )
+    opts = _youtube_base_ydl_opts(
+        str(folder / "youtube_caption_probe.%(ext)s"),
+        max_bytes,
+        noop_progress,
+        cookie_file,
+    )
+    opts["skip_download"] = True
+    opts["extract_flat"] = False
+    opts.pop("format", None)
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False) or {}
+    except Exception:
+        return None
+
+    selected = _select_youtube_caption_track(info, language_codes)
+    if selected is None:
+        return None
+
+    caption_lang, entry = selected
+    caption_url = str(entry.get("url") or "").strip()
+    caption_ext = str(entry.get("ext") or "").lower()
+    if not caption_url:
+        return None
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.youtube.com/",
+    }
+
+    try:
+        response = requests.get(caption_url, headers=headers, timeout=(15, 40))
+        response.raise_for_status()
+    except requests.RequestException:
+        return None
+
+    segments: list[Segment] = []
+    if caption_ext == "json3":
+        try:
+            segments = _segments_from_youtube_json3(response.json())
+        except Exception:
+            segments = []
+    else:
+        segments = _segments_from_vtt_text(response.text)
+
+    if not segments:
+        return None
+
+    transcript = "\n".join(segment.text for segment in segments).strip()
+    duration = float(info.get("duration") or 0.0) or max(segment.end for segment in segments)
+
+    notice = (
+        f"YouTube blocked direct media download from the hosted server, so the app used "
+        f"YouTube's available {caption_lang} captions instead. "
+    )
+    if mode == "Detailed subtitles + speakers":
+        notice += (
+            "Timed subtitles are preserved, but speaker labels are unavailable because "
+            "the audio itself was not accessible."
+        )
+    elif mode == "Exact verbatim transcript":
+        notice += (
+            "This is caption-derived text, so it may differ slightly from a true verbatim "
+            "audio transcription."
+        )
+    else:
+        notice += (
+            "This caption-derived transcript is being used as the Smart transcript fallback."
+        )
+
+    return {
+        "transcript": transcript,
+        "words": [],
+        "segments": segments if mode == "Detailed subtitles + speakers" else [],
+        "speaker_transcript": (
+            speaker_transcript(segments)
+            if mode == "Detailed subtitles + speakers"
+            else ""
+        ),
+        "srt": segments_to_srt(segments) if mode == "Detailed subtitles + speakers" else "",
+        "vtt": segments_to_vtt(segments) if mode == "Detailed subtitles + speakers" else "",
+        "duration": duration,
+        "mode": mode,
+        "language": caption_lang,
+        "compatibility_notice": notice,
+        "source_title": str(info.get("title") or "YouTube video"),
+    }
+
+
 def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
     """Download one public media URL, routing Frame.io short links before yt-dlp."""
     url = validate_public_media_url(url)
