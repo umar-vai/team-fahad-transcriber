@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import io
+import logging
 import ipaddress
 import os
 import queue
@@ -35,6 +36,8 @@ from imageio_ffmpeg import get_ffmpeg_exe
 import gdown
 import requests
 
+
+LOGGER = logging.getLogger(__name__)
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
@@ -2389,6 +2392,64 @@ def _supported_ytdlp_js_runtimes() -> dict[str, dict[str, str]]:
     return runtimes
 
 
+def _configure_youtube_wpc_provider() -> str:
+    """Prepare the browser-based yt-dlp PO-token provider for hosted Linux.
+
+    The upstream WPC provider launches Chromium with a visible window by default.
+    Streamlit-hosted Linux instances normally have no DISPLAY, so we switch only
+    that provider to headless Chromium and keep the rest of the app unchanged.
+    Returns the Chromium executable path when the provider is available.
+    """
+    chromium_path = (
+        shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+    )
+    if not chromium_path:
+        return ""
+
+    try:
+        import nodriver
+        import nodriver.core.config
+        import yt_dlp_plugins.extractor.getpot_wpc as wpc
+    except Exception as exc:
+        LOGGER.info("YouTube WPC PO-token provider unavailable: %s", exc)
+        return ""
+
+    # The provider itself currently hard-codes headless=False. On hosted Linux
+    # there is usually no X/Wayland display, so patch its runtime config only in
+    # that environment. Local desktop use keeps the upstream behavior.
+    if not os.getenv("DISPLAY") and not getattr(wpc, "_team_fahad_headless_patch", False):
+        def hosted_config(self: Any, proxy: str | None = None) -> Any:
+            browser_args = [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ]
+            if proxy:
+                browser_args.append(f"--proxy-server={proxy}")
+            return nodriver.core.config.Config(
+                headless=True,
+                browser_executable_path=chromium_path,
+                browser_args=browser_args,
+            )
+
+        async def hosted_launch_browser(config: Any) -> Any:
+            browser = await wpc.start(config=config)
+            await browser.cookies.clear()
+            await browser.get("https://www.youtube.com?themeRefresh=1")
+            return browser
+
+        wpc.WPCPTP.get_nodriver_config = hosted_config
+        wpc.launch_browser = hosted_launch_browser
+        wpc._team_fahad_headless_patch = True
+
+    return chromium_path
+
+
 def _youtube_base_ydl_opts(
     output_template: str,
     max_bytes: int,
@@ -2443,6 +2504,15 @@ def _youtube_base_ydl_opts(
         opts.setdefault("extractor_args", {})["youtubepot-bgutilhttp"] = {
             "base_url": [provider_url]
         }
+
+    # Secondary provider: mint per-video PO tokens with the Chromium already
+    # installed for this app. This avoids requiring cookies for ordinary public
+    # videos when YouTube rejects the hosted server's direct playback route.
+    wpc_browser = _configure_youtube_wpc_provider()
+    if wpc_browser:
+        opts.setdefault("extractor_args", {})["youtubepot-wpc"] = {
+            "browser_path": [wpc_browser]
+        }
     return opts
 
 
@@ -2468,45 +2538,46 @@ def download_youtube_media(url: str, folder: Path) -> LocalMediaSource:
         _youtube_cookie_text(),
     )
 
-    # YouTube's current PO-token rollout can 403 regular CDN URLs. The
-    # web_safari HLS path is intentionally second because yt-dlp currently
-    # documents its HLS delivery as not requiring a GVS PO token.
-    strategies: list[tuple[str, str, dict[str, list[str]]]] = [
-        (
-            "default",
-            "bestaudio[ext=m4a]/bestaudio/best",
-            {},
-        ),
-        (
-            "safari_hls",
-            "bestaudio[protocol^=m3u8]/best[protocol^=m3u8]/bestaudio/best",
-            {"youtube": {"player_client": ["web_safari"]}},
-        ),
-        (
-            "embedded",
-            "bestaudio/best",
-            {"youtube": {"player_client": ["web_embedded"]}},
-        ),
-        (
-            "android_vr",
-            "bestaudio/best",
-            {"youtube": {"player_client": ["android_vr"]}},
-        ),
-    ]
-
+    # Current yt-dlp guidance recommends mweb + a PO-token provider. Prefer
+    # that route when either the optional HTTP provider or our browser provider
+    # is available, then retain non-token fallbacks for resilience.
     provider_url = str(secret_or_env("YOUTUBE_PO_PROVIDER_URL") or "").strip()
-    if provider_url:
-        strategies.insert(
-            1,
+    wpc_browser = _configure_youtube_wpc_provider()
+
+    strategies: list[tuple[str, str, dict[str, list[str]]]] = []
+    if provider_url or wpc_browser:
+        strategies.append(
             (
                 "mweb_po",
                 "bestaudio/best",
-                {
-                    "youtube": {"player_client": ["mweb"]},
-                    "youtubepot-bgutilhttp": {"base_url": [provider_url]},
-                },
-            ),
+                {"youtube": {"player_client": ["mweb"]}},
+            )
         )
+
+    strategies.extend(
+        [
+            (
+                "default",
+                "bestaudio[ext=m4a]/bestaudio/best",
+                {},
+            ),
+            (
+                "safari_hls",
+                "bestaudio[protocol^=m3u8]/best[protocol^=m3u8]/bestaudio/best",
+                {"youtube": {"player_client": ["web_safari"]}},
+            ),
+            (
+                "embedded",
+                "bestaudio/best",
+                {"youtube": {"player_client": ["web_embedded"]}},
+            ),
+            (
+                "android_vr",
+                "bestaudio/best",
+                {"youtube": {"player_client": ["android_vr"]}},
+            ),
+        ]
+    )
 
     errors_seen: list[str] = []
     successful_info: dict[str, Any] | None = None
@@ -2559,23 +2630,18 @@ def download_youtube_media(url: str, folder: Path) -> LocalMediaSource:
             errors_seen.append(f"{strategy_name}: {str(exc).strip()[:220]}")
 
     if successful_source is None:
-        cookie_note = (
-            " A YouTube cookie export is configured, but it may be expired or tied to a blocked session."
-            if cookie_file is not None
-            else " For videos that require login, add a Netscape cookie export as YOUTUBE_COOKIES or YOUTUBE_COOKIES_B64."
+        detail = " | ".join(errors_seen[-6:])
+        LOGGER.warning(
+            "YouTube media download failed after all playback strategies. "
+            "po_http=%s wpc=%s cookies=%s attempts=%s",
+            bool(provider_url),
+            bool(wpc_browser),
+            cookie_file is not None,
+            detail or "none",
         )
-        provider_note = (
-            ""
-            if provider_url
-            else " For maximum reliability on hosted servers, configure a PO-token provider URL as YOUTUBE_PO_PROVIDER_URL."
-        )
-        detail = " | ".join(errors_seen[-4:])
         raise RuntimeError(
-            "YouTube blocked all available public playback routes for this hosted server. "
-            "The app tried the normal client, Safari HLS, embedded, and Android VR fallbacks."
-            + cookie_note
-            + provider_note
-            + (f" Last attempts: {detail}" if detail else "")
+            "YouTube could not be accessed from this hosted server right now. "
+            "Please try the link again, or upload the video/audio file directly."
         )
 
     title = str(
