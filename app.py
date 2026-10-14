@@ -4522,12 +4522,26 @@ if batch_page_mode:
                         try:
                             with tempfile.TemporaryDirectory(prefix="team_fahad_bulk_") as link_dir:
                                 folder = Path(link_dir)
-                                linked_source = download_media_from_link(str(item["url"]), folder)
-                                result = transcribe_linked_media_with_chunks(
-                                    uploaded=linked_source,
-                                    api_keys=transcription_api_keys,
-                                    language_codes=LANGUAGES[language_name],
-                                )
+                                item_url = str(item["url"])
+                                try:
+                                    linked_source = download_media_from_link(item_url, folder)
+                                    result = transcribe_linked_media_with_chunks(
+                                        uploaded=linked_source,
+                                        api_keys=transcription_api_keys,
+                                        language_codes=LANGUAGES[language_name],
+                                    )
+                                except Exception as download_exc:
+                                    if not is_youtube_media_url(item_url):
+                                        raise
+                                    result = fetch_youtube_caption_result(
+                                        item_url,
+                                        folder,
+                                        "Detailed subtitles + speakers",
+                                        LANGUAGES[language_name],
+                                    )
+                                    if result is None:
+                                        raise download_exc
+
                                 vtt = str(result.get("vtt") or "")
                                 if not vtt:
                                     raise RuntimeError(
@@ -4688,25 +4702,54 @@ with source_tabs[1]:
                 validate_public_media_url(single_media_link)
                 with tempfile.TemporaryDirectory(prefix="team_fahad_single_link_") as link_dir:
                     folder = Path(link_dir)
+                    linked_source: LocalMediaSource | None = None
+                    caption_result: dict[str, Any] | None = None
+
                     status.write("Downloading media securely…")
-                    linked_source = download_media_from_link(single_media_link, folder)
-                    status.write("Running speech-to-text…")
-                    if mode == "Detailed subtitles + speakers":
-                        result = transcribe_linked_media_with_chunks(
-                            uploaded=linked_source,
-                            api_keys=transcription_api_keys,
-                            language_codes=LANGUAGES[language_name],
+                    try:
+                        linked_source = download_media_from_link(single_media_link, folder)
+                    except Exception as download_exc:
+                        if is_youtube_media_url(single_media_link):
+                            status.write(
+                                "YouTube blocked direct media playback. Trying available captions instead…"
+                            )
+                            caption_result = fetch_youtube_caption_result(
+                                single_media_link,
+                                folder,
+                                mode,
+                                LANGUAGES[language_name],
+                            )
+                            if caption_result is None:
+                                raise download_exc
+                        else:
+                            raise
+
+                    if caption_result is not None:
+                        result = caption_result
+                        st.session_state.source_name = str(
+                            caption_result.get("source_title") or "youtube_transcript"
                         )
                     else:
-                        result = transcribe_media(
-                            uploaded=linked_source,
-                            api_keys=transcription_api_keys,
-                            language_codes=LANGUAGES[language_name],
-                            mode=mode,
-                            custom_vocabulary=vocab,
-                        )
+                        if linked_source is None:
+                            raise RuntimeError("No linked media source was prepared.")
+                        status.write("Running speech-to-text…")
+                        if mode == "Detailed subtitles + speakers":
+                            result = transcribe_linked_media_with_chunks(
+                                uploaded=linked_source,
+                                api_keys=transcription_api_keys,
+                                language_codes=LANGUAGES[language_name],
+                            )
+                        else:
+                            result = transcribe_media(
+                                uploaded=linked_source,
+                                api_keys=transcription_api_keys,
+                                language_codes=LANGUAGES[language_name],
+                                mode=mode,
+                                custom_vocabulary=vocab,
+                            )
+                        st.session_state.source_name = linked_source.name
+
                     st.session_state.result = result
-                    st.session_state.source_name = linked_source.name
                 status.update(label="Transcription complete", state="complete", expanded=False)
             except errors.APIError as exc:
                 status.update(label="Transcription failed", state="error")
