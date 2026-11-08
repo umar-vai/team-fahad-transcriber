@@ -100,6 +100,9 @@ class TestTranscriptionFallback(unittest.TestCase):
             "LANGUAGES": {"Bangla (Bangladesh)": ["bn-BD"]},
             "api_error_code": lambda error: error.code,
             "api_error_text": lambda error: str(error).lower(),
+            "speaker_transcript": lambda segments: "",
+            "segments_to_srt": lambda segments: "",
+            "segments_to_vtt": lambda segments: "",
         }
         isolated = ast.fix_missing_locations(
             ast.Module(body=[function], type_ignores=[])
