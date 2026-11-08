@@ -33,9 +33,30 @@ A Streamlit app for client-ready video/audio transcription using the Gemini API.
 - Streamlit Secrets support so public users do not need their own API key
 - Optional shared access code for private client previews
 
+## Transcription model compatibility
+
+The app uses Gemini Flash audio understanding by default for uploaded files and links.
+This avoids the `gemini-3.5-transcribe` "model not found" error for API keys
+that cannot access the dedicated Interactions endpoint. It automatically tries
+supported Flash models if the first Flash model is unavailable to the key.
+Standard and Smart Clean transcripts work with this default.
+
+For **Detailed subtitles + speakers**, the default Flash path creates estimated
+speaker labels and subtitle times; these are not verified word-level timestamps.
+If your Gemini API key has confirmed access to the dedicated transcription model,
+you can opt into word-level timestamps by adding the following to the Streamlit
+app's Secrets (no change is needed for regular transcription):
+
+```toml
+PREFER_DEDICATED_TRANSCRIBE = true
+```
+
+The app still falls back to Flash if the dedicated endpoint returns HTTP 404.
+The sidebar displays the deployed build number so you can confirm redeployment.
+
 ## Important mode limits
 
-The single-file page follows the Gemini transcription API limits used by the current implementation:
+The single-file page follows the audio request limits used by the current implementation:
 
 - Standard transcription modes: about 60 minutes per request
 - Speaker diarization / word timestamp mode: about 30 minutes per request
