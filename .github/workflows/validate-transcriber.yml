@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "app.py"
+      - "tests/**"
       - "requirements.txt"
       - ".github/workflows/validate-transcriber.yml"
   workflow_dispatch:
