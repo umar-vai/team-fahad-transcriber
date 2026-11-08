@@ -40,6 +40,7 @@ import requests
 LOGGER = logging.getLogger(__name__)
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
+APP_BUILD = "2026-11-08.2"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
 LIVE_TRANSCRIBE_MODEL = "gemini-3.5-transcribe-live"
@@ -3438,7 +3439,7 @@ def _transcribe_media_once(
                         return client.interactions.create(**kwargs)
                     except errors.APIError as exc:
                         last_error = exc
-                        code = getattr(exc, "code", None)
+                        code = api_error_code(exc)
                         if code != 503 or attempt == 1:
                             raise
                         time.sleep(5)
@@ -3456,8 +3457,8 @@ def _transcribe_media_once(
                 words = extract_word_annotations(interaction)
                 segments = make_segments(words)
             except errors.APIError as exc:
-                code = getattr(exc, "code", None)
-                message = str(getattr(exc, "message", "") or exc).lower()
+                code = api_error_code(exc)
+                message = api_error_text(exc)
 
                 if code == 404:
                     # Dedicated Transcribe is not accessible to this API key.
@@ -3493,8 +3494,8 @@ def _transcribe_media_once(
                             "so the app retried with the dedicated model's minimal request."
                         )
                     except errors.APIError as minimal_exc:
-                        minimal_code = getattr(minimal_exc, "code", None)
-                        if minimal_code != 400:
+                        minimal_code = api_error_code(minimal_exc)
+                        if minimal_code not in (400, 404):
                             raise
 
                         fallback = flash_audio_transcription_fallback(
@@ -4133,6 +4134,7 @@ with st.sidebar:
         key="theme_picker",
     )
     st.session_state.ui_theme = selected_theme
+    st.caption(f"Build {APP_BUILD}")
 
 t = THEMES[st.session_state.ui_theme]
 
