@@ -80,6 +80,7 @@ class TestTranscriptionFallback(unittest.TestCase):
             "AUDIO_MIME_TYPES": {".mp3": "audio/mpeg"},
             "MAX_UPLOAD_MB": 500,
             "MAX_GEMINI_FILE_MB": 2048,
+            "TRANSCRIBE_MODEL": "gemini-3.5-transcribe",
             "LocalMediaSource": FakeLocalMediaSource,
             "genai": SimpleNamespace(Client=lambda **kwargs: client),
             "errors": SimpleNamespace(APIError=FakeAPIError),
