@@ -40,7 +40,7 @@ import requests
 LOGGER = logging.getLogger(__name__)
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
-APP_BUILD = "2026-11-08.2"
+APP_BUILD = "2026-11-08.3"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
 LIVE_TRANSCRIBE_MODEL = "gemini-3.5-transcribe-live"
@@ -3303,8 +3303,7 @@ only when discernible. Do not translate, summarize, invent or omit speech.
             "srt": segments_to_srt(segments),
             "vtt": segments_to_vtt(segments),
             "compatibility_notice": (
-                f"The dedicated Transcribe model is unavailable for this API key; "
-                f"used {model_name} audio understanding. Speaker labels and subtitle "
+                f"Processed with {model_name} audio understanding. Speaker labels and subtitle "
                 "times are model-estimated, not verified word-level timestamps."
             ),
         }
@@ -3337,8 +3336,7 @@ translate or invent content. Return only the transcript.
         "srt": "",
         "vtt": "",
         "compatibility_notice": (
-            f"The dedicated Transcribe model is unavailable for this API key; "
-            f"used {model_name} audio understanding."
+            f"Processed with {model_name} audio understanding."
         ),
     }
 
@@ -3423,6 +3421,34 @@ def _transcribe_media_once(
                 "uri": remote_file.uri,
                 "mime_type": getattr(remote_file, "mime_type", mime_type) or mime_type,
             }
+
+            # The dedicated Transcribe model may return HTTP 404 for API keys
+            # without access. Avoid calling that model at all by default:
+            # Flash accepts uploaded audio through generate_content and supports
+            # the standard, smart, and approximate subtitle output modes.
+            # Opt in explicitly only when the deployment has confirmed access to
+            # the dedicated model for precise diarization and word timestamps.
+            prefer_dedicated = str(
+                secret_or_env("PREFER_DEDICATED_TRANSCRIBE") or ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if not prefer_dedicated:
+                fallback = flash_audio_transcription_fallback(
+                    client=client,
+                    input_item=input_item,
+                    mode=mode,
+                    duration=duration,
+                    language_codes=language_codes,
+                    custom_vocabulary=custom_vocabulary,
+                )
+                return {
+                    **fallback,
+                    "duration": duration,
+                    "mode": mode,
+                    "language": next(
+                        (name for name, codes in LANGUAGES.items() if codes == language_codes),
+                        "Auto detect",
+                    ),
+                }
 
             def create_interaction(config: dict[str, Any] | None = None) -> Any:
                 last_error: Exception | None = None
