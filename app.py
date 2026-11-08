@@ -3129,6 +3129,68 @@ def prepare_audio(source: Path, extension: str, folder: Path) -> tuple[Path, str
     return source, AUDIO_MIME_TYPES[extension], duration
 
 
+def _generate_audio_with_compatible_flash(
+    client: genai.Client,
+    input_item: dict[str, Any],
+    prompt: str,
+    structured_schema: dict[str, Any] | None = None,
+) -> tuple[Any, str]:
+    """Generate an audio transcript using a model accessible to this API key."""
+    audio_part = types.Part.from_uri(
+        file_uri=str(input_item["uri"]),
+        mime_type=str(input_item["mime_type"]),
+    )
+    candidates = list(dict.fromkeys((
+        CONTENT_MODEL,
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash",
+    )))
+    last_not_found: Exception | None = None
+
+    for model_name in candidates:
+        configs: list[Any] = (
+            [
+                types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=structured_schema,
+                ),
+                types.GenerateContentConfig(response_mime_type="application/json"),
+            ]
+            if structured_schema
+            else [None]
+        )
+        for index, config in enumerate(configs):
+            try:
+                kwargs: dict[str, Any] = {
+                    "model": model_name,
+                    "contents": [prompt, audio_part],
+                }
+                if config is not None:
+                    kwargs["config"] = config
+                response = client.models.generate_content(**kwargs)
+                if str(getattr(response, "text", "") or "").strip():
+                    return response, model_name
+                raise RuntimeError(
+                    f"{model_name} returned no transcript text for this audio."
+                )
+            except errors.APIError as exc:
+                code = getattr(exc, "code", None)
+                if code == 404:
+                    last_not_found = exc
+                    break
+                if code == 400 and structured_schema and index == 0:
+                    continue
+                raise
+
+    raise RuntimeError(
+        "No supported Gemini audio-understanding model is available to the "
+        "configured transcription API key. Check the key's accessible models "
+        "in Google AI Studio or use another Gemini API key."
+    ) from last_not_found
+
+
 def flash_audio_transcription_fallback(
     client: genai.Client,
     input_item: dict[str, Any],
@@ -3137,23 +3199,18 @@ def flash_audio_transcription_fallback(
     language_codes: list[str],
     custom_vocabulary: list[str],
 ) -> dict[str, Any]:
-    """Fallback transcription using Gemini Flash audio understanding.
-
-    Google documents Gemini Flash as able to transcribe uploaded audio and to
-    return structured speaker/timestamp segments. This keeps the app usable when
-    the dedicated Transcribe model rejects an otherwise valid audio request.
-    """
+    """Use Flash Generate Content when the dedicated Transcribe API is unavailable."""
     language_hint = (
         ", ".join(language_codes)
         if language_codes
-        else "auto-detect all spoken languages and preserve code-switching"
+        else "auto-detect spoken languages and preserve code-switching"
     )
-    vocab_hint = ""
-    if custom_vocabulary:
-        vocab_hint = (
-            "\nPrefer these spellings when they match the audio: "
-            + ", ".join(custom_vocabulary[:100])
-        )
+    vocab_hint = (
+        "\nUse these names only when they match the audio: "
+        + ", ".join(custom_vocabulary[:100])
+        if custom_vocabulary
+        else ""
+    )
 
     if mode == "Detailed subtitles + speakers":
         schema = {
@@ -3170,89 +3227,70 @@ def flash_audio_transcription_fallback(
                             "end_seconds": {"type": "number"},
                             "text": {"type": "string"},
                         },
-                        "required": [
-                            "speaker",
-                            "start_seconds",
-                            "end_seconds",
-                            "text",
-                        ],
+                        "required": ["start_seconds", "end_seconds", "text"],
                     },
                 },
             },
             "required": ["transcript", "segments"],
         }
-        prompt = f"""Transcribe this audio accurately in the original spoken language(s).
+        prompt = f"""Transcribe all audible speech from this audio in its original language(s).
 Language guidance: {language_hint}.
-Identify distinct speakers consistently as Speaker 1, Speaker 2, etc.
-Return segment-level timestamps in seconds from the beginning of the audio.
-Do not translate, summarize, omit speech, or invent content.
-Keep each segment reasonably short for subtitle use.
-The transcript field must contain the complete transcript.
+Return JSON with "transcript" (complete transcription) and "segments"
+(array with "start_seconds", "end_seconds", "text", and "speaker").
+Times are in seconds from the audio start; these are estimates, not word-aligned timestamps.
+Use short subtitle segments. Distinguish speakers as Speaker 1, Speaker 2, etc
+only when discernible. Do not translate, summarize, invent or omit speech.
 {vocab_hint}""".strip()
-
-        interaction = client.interactions.create(
-            model=CONTENT_MODEL,
-            input=[
-                {"type": "text", "text": prompt},
-                input_item,
-            ],
-            response_format=schema,
+        response, model_name = _generate_audio_with_compatible_flash(
+            client, input_item, prompt, structured_schema=schema
         )
-        raw = str(getattr(interaction, "output_text", "") or "").strip()
-        if not raw:
-            raise RuntimeError("Gemini Flash returned an empty detailed transcription.")
-
+        raw = str(getattr(response, "text", "") or "").strip()
+        # Accept fenced JSON if a model did not honor the JSON MIME type.
+        raw = raw.replace(chr(96) * 3 + "json", "").replace(chr(96) * 3, "").strip()
         try:
             payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Gemini Flash returned an invalid structured transcription."
-            ) from exc
+            if not isinstance(payload, dict):
+                raise ValueError("Expected a JSON object")
+        except (json.JSONDecodeError, ValueError):
+            plain_response, model_name = _generate_audio_with_compatible_flash(
+                client,
+                input_item,
+                "Transcribe all audible speech completely in its original "
+                "language(s). Return only the transcription; no summary or translation.",
+            )
+            payload = {
+                "transcript": str(getattr(plain_response, "text", "") or "").strip(),
+                "segments": [],
+            }
 
         transcript = str(payload.get("transcript") or "").strip()
         segments: list[Segment] = []
         for item in payload.get("segments") or []:
+            if not isinstance(item, dict):
+                continue
             try:
                 start = max(0.0, float(item.get("start_seconds") or 0.0))
                 end = max(start, float(item.get("end_seconds") or start))
             except (TypeError, ValueError):
                 continue
-            text_value = str(item.get("text") or "").strip()
-            if not text_value:
+            value = str(item.get("text") or "").strip()
+            if not value:
                 continue
-            speaker = str(item.get("speaker") or "").strip() or None
-            segments.append(
-                Segment(
+            if duration:
+                start = min(start, float(duration))
+                end = min(end, float(duration))
+            if end > start:
+                segments.append(Segment(
                     start=start,
                     end=end,
-                    text=text_value,
-                    speaker=speaker,
-                )
-            )
-
-        if duration and segments:
-            cleaned: list[Segment] = []
-            for segment in segments:
-                start = min(max(0.0, segment.start), float(duration))
-                end = min(max(start, segment.end), float(duration))
-                if end <= start:
-                    end = min(float(duration), start + 0.5)
-                if end > start:
-                    cleaned.append(
-                        Segment(
-                            start=start,
-                            end=end,
-                            text=segment.text,
-                            speaker=segment.speaker,
-                        )
-                    )
-            segments = cleaned
+                    text=value,
+                    speaker=str(item.get("speaker") or "").strip() or None,
+                ))
 
         if not transcript and segments:
-            transcript = "\n".join(segment.text for segment in segments).strip()
+            transcript = "\n".join(segment.text for segment in segments)
         if not transcript:
-            raise RuntimeError("Gemini Flash returned no usable transcript.")
-
+            raise RuntimeError("Gemini Flash returned no usable audio transcription.")
         if not segments:
             segments = approximate_segments_from_transcript(transcript, duration)
 
@@ -3264,40 +3302,32 @@ The transcript field must contain the complete transcript.
             "srt": segments_to_srt(segments),
             "vtt": segments_to_vtt(segments),
             "compatibility_notice": (
-                "The dedicated Gemini Transcribe model rejected this audio request, "
-                "so the app automatically used Gemini Flash audio understanding. "
-                "Speaker labels and timestamps are segment-level rather than word-level."
+                f"The dedicated Transcribe model is unavailable for this API key; "
+                f"used {model_name} audio understanding. Speaker labels and subtitle "
+                "times are model-estimated, not verified word-level timestamps."
             ),
         }
 
     if mode == "Smart clean transcript":
-        prompt = f"""Generate a complete clean transcript of this audio.
-Language guidance: {language_hint}.
-Preserve every factual statement, name, number, and meaning.
-Remove filler words, stutters, false starts, and duplicate fragments.
-Add natural punctuation and paragraphing.
-Do not summarize, translate, explain, or add any information.
+        prompt = f"""Transcribe the complete audio in its original language(s).
+Language guidance: {language_hint}. Preserve facts, names, numbers and meaning.
+Remove filler words, stutters and false starts; use clear punctuation and paragraphs.
+Do not summarize, translate, invent words or omit complete ideas.
 Return only the transcript.
 {vocab_hint}""".strip()
     else:
-        prompt = f"""Generate a complete verbatim transcript of this audio.
-Language guidance: {language_hint}.
-Preserve fillers, repetitions, false starts, names, numbers, and wording as spoken.
-Do not summarize, translate, explain, clean up, or add information.
-Return only the transcript.
+        prompt = f"""Transcribe the complete audio VERBATIM in its original language(s).
+Language guidance: {language_hint}. Preserve fillers, repetitions, false starts,
+names, numbers, and the exact wording as spoken. Do not clean up, summarize,
+translate or invent content. Return only the transcript.
 {vocab_hint}""".strip()
 
-    interaction = client.interactions.create(
-        model=CONTENT_MODEL,
-        input=[
-            {"type": "text", "text": prompt},
-            input_item,
-        ],
+    response, model_name = _generate_audio_with_compatible_flash(
+        client, input_item, prompt
     )
-    transcript = str(getattr(interaction, "output_text", "") or "").strip()
+    transcript = str(getattr(response, "text", "") or "").strip()
     if not transcript:
-        raise RuntimeError("Gemini Flash returned an empty transcription.")
-
+        raise RuntimeError("Gemini Flash returned an empty audio transcription.")
     return {
         "transcript": transcript,
         "words": [],
@@ -3306,10 +3336,11 @@ Return only the transcript.
         "srt": "",
         "vtt": "",
         "compatibility_notice": (
-            "The dedicated Gemini Transcribe model rejected this audio request, "
-            "so the app automatically used Gemini Flash audio transcription."
+            f"The dedicated Transcribe model is unavailable for this API key; "
+            f"used {model_name} audio understanding."
         ),
     }
+
 
 
 def _transcribe_media_once(
@@ -3428,7 +3459,23 @@ def _transcribe_media_once(
                 code = getattr(exc, "code", None)
                 message = str(getattr(exc, "message", "") or exc).lower()
 
-                if code == 400 and (
+                if code == 404:
+                    # Dedicated Transcribe is not accessible to this API key.
+                    fallback = flash_audio_transcription_fallback(
+                        client=client,
+                        input_item=input_item,
+                        mode=mode,
+                        duration=duration,
+                        language_codes=language_codes,
+                        custom_vocabulary=custom_vocabulary,
+                    )
+                    transcript = str(fallback.get("transcript") or "").strip()
+                    words = list(fallback.get("words") or [])
+                    segments = list(fallback.get("segments") or [])
+                    compatibility_notice = str(
+                        fallback.get("compatibility_notice") or ""
+                    )
+                elif code == 400 and (
                     "invalid" in message or "argument" in message or "request" in message
                 ):
                     # First confirm whether only the optional Transcribe settings
