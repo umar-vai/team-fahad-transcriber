@@ -1,0 +1,51 @@
+---
+/** Result panel. Filled in by src/scripts/results.ts. */
+---
+<section id="results" class="card stack hidden" aria-live="polite">
+  <div class="page-head" style="margin:0">
+    <div>
+      <h2 id="result-title">Transcript</h2>
+      <div class="chips" id="result-chips"></div>
+    </div>
+    <div class="row">
+      <button class="btn ghost small" id="copy-btn" type="button">Copy text</button>
+      <a class="btn ghost small hidden" id="history-link" href="/history">Saved in history</a>
+    </div>
+  </div>
+  <p class="notice small-text hidden" id="result-note"></p>
+  <div class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-tab="text">Transcript</button>
+    <button role="tab" aria-selected="false" data-tab="subs">Subtitles</button>
+    <button role="tab" aria-selected="false" data-tab="ai">AI tools</button>
+    <button role="tab" aria-selected="false" data-tab="files">Downloads</button>
+  </div>
+  <div data-panel="text">
+    <input type="search" id="find" placeholder="Search in transcript" style="margin-bottom:10px" />
+    <div class="transcript" id="transcript-view"></div>
+  </div>
+  <div data-panel="subs" class="hidden">
+    <div class="segments" id="segments-view"></div>
+  </div>
+  <div data-panel="ai" class="hidden stack">
+    <div class="row">
+      <button class="btn ghost small" data-ai="summary" type="button">Summary + key points</button>
+      <button class="btn ghost small" data-ai="explain" type="button">Explain clearly</button>
+      <button class="btn ghost small" data-ai="content" type="button">Creator content pack</button>
+    </div>
+    <div class="row">
+      <select id="translate-target" style="width:auto">
+        <option>Bangla</option><option>English</option><option>Arabic</option><option>Hindi</option>
+      </select>
+      <button class="btn ghost small" data-ai="translate" type="button">Translate full transcript</button>
+    </div>
+    <div id="ai-output" class="stack"></div>
+  </div>
+  <div data-panel="files" class="hidden row">
+    <button class="btn ghost small" data-dl="txt" type="button">TXT</button>
+    <button class="btn ghost small" data-dl="srt" type="button">SRT subtitles</button>
+    <button class="btn ghost small" data-dl="vtt" type="button">VTT subtitles</button>
+    <button class="btn ghost small" data-dl="speakers" type="button">Timestamped TXT</button>
+    <button class="btn ghost small" data-dl="docx" type="button">Word (DOCX)</button>
+    <button class="btn small" data-dl="zip" type="button">Everything (ZIP)</button>
+  </div>
+</section>

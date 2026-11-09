@@ -40,7 +40,7 @@ import requests
 LOGGER = logging.getLogger(__name__)
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
-APP_BUILD = "2026-11-09.1"
+APP_BUILD = "2026-11-09.2"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
 LIVE_TRANSCRIBE_MODEL = "gemini-3.5-transcribe-live"
@@ -767,7 +767,7 @@ def wait_for_file(client: genai.Client, uploaded_file: Any, timeout_seconds: int
             raise RuntimeError("Gemini could not process the uploaded media file.")
         if time.monotonic() >= deadline:
             raise TimeoutError("Gemini did not finish preparing the uploaded file in time.")
-        time.sleep(2)
+        time.sleep(1)
         current = client.files.get(name=current.name)
 
 
@@ -3106,7 +3106,27 @@ def download_media_from_link(url: str, folder: Path) -> LocalMediaSource:
     )
 
 
+def probe_duration(path: Path) -> float | None:
+    """Read the duration from FFmpeg's header output; much faster than decoding."""
+    try:
+        completed = subprocess.run(
+            [ffmpeg_executable(), "-hide_banner", "-i", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        return None
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", completed.stderr or "")
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    value = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    return value if value > 0 else None
+
+
 def media_duration(path: Path, is_video: bool) -> float | None:
+    quick = probe_duration(path)
+    if quick:
+        return quick
     try:
         if is_video:
             with VideoFileClip(str(path)) as clip:
@@ -3143,6 +3163,90 @@ def prepare_audio(source: Path, extension: str, folder: Path) -> tuple[Path, str
     return audio_path, "audio/mpeg", duration
 
 
+# Preferred Flash models for audio, fastest good-quality first. Google retires
+# older models for new API keys (for example gemini-2.5-flash-lite), so the app
+# also asks the API which models this key can really use.
+FLASH_AUDIO_MODEL_PREFERENCE = (
+    "gemini-flash-latest",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash",
+)
+# Process-wide caches, keyed by a hash of the API key.
+_MODEL_CACHE_LOCK = threading.Lock()
+_AVAILABLE_MODELS_CACHE: dict[str, tuple[float, set[str]]] = {}
+_WORKING_AUDIO_MODEL: dict[str, str] = {}
+_BAD_AUDIO_MODELS: dict[str, set[str]] = {}
+_NO_THINKING_CONFIG_MODELS: set[str] = set()
+
+
+def _key_cache_id(client: Any) -> str:
+    key = str(getattr(getattr(client, "_api_client", None), "api_key", "") or "")
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16] if key else "default"
+
+
+def available_generate_models(client: Any) -> set[str]:
+    """Return model ids this key can call with generateContent (cached for 6 hours)."""
+    cache_id = _key_cache_id(client)
+    with _MODEL_CACHE_LOCK:
+        cached = _AVAILABLE_MODELS_CACHE.get(cache_id)
+        if cached and time.time() - cached[0] < 6 * 3600:
+            return cached[1]
+    names: set[str] = set()
+    try:
+        for model in client.models.list(config={"page_size": 200}):
+            actions = [str(a) for a in (getattr(model, "supported_actions", None) or [])]
+            if actions and "generateContent" not in actions:
+                continue
+            name = str(getattr(model, "name", "") or "").removeprefix("models/")
+            if name:
+                names.add(name)
+    except Exception as exc:  # Listing is optional; fall back to the static list.
+        LOGGER.info("Could not list Gemini models: %s", exc)
+        return set()
+    with _MODEL_CACHE_LOCK:
+        _AVAILABLE_MODELS_CACHE[cache_id] = (time.time(), names)
+    return names
+
+
+def audio_model_candidates(client: Any) -> list[str]:
+    """Order Flash models: last working model, preferred list, then any other Flash."""
+    cache_id = _key_cache_id(client)
+    preferred = list(dict.fromkeys((CONTENT_MODEL, *FLASH_AUDIO_MODEL_PREFERENCE)))
+    available = available_generate_models(client)
+    if available:
+        listed = [m for m in preferred if m in available]
+        extra = sorted(
+            (
+                m for m in available
+                if "flash" in m and m not in listed
+                and not any(t in m for t in ("image", "tts", "live", "audio", "embedding", "transcribe"))
+            ),
+            reverse=True,
+        )
+        candidates = listed + extra
+    else:
+        candidates = preferred
+    with _MODEL_CACHE_LOCK:
+        bad = _BAD_AUDIO_MODELS.get(cache_id, set())
+        working = _WORKING_AUDIO_MODEL.get(cache_id)
+    candidates = [m for m in candidates if m not in bad] or preferred
+    if working and working not in bad:
+        candidates = [working] + [m for m in candidates if m != working]
+    return candidates
+
+
+def _fast_thinking_config(model_name: str) -> Any | None:
+    """Keep model 'thinking' to a minimum; transcription does not need it and it is slow."""
+    if model_name in _NO_THINKING_CONFIG_MODELS:
+        return None
+    if "2.5" in model_name:
+        return types.ThinkingConfig(thinking_budget=0)
+    return types.ThinkingConfig(thinking_level="MINIMAL")
+
+
 def _generate_audio_with_compatible_flash(
     client: genai.Client,
     input_item: dict[str, Any],
@@ -3154,40 +3258,33 @@ def _generate_audio_with_compatible_flash(
         file_uri=str(input_item["uri"]),
         mime_type=str(input_item["mime_type"]),
     )
-    candidates = list(dict.fromkeys((
-        CONTENT_MODEL,
-        "gemini-flash-latest",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-        "gemini-3-flash-preview",
-        "gemini-2.5-flash",
-        "gemini-flash-lite-latest",
-        "gemini-3.5-flash-lite",
-        "gemini-2.5-flash-lite",
-    )))
+    cache_id = _key_cache_id(client)
+    candidates = audio_model_candidates(client)
     last_error: Exception | None = None
     last_rate_limit: errors.APIError | None = None
+    failures: list[str] = []
 
     for model_name in candidates:
-        configs: list[Any] = (
-            [
-                types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=structured_schema,
-                ),
-                types.GenerateContentConfig(response_mime_type="application/json"),
-            ]
-            if structured_schema
-            else [None]
-        )
-        for index, config in enumerate(configs):
+        schemas: list[dict[str, Any] | None] = [structured_schema, None] if structured_schema else [None]
+        use_thinking = _fast_thinking_config(model_name) is not None
+        schema_index = 0
+        while schema_index < len(schemas):
+            schema = schemas[schema_index]
+            config_kwargs: dict[str, Any] = {}
+            if structured_schema:
+                config_kwargs["response_mime_type"] = "application/json"
+                if schema is not None:
+                    config_kwargs["response_schema"] = schema
+            thinking = _fast_thinking_config(model_name) if use_thinking else None
+            if thinking is not None:
+                config_kwargs["thinking_config"] = thinking
+            kwargs: dict[str, Any] = {
+                "model": model_name,
+                "contents": [prompt, audio_part],
+            }
+            if config_kwargs:
+                kwargs["config"] = types.GenerateContentConfig(**config_kwargs)
             try:
-                kwargs: dict[str, Any] = {
-                    "model": model_name,
-                    "contents": [prompt, audio_part],
-                }
-                if config is not None:
-                    kwargs["config"] = config
                 response = None
                 for attempt in range(2):
                     try:
@@ -3196,45 +3293,65 @@ def _generate_audio_with_compatible_flash(
                     except errors.APIError as exc:
                         # Retry a short overload once before moving on.
                         if api_error_code(exc) in (500, 503) and attempt == 0:
-                            time.sleep(3)
+                            time.sleep(2)
                             continue
                         raise
                 if response is not None and str(getattr(response, "text", "") or "").strip():
+                    with _MODEL_CACHE_LOCK:
+                        _WORKING_AUDIO_MODEL[cache_id] = model_name
                     return response, model_name
                 last_error = RuntimeError(
                     f"{model_name} returned no transcript text for this audio."
                 )
+                failures.append(f"{model_name}: empty result")
                 break
             except errors.APIError as exc:
                 code = api_error_code(exc)
                 message = api_error_text(exc)
-                if code == 400 and structured_schema and index == 0:
-                    continue
                 if code in (401, 403) or (
                     code == 400 and ("api key" in message or "api_key" in message)
                 ):
                     # A bad key fails the same way for every model.
                     raise
+                if code == 400 and use_thinking and "think" in message:
+                    # This model does not accept the speed setting; retry without it.
+                    use_thinking = False
+                    with _MODEL_CACHE_LOCK:
+                        _NO_THINKING_CONFIG_MODELS.add(model_name)
+                    continue
+                if code == 400 and schema is not None:
+                    schema_index += 1
+                    continue
                 if code == 429:
                     last_rate_limit = exc
                     last_error = exc
+                    failures.append(f"{model_name}: quota or rate limit")
                     break
-                model_problem = code in (404, 500, 503, 504) or (
+                retired = code == 404 or "no longer available" in message or (
                     code == 400 and (
                         "model" in message or "not supported" in message
                         or "unsupported" in message
                     )
                 )
-                if model_problem:
+                if retired:
+                    with _MODEL_CACHE_LOCK:
+                        _BAD_AUDIO_MODELS.setdefault(cache_id, set()).add(model_name)
                     last_error = exc
+                    failures.append(f"{model_name}: not available for this key")
+                    break
+                if code in (500, 503, 504):
+                    last_error = exc
+                    failures.append(f"{model_name}: Google server busy")
                     break
                 raise
 
-    if last_rate_limit is not None and isinstance(last_error, errors.APIError) and api_error_code(last_error) == 429:
-        # Let the API key failover move to the next configured key.
+    if last_rate_limit is not None:
+        # The key has run out of quota; let the API key failover try a backup key.
         raise last_rate_limit
     detail = ""
-    if last_error is not None:
+    if failures:
+        detail = " Tried: " + "; ".join(failures[:6]) + "."
+    elif last_error is not None:
         detail = f" Last error: {str(getattr(last_error, 'message', '') or last_error)[:300]}"
     raise RuntimeError(
         "No Gemini model could transcribe this audio with the configured API key. "
@@ -3393,6 +3510,109 @@ translate or invent content. Return only the transcript.
 
 
 
+PARALLEL_CHUNK_SECONDS = 8 * 60
+PARALLEL_CHUNK_WORKERS = 4
+
+
+def transcribe_flash_chunks_in_parallel(
+    api_key: str,
+    audio_path: Path,
+    folder: Path,
+    mode: str,
+    language_codes: list[str],
+    custom_vocabulary: list[str],
+) -> dict[str, Any]:
+    """Split audio into short parts, transcribe them concurrently, then merge in order."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    chunks = split_audio_into_chunks(
+        audio_path, folder, chunk_minutes=PARALLEL_CHUNK_SECONDS // 60
+    )
+    chunk_durations = [probe_duration(chunk) or float(PARALLEL_CHUNK_SECONDS) for chunk in chunks]
+
+    # Warm the model list once so the workers do not all look it up.
+    warm_client = genai.Client(api_key=api_key)
+    try:
+        audio_model_candidates(warm_client)
+    finally:
+        try:
+            warm_client.close()
+        except Exception:
+            pass
+
+    def work(index: int) -> dict[str, Any]:
+        client = genai.Client(api_key=api_key)
+        remote = None
+        try:
+            remote = client.files.upload(file=str(chunks[index]), config={"mime_type": "audio/mpeg"})
+            remote = wait_for_file(client, remote)
+            return flash_audio_transcription_fallback(
+                client=client,
+                input_item={
+                    "type": "audio",
+                    "uri": remote.uri,
+                    "mime_type": getattr(remote, "mime_type", "audio/mpeg") or "audio/mpeg",
+                },
+                mode=mode,
+                duration=chunk_durations[index],
+                language_codes=language_codes,
+                custom_vocabulary=custom_vocabulary,
+            )
+        finally:
+            if remote is not None:
+                try:
+                    client.files.delete(name=remote.name)
+                except Exception:
+                    pass
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    executor = ThreadPoolExecutor(max_workers=min(PARALLEL_CHUNK_WORKERS, len(chunks)))
+    try:
+        futures = [executor.submit(work, index) for index in range(len(chunks))]
+        results = [future.result() for future in futures]
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    executor.shutdown(wait=True)
+
+    transcript_parts: list[str] = []
+    merged_segments: list[Segment] = []
+    offset = 0.0
+    for chunk_result, chunk_duration in zip(results, chunk_durations):
+        text = str(chunk_result.get("transcript") or "").strip()
+        if text:
+            transcript_parts.append(text)
+        for segment in chunk_result.get("segments") or []:
+            merged_segments.append(Segment(
+                start=float(segment.start) + offset,
+                end=float(segment.end) + offset,
+                text=segment.text,
+                speaker=segment.speaker,
+            ))
+        offset += chunk_duration
+
+    notice = (
+        f"Long recording split into {len(chunks)} parts and transcribed in parallel for speed."
+    )
+    if mode == "Detailed subtitles + speakers":
+        notice += (
+            " Speaker labels and subtitle times are model-estimated, and speaker numbers"
+            " may not match exactly across parts."
+        )
+    return {
+        "transcript": "\n\n".join(transcript_parts),
+        "words": [],
+        "segments": merged_segments,
+        "speaker_transcript": speaker_transcript(merged_segments),
+        "srt": segments_to_srt(merged_segments),
+        "vtt": segments_to_vtt(merged_segments),
+        "compatibility_notice": notice,
+    }
+
+
 def _transcribe_media_once(
     uploaded: Any,
     api_key: str,
@@ -3437,8 +3657,30 @@ def _transcribe_media_once(
             audio_path, mime_type, duration = prepare_audio(source, extension, folder)
 
             detailed = mode == "Detailed subtitles + speakers"
+            prefer_dedicated = str(
+                secret_or_env("PREFER_DEDICATED_TRANSCRIBE") or ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            language_label = next(
+                (name for name, codes in LANGUAGES.items() if codes == language_codes),
+                "Auto detect",
+            )
+
+            if not prefer_dedicated and duration and duration > PARALLEL_CHUNK_SECONDS * 1.5:
+                # Long recordings: split into short parts and transcribe them at
+                # the same time. This is much faster than one long request and
+                # avoids cut-off transcripts on long audio.
+                merged = transcribe_flash_chunks_in_parallel(
+                    api_key=api_key,
+                    audio_path=audio_path,
+                    folder=folder,
+                    mode=mode,
+                    language_codes=language_codes,
+                    custom_vocabulary=custom_vocabulary,
+                )
+                return {**merged, "duration": duration, "mode": mode, "language": language_label}
+
             duration_limit = 30 * 60 if detailed else 60 * 60
-            if duration and duration > duration_limit + 1:
+            if prefer_dedicated and duration and duration > duration_limit + 1:
                 minutes = duration_limit // 60
                 raise ValueError(
                     f"This mode supports up to about {minutes} minutes per file. "
@@ -3479,9 +3721,6 @@ def _transcribe_media_once(
             # the standard, smart, and approximate subtitle output modes.
             # Opt in explicitly only when the deployment has confirmed access to
             # the dedicated model for precise diarization and word timestamps.
-            prefer_dedicated = str(
-                secret_or_env("PREFER_DEDICATED_TRANSCRIBE") or ""
-            ).strip().lower() in {"1", "true", "yes", "on"}
             if not prefer_dedicated:
                 fallback = flash_audio_transcription_fallback(
                     client=client,
@@ -3731,8 +3970,11 @@ def transcribe_linked_media_with_chunks(
 
     duration = media_duration(source, False)
     chunk_limit = MAX_BULK_CHUNK_MINUTES * 60
+    prefer_dedicated = str(
+        secret_or_env("PREFER_DEDICATED_TRANSCRIBE") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
-    if not duration or duration <= chunk_limit + 1:
+    if not prefer_dedicated or not duration or duration <= chunk_limit + 1:
         return transcribe_media(
             uploaded=uploaded,
             api_keys=api_keys,
@@ -3820,18 +4062,15 @@ def _ai_text_once(api_key: str, prompt: str) -> str:
     client = genai.Client(api_key=api_key)
     last_error: Exception | None = None
     try:
-        for model_name in dict.fromkeys((
-            CONTENT_MODEL,
-            "gemini-flash-latest",
-            "gemini-3.5-flash",
-            "gemini-2.5-flash",
-            "gemini-flash-lite-latest",
-        )):
+        text_models = audio_model_candidates(client)
+        for model_name in text_models:
             try:
                 result = client.models.generate_content(model=model_name, contents=prompt)
             except errors.APIError as exc:
                 code = api_error_code(exc)
-                if code in (404, 500, 503, 504) or (code == 429 and model_name != "gemini-flash-lite-latest"):
+                if code in (404, 500, 503, 504) or "no longer available" in api_error_text(exc) or (
+                    code == 429 and model_name != text_models[-1]
+                ):
                     last_error = exc
                     continue
                 raise
@@ -5095,7 +5334,7 @@ if uploaded is not None:
     if len(vocab) > 100:
         st.info("Only the first 100 custom vocabulary terms will be used.")
     if mode == "Detailed subtitles + speakers":
-        st.caption(":material/info: Speakers + subtitles works best for recordings up to about 30 minutes.")
+        st.caption(":material/info: Long recordings are split into short parts and transcribed in parallel for speed.")
 
     if st.button(
         "Start transcription",

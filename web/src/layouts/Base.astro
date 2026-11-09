@@ -1,0 +1,49 @@
+---
+interface Props { title?: string; wide?: boolean }
+const { title = "Team Fahad Transcriber", wide = false } = Astro.props;
+const user = Astro.locals.user;
+const path = Astro.url.pathname;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Accurate transcripts, speaker subtitles, summaries and translations in one place." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <div class:list={["shell", { wide }]}>
+      <header class="topbar">
+        <a href="/" class="brand">
+          <img src="/favicon.svg" alt="" width="44" height="44" />
+          <span>
+            <strong>Team Fahad Transcriber</strong>
+            <small>Audio and video to text</small>
+          </span>
+        </a>
+        {user && (
+          <nav class="nav">
+            <a href="/" class:list={{ active: path === "/" }}>Transcribe</a>
+            <a href="/history" class:list={{ active: path.startsWith("/history") }}>History</a>
+            <details class="account">
+              <summary>
+                {user.picture ? <img src={user.picture} alt="" width="30" height="30" referrerpolicy="no-referrer" /> : <span class="avatar">{(user.name || user.email)[0]}</span>}
+              </summary>
+              <div class="menu">
+                <p><strong>{user.name || "Signed in"}</strong><br /><span class="muted">{user.email}</span></p>
+                <form method="post" action="/auth/logout"><button type="submit" class="btn ghost small">Sign out</button></form>
+              </div>
+            </details>
+          </nav>
+        )}
+      </header>
+      <main><slot /></main>
+      <footer class="footer">Team Fahad Transcriber · Developed by <strong>Umar Vai</strong></footer>
+    </div>
+  </body>
+</html>
+<style is:global>
+  @import "../styles/global.css";
+</style>

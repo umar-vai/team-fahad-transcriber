@@ -81,6 +81,7 @@ class TestTranscriptionFallback(unittest.TestCase):
             "MAX_UPLOAD_MB": 500,
             "MAX_GEMINI_FILE_MB": 2048,
             "TRANSCRIBE_MODEL": "gemini-3.5-transcribe",
+            "PARALLEL_CHUNK_SECONDS": 480,
             "LocalMediaSource": FakeLocalMediaSource,
             "genai": SimpleNamespace(Client=lambda **kwargs: client),
             "errors": SimpleNamespace(APIError=FakeAPIError),

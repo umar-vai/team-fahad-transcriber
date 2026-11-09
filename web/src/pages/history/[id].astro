@@ -1,0 +1,63 @@
+---
+import Base from "../../layouts/Base.astro";
+import Results from "../../components/Results.astro";
+import { env } from "cloudflare:workers";
+
+const user = Astro.locals.user;
+if (!user) return Astro.redirect(`/login?next=${encodeURIComponent(Astro.url.pathname)}`);
+const row = await env.DB.prepare("SELECT * FROM transcriptions WHERE id = ? AND user_id = ?")
+  .bind(Astro.params.id, user.id)
+  .first<any>();
+if (!row) return new Response("Not found", { status: 404 });
+const segments = JSON.parse(row.segments_json || "[]");
+const result = {
+  title: row.title,
+  sourceType: row.source_type,
+  sourceRef: row.source_ref,
+  mode: row.mode,
+  language: row.language,
+  duration: row.duration,
+  transcript: row.transcript,
+  segments,
+  estimatedTimes: row.mode !== "detailed",
+  historyId: row.id,
+  extras: JSON.parse(row.extras_json || "{}"),
+};
+const isUrl = typeof row.source_ref === "string" && /^https?:\/\//.test(row.source_ref);
+---
+<Base title={`${row.title} · History`}>
+  <div class="stack">
+    <div class="row" style="justify-content:space-between">
+      <a href="/history">← All history</a>
+      <div class="row">
+        <button class="btn ghost small" id="rename" type="button">Rename</button>
+        <button class="btn danger small" id="delete" type="button">Delete</button>
+      </div>
+    </div>
+    <p class="muted small-text" style="margin:0">
+      Source: {isUrl ? <a href={row.source_ref} rel="noopener noreferrer" target="_blank">{row.source_ref}</a> : (row.source_ref || row.source_type)}
+      · <span data-time={row.created_at}></span>
+    </p>
+    <Results />
+  </div>
+  <script type="application/json" id="result-data" set:html={JSON.stringify(result).replace(/</g, "\\u003c")}></script>
+</Base>
+<script>
+  import { initResults, showResult } from "../../scripts/results";
+  const data = JSON.parse(document.getElementById("result-data")!.textContent || "{}");
+  initResults();
+  showResult(data);
+  document.getElementById("history-link")?.classList.add("hidden");
+  document.querySelectorAll<HTMLElement>("[data-time]").forEach((el) => (el.textContent = new Date(Number(el.dataset.time)).toLocaleString()));
+  document.getElementById("delete")!.addEventListener("click", async () => {
+    if (!confirm("Delete this transcription from your history?")) return;
+    await fetch(`/api/history/${data.historyId}`, { method: "DELETE" });
+    location.href = "/history";
+  });
+  document.getElementById("rename")!.addEventListener("click", async () => {
+    const title = prompt("New title", data.title);
+    if (!title || !title.trim()) return;
+    await fetch(`/api/history/${data.historyId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) });
+    location.reload();
+  });
+</script>

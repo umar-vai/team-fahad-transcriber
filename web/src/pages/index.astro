@@ -1,0 +1,89 @@
+---
+import Base from "../layouts/Base.astro";
+import Results from "../components/Results.astro";
+import { apiKeys, LANGUAGES } from "../lib/gemini";
+
+if (!Astro.locals.user) return Astro.redirect("/login?next=/");
+const connected = apiKeys().length > 0;
+---
+<Base title="Transcribe · Team Fahad Transcriber">
+  <div class="stack">
+    <div class="page-head">
+      <div>
+        <h1>Transcribe audio and video</h1>
+        <p class="muted" style="margin:0">Accurate transcripts, speaker subtitles, summaries and translations in one place.</p>
+      </div>
+      <span class="chip" style={connected ? "color:var(--good)" : "color:var(--bad)"}>
+        {connected ? "● Gemini connected" : "● Gemini key missing"}
+      </span>
+    </div>
+
+    <section class="card stack">
+      <div class="grid-3">
+        <label>Language
+          <select id="language">
+            {Object.keys(LANGUAGES).map((name) => <option value={name}>{name}</option>)}
+          </select>
+        </label>
+        <label>Output
+          <select id="mode">
+            <option value="smart">Smart clean transcript</option>
+            <option value="detailed">Subtitles + speakers (timed)</option>
+            <option value="verbatim">Exact verbatim transcript</option>
+          </select>
+        </label>
+        <label>Names and terms (optional)
+          <input type="text" id="vocab" placeholder="e.g. Team Fahad, Umar Vai" />
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="tabs" role="tablist" id="source-tabs">
+        <button role="tab" aria-selected="true" data-source="upload">Upload file</button>
+        <button role="tab" aria-selected="false" data-source="link">Paste link</button>
+        <button role="tab" aria-selected="false" data-source="live">Live voice</button>
+      </div>
+
+      <div data-source-panel="upload" class="stack">
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="file" accept="audio/*,video/*,.mkv,.mov,.m4a,.aac,.flac,.ogg,.opus,.wma,.webm" hidden />
+          <strong id="file-label">Drop an audio or video file here, or click to choose</strong>
+          <span class="muted small-text">MP3, WAV, M4A, MP4, MOV, MKV and more. Long recordings are split and transcribed in parallel.</span>
+        </label>
+        <button class="btn block" id="upload-go" type="button" disabled>Transcribe file</button>
+      </div>
+
+      <div data-source-panel="link" class="stack hidden">
+        <label>Media URL
+          <input type="url" id="link" placeholder="YouTube, Google Drive, Facebook, Frame.io or a direct media link" />
+        </label>
+        <p class="muted small-text" style="margin:0">Public links only. For Google Drive, share the single file (not a folder).</p>
+        <button class="btn block" id="link-go" type="button">Transcribe link</button>
+      </div>
+
+      <div data-source-panel="live" class="stack hidden">
+        <p class="muted small-text" style="margin:0">Speak into your microphone. Text appears every few seconds, after each short pause. Speaker labels are not available in live mode.</p>
+        <div class="row">
+          <button class="btn" id="live-go" type="button">Start recording</button>
+          <span id="live-state" class="muted"></span>
+        </div>
+        <div class="progress"><div id="live-level"></div></div>
+        <div class="transcript hidden" id="live-text"></div>
+      </div>
+    </section>
+
+    <section class="card stack hidden" id="progress-card">
+      <div class="status-line"><strong id="progress-label">Working…</strong><span id="progress-detail"></span></div>
+      <div class="progress"><div id="progress-bar"></div></div>
+    </section>
+    <div class="notice error hidden" id="error-box" role="alert"></div>
+
+    <Results />
+  </div>
+</Base>
+
+<script>
+  import { initTranscriber } from "../scripts/transcriber";
+  initTranscriber();
+</script>
