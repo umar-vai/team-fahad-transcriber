@@ -58,8 +58,13 @@ The sidebar displays the deployed build number so you can confirm redeployment.
 
 The single-file page follows the audio request limits used by the current implementation:
 
-- Standard transcription modes: about 60 minutes per request
-- Speaker diarization / word timestamp mode: about 30 minutes per request
+- Recordings longer than about 12 minutes are split into 8 minute parts that are
+  transcribed in parallel (up to 4 at a time), then merged in order. This is much
+  faster than one long request and avoids cut-off transcripts.
+- The app asks Gemini which models your API key can use, skips retired models
+  (for example `gemini-2.5-flash-lite`), and remembers the model that worked.
+- With `PREFER_DEDICATED_TRANSCRIBE = true`, the old limits still apply:
+  about 60 minutes per request, or about 30 minutes in speaker/timestamp mode.
 - Custom vocabulary cannot be combined with speaker diarization/timestamps
 - Smart clean mode cannot be combined with speaker diarization/timestamps
 
