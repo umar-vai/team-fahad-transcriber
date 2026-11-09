@@ -6,6 +6,7 @@
  * - Remembers the model that worked, so later requests go straight to it.
  * - Keeps model "thinking" minimal, which makes transcription much faster.
  * - Spreads requests over all configured keys and fails over on quota errors.
+ * - Gives each request a time limit; if Google is slow, moves on to the next model.
  */
 import { env } from "cloudflare:workers";
 
@@ -68,6 +69,9 @@ const workingModel = new Map<string, string>();
 const badModels = new Map<string, Set<string>>();
 const noThinkingModels = new Set<string>();
 const keyCooldownUntil = new Map<string, number>();
+// Models that recently timed out are tried last for a while.
+const slowModelUntil = new Map<string, number>();
+const SLOW_MODEL_PENALTY_MS = 10 * 60_000;
 let keyCursor = 0;
 
 export function apiKeys(): string[] {
@@ -79,14 +83,24 @@ function keyId(key: string): string {
   return key.slice(-8);
 }
 
-async function geminiFetch(key: string, path: string, body?: unknown): Promise<any> {
+async function geminiFetch(key: string, path: string, body?: unknown, timeoutMs = 60_000): Promise<any> {
   const base = env.GEMINI_API_BASE || DEFAULT_API; // Overridable for local tests only.
-  const response = await fetch(`${base}/${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: { "x-goog-api-key": key, "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await response.text();
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetch(`${base}/${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { "x-goog-api-key": key, "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await response.text();
+  } catch (error: any) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw new GeminiError(504, `Google did not answer within ${Math.round(timeoutMs / 1000)} seconds`);
+    }
+    throw error;
+  }
   let payload: any = {};
   try {
     payload = text ? JSON.parse(text) : {};
@@ -103,7 +117,7 @@ async function listModels(key: string): Promise<string[]> {
   const cached = modelListCache.get(keyId(key));
   if (cached && Date.now() - cached.at < 6 * 3600_000) return cached.models;
   try {
-    const payload = await geminiFetch(key, "models?pageSize=1000");
+    const payload = await geminiFetch(key, "models?pageSize=1000", undefined, 8_000);
     const models = (payload.models || [])
       .filter((m: any) => (m.supportedGenerationMethods || []).includes("generateContent"))
       .map((m: any) => String(m.name || "").replace(/^models\//, ""))
@@ -135,6 +149,9 @@ async function candidateModels(key: string): Promise<string[]> {
   if (!candidates.length) candidates = preferred;
   const working = workingModel.get(keyId(key));
   if (working && !bad.has(working)) candidates = [working, ...candidates.filter((m) => m !== working)];
+  const now = Date.now();
+  const isSlow = (m: string) => (slowModelUntil.get(m) || 0) > now;
+  candidates = [...candidates.filter((m) => !isSlow(m)), ...candidates.filter(isSlow)];
   return [...new Set(candidates)];
 }
 
@@ -146,11 +163,20 @@ function thinkingConfig(model: string): Record<string, unknown> | undefined {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+interface GenerateOptions {
+  schema?: unknown;
+  json?: boolean;
+  mediaResolutionLow?: boolean;
+  fastThinking?: boolean;
+  /** Time limit for one model call before moving on to the next model. */
+  timeoutMs?: number;
+}
+
 /** Run one generateContent request, trying models until one works for this key. */
 async function generateWithKey(
   key: string,
   parts: unknown[],
-  options: { schema?: unknown; json?: boolean; mediaResolutionLow?: boolean; fastThinking?: boolean },
+  options: GenerateOptions,
 ): Promise<{ text: string; model: string }> {
   const failures: string[] = [];
   let rateLimited: GeminiError | null = null;
@@ -165,11 +191,13 @@ async function generateWithKey(
       const thinking = useThinking ? thinkingConfig(model) : undefined;
       if (thinking) generationConfig.thinkingConfig = thinking;
       if (options.mediaResolutionLow) generationConfig.mediaResolution = "MEDIA_RESOLUTION_LOW";
+      const started = Date.now();
       try {
         const payload = await geminiFetch(key, `models/${model}:generateContent`, {
           contents: [{ role: "user", parts }],
           generationConfig,
-        });
+        }, options.timeoutMs);
+        console.log(JSON.stringify({ gemini: model, ms: Date.now() - started, ok: true }));
         const text = (payload.candidates?.[0]?.content?.parts || [])
           .filter((p: any) => !p.thought)
           .map((p: any) => p.text || "")
@@ -184,7 +212,14 @@ async function generateWithKey(
         return { text, model };
       } catch (error) {
         if (!(error instanceof GeminiError)) throw error;
+        console.log(JSON.stringify({ gemini: model, ms: Date.now() - started, ok: false, status: error.status }));
         const message = error.message.toLowerCase();
+        if (error.status === 504) {
+          // Google is slow on this model right now: try the next one instead of waiting.
+          slowModelUntil.set(model, Date.now() + SLOW_MODEL_PENALTY_MS);
+          failures.push(`${model}: too slow`);
+          break;
+        }
         if (error.status === 401 || error.status === 403 || (error.status === 400 && message.includes("api key"))) {
           throw error; // A bad key fails the same way for every model.
         }
@@ -226,6 +261,9 @@ async function generateWithKey(
     }
   }
   if (rateLimited) throw rateLimited;
+  if (failures.length && failures.every((f) => f.endsWith("too slow"))) {
+    throw new UserFacingError("Google is answering slowly right now. Please try again in a moment.");
+  }
   throw new UserFacingError(
     "No Gemini model could handle this request with the configured API key. " +
       "Check that the key is valid and has quota in Google AI Studio, or add a backup key." +
@@ -234,10 +272,7 @@ async function generateWithKey(
 }
 
 /** Try every configured key, starting from a rotating position to spread load. */
-async function generate(
-  parts: unknown[],
-  options: { schema?: unknown; json?: boolean; mediaResolutionLow?: boolean; fastThinking?: boolean } = {},
-) {
+async function generate(parts: unknown[], options: GenerateOptions = {}) {
   const keys = apiKeys();
   if (!keys.length) throw new UserFacingError("No Gemini API key is configured on the server (GEMINI_API_KEYS).");
   const start = keyCursor++ % keys.length;
@@ -339,6 +374,19 @@ function stripFences(text: string): string {
   return text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 }
 
+/**
+ * How long to wait for one model before trying the next.
+ * A healthy answer for a short clip takes 3 to 15 seconds; longer audio gets more time.
+ */
+function transcribeTimeout(input: AudioInput, clipDuration?: number): number {
+  let seconds = clipDuration;
+  if (!seconds && input.kind === "inline" && input.mimeType.includes("wav")) {
+    seconds = input.data.byteLength / 32_000; // 16 kHz mono 16-bit, as the browser sends it.
+  }
+  if (!seconds) return 100_000;
+  return Math.min(100_000, Math.round(20_000 + seconds * 250));
+}
+
 export async function transcribe(
   input: AudioInput,
   mode: Mode,
@@ -349,14 +397,15 @@ export async function transcribe(
   const prompt = buildPrompt(mode, languageCodes, vocabulary);
   const parts = [{ text: prompt }, ...audioParts(input)];
   const mediaResolutionLow = input.kind === "youtube";
+  const timeoutMs = transcribeTimeout(input, clipDuration);
 
   if (mode !== "detailed") {
-    const { text, model } = await generate(parts, { mediaResolutionLow });
+    const { text, model } = await generate(parts, { mediaResolutionLow, timeoutMs });
     const transcript = /^\[no speech\]$/i.test(text.trim()) ? "" : text.trim();
     return { transcript, segments: [], model };
   }
 
-  const { text, model } = await generate(parts, { schema: SEGMENT_SCHEMA, mediaResolutionLow });
+  const { text, model } = await generate(parts, { schema: SEGMENT_SCHEMA, mediaResolutionLow, timeoutMs });
   let payload: any;
   try {
     payload = JSON.parse(stripFences(text));
@@ -388,6 +437,6 @@ export async function transcribe(
 }
 
 export async function aiText(prompt: string): Promise<string> {
-  const { text } = await generate([{ text: prompt }], { fastThinking: false });
+  const { text } = await generate([{ text: prompt }], { fastThinking: false, timeoutMs: 90_000 });
   return text;
 }
