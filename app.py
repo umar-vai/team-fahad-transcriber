@@ -40,7 +40,7 @@ import requests
 LOGGER = logging.getLogger(__name__)
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
-APP_BUILD = "2026-11-08.3"
+APP_BUILD = "2026-11-09.1"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
 LIVE_TRANSCRIBE_MODEL = "gemini-3.5-transcribe-live"
@@ -1071,7 +1071,7 @@ def normalize_link_media_to_mp3(source: Path, destination: Path) -> Path:
         "-codec:a",
         "libmp3lame",
         "-b:a",
-        "128k",
+        "64k",
         str(destination),
     ]
     try:
@@ -3111,23 +3111,29 @@ def media_duration(path: Path, is_video: bool) -> float | None:
 
 
 def prepare_audio(source: Path, extension: str, folder: Path) -> tuple[Path, str, float | None]:
-    """Return (audio_path, mime_type, duration_seconds)."""
-    if extension in VIDEO_EXTENSIONS:
-        duration = media_duration(source, is_video=True)
-        audio_path = folder / "extracted_audio.mp3"
-        try:
-            with VideoFileClip(str(source)) as video:
-                if video.audio is None:
-                    raise ValueError("This video does not contain an audio track.")
-                video.audio.write_audiofile(str(audio_path), codec="libmp3lame", logger=None)
-        except ValueError:
-            raise
-        except Exception as exc:
-            raise RuntimeError(f"Could not extract audio from this video: {exc}") from exc
-        return audio_path, "audio/mpeg", duration
+    """Return (audio_path, mime_type, duration_seconds).
 
-    duration = media_duration(source, is_video=False)
-    return source, AUDIO_MIME_TYPES[extension], duration
+    Every upload is converted to a small 16 kHz mono MP3 with FFmpeg. Gemini
+    accepts MP3 reliably, while formats such as M4A or AAC inside MP4 are often
+    rejected, and the smaller file uploads much faster.
+    """
+    is_video = extension in VIDEO_EXTENSIONS
+    duration = media_duration(source, is_video=is_video)
+    audio_path = folder / "prepared_audio.mp3"
+    try:
+        normalize_link_media_to_mp3(source, audio_path)
+    except RuntimeError as exc:
+        if is_video and "does not contain any stream" in str(exc).lower():
+            raise ValueError("This video does not contain an audio track.") from exc
+        if extension == ".mp3":
+            # Already Gemini friendly, so send the original file.
+            return source, "audio/mpeg", duration
+        if is_video:
+            raise RuntimeError(f"Could not extract audio from this video: {exc}") from exc
+        raise RuntimeError(f"Could not read this audio file: {exc}") from exc
+    if not duration:
+        duration = media_duration(audio_path, is_video=False)
+    return audio_path, "audio/mpeg", duration
 
 
 def _generate_audio_with_compatible_flash(
@@ -3143,12 +3149,17 @@ def _generate_audio_with_compatible_flash(
     )
     candidates = list(dict.fromkeys((
         CONTENT_MODEL,
+        "gemini-flash-latest",
         "gemini-3.6-flash",
         "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
+        "gemini-3-flash-preview",
         "gemini-2.5-flash",
+        "gemini-flash-lite-latest",
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash-lite",
     )))
-    last_not_found: Exception | None = None
+    last_error: Exception | None = None
+    last_rate_limit: errors.APIError | None = None
 
     for model_name in candidates:
         configs: list[Any] = (
@@ -3170,26 +3181,59 @@ def _generate_audio_with_compatible_flash(
                 }
                 if config is not None:
                     kwargs["config"] = config
-                response = client.models.generate_content(**kwargs)
-                if str(getattr(response, "text", "") or "").strip():
+                response = None
+                for attempt in range(2):
+                    try:
+                        response = client.models.generate_content(**kwargs)
+                        break
+                    except errors.APIError as exc:
+                        # Retry a short overload once before moving on.
+                        if api_error_code(exc) in (500, 503) and attempt == 0:
+                            time.sleep(3)
+                            continue
+                        raise
+                if response is not None and str(getattr(response, "text", "") or "").strip():
                     return response, model_name
-                raise RuntimeError(
+                last_error = RuntimeError(
                     f"{model_name} returned no transcript text for this audio."
                 )
+                break
             except errors.APIError as exc:
-                code = getattr(exc, "code", None)
-                if code == 404:
-                    last_not_found = exc
-                    break
+                code = api_error_code(exc)
+                message = api_error_text(exc)
                 if code == 400 and structured_schema and index == 0:
                     continue
+                if code in (401, 403) or (
+                    code == 400 and ("api key" in message or "api_key" in message)
+                ):
+                    # A bad key fails the same way for every model.
+                    raise
+                if code == 429:
+                    last_rate_limit = exc
+                    last_error = exc
+                    break
+                model_problem = code in (404, 500, 503, 504) or (
+                    code == 400 and (
+                        "model" in message or "not supported" in message
+                        or "unsupported" in message
+                    )
+                )
+                if model_problem:
+                    last_error = exc
+                    break
                 raise
 
+    if last_rate_limit is not None and isinstance(last_error, errors.APIError) and api_error_code(last_error) == 429:
+        # Let the API key failover move to the next configured key.
+        raise last_rate_limit
+    detail = ""
+    if last_error is not None:
+        detail = f" Last error: {str(getattr(last_error, 'message', '') or last_error)[:300]}"
     raise RuntimeError(
-        "No supported Gemini audio-understanding model is available to the "
-        "configured transcription API key. Check the key's accessible models "
-        "in Google AI Studio or use another Gemini API key."
-    ) from last_not_found
+        "No Gemini model could transcribe this audio with the configured API key. "
+        "Check that the key is valid and has quota in Google AI Studio, or add a backup key."
+        + detail
+    ) from last_error
 
 
 def flash_audio_transcription_fallback(
@@ -3767,12 +3811,30 @@ def transcribe_media(
 
 def _ai_text_once(api_key: str, prompt: str) -> str:
     client = genai.Client(api_key=api_key)
+    last_error: Exception | None = None
     try:
-        result = client.interactions.create(model=CONTENT_MODEL, input=prompt)
-        text = str(getattr(result, "output_text", "") or "").strip()
-        if not text:
-            raise RuntimeError("Gemini returned an empty result.")
-        return text
+        for model_name in dict.fromkeys((
+            CONTENT_MODEL,
+            "gemini-flash-latest",
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+            "gemini-flash-lite-latest",
+        )):
+            try:
+                result = client.models.generate_content(model=model_name, contents=prompt)
+            except errors.APIError as exc:
+                code = api_error_code(exc)
+                if code in (404, 500, 503, 504) or (code == 429 and model_name != "gemini-flash-lite-latest"):
+                    last_error = exc
+                    continue
+                raise
+            text = str(getattr(result, "text", "") or "").strip()
+            if text:
+                return text
+            last_error = RuntimeError("Gemini returned an empty result.")
+        if isinstance(last_error, errors.APIError) and api_error_code(last_error) == 429:
+            raise last_error
+        raise RuntimeError(f"Gemini could not generate this result. {last_error or ''}".strip())
     finally:
         try:
             client.close()
