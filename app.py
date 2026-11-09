@@ -40,7 +40,7 @@ import requests
 LOGGER = logging.getLogger(__name__)
 
 APP_TITLE = "Video/Audio Transcriber by Team Fahad"
-APP_BUILD = "2026-11-08.3"
+APP_BUILD = "2026-11-09.1"
 TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
 CONTENT_MODEL = "gemini-3.8-flash"
 LIVE_TRANSCRIBE_MODEL = "gemini-3.5-transcribe-live"
@@ -648,14 +648,21 @@ def run_with_api_failover(api_keys: list[str], operation: Any, purpose: str) -> 
 def render_copy_button(text: str, label: str = "Copy TXT", height: int = 42, top_offset: int = 0) -> None:
     """Render a compact browser-side copy button."""
     payload = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    try:
+        dark = getattr(st.context.theme, "type", None) == "dark"
+    except Exception:
+        dark = False
+    btn_bg, btn_fg, btn_border = (
+        ("#171a21", "#e7e9ee", "#2f3440") if dark else ("#ffffff", "#111827", "#d9dde4")
+    )
     components.html(
         f"""
-        <div style="font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+        <div style="font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
                     width:100%; height:{height}px; display:flex; align-items:stretch;">
           <button id="copy-btn" style="
-            width:100%; height:100%; box-sizing:border-box; padding:0 16px; border-radius:12px;
-            border:1px solid rgba(148,163,184,.28); background:rgba(15,23,42,.55);
-            color:#f8fafc; font-weight:750; font-size:14px; cursor:pointer;
+            width:100%; height:100%; box-sizing:border-box; padding:0 16px; border-radius:10px;
+            border:1px solid {btn_border}; background:{btn_bg};
+            color:{btn_fg}; font-weight:600; font-size:14px; cursor:pointer;
             position:relative; top:{top_offset}px;
             transition:background .2s ease, border-color .2s ease, transform .2s ease;
           ">{label}</button>
@@ -1071,7 +1078,7 @@ def normalize_link_media_to_mp3(source: Path, destination: Path) -> Path:
         "-codec:a",
         "libmp3lame",
         "-b:a",
-        "128k",
+        "64k",
         str(destination),
     ]
     try:
@@ -3111,23 +3118,29 @@ def media_duration(path: Path, is_video: bool) -> float | None:
 
 
 def prepare_audio(source: Path, extension: str, folder: Path) -> tuple[Path, str, float | None]:
-    """Return (audio_path, mime_type, duration_seconds)."""
-    if extension in VIDEO_EXTENSIONS:
-        duration = media_duration(source, is_video=True)
-        audio_path = folder / "extracted_audio.mp3"
-        try:
-            with VideoFileClip(str(source)) as video:
-                if video.audio is None:
-                    raise ValueError("This video does not contain an audio track.")
-                video.audio.write_audiofile(str(audio_path), codec="libmp3lame", logger=None)
-        except ValueError:
-            raise
-        except Exception as exc:
-            raise RuntimeError(f"Could not extract audio from this video: {exc}") from exc
-        return audio_path, "audio/mpeg", duration
+    """Return (audio_path, mime_type, duration_seconds).
 
-    duration = media_duration(source, is_video=False)
-    return source, AUDIO_MIME_TYPES[extension], duration
+    Every upload is converted to a small 16 kHz mono MP3 with FFmpeg. Gemini
+    accepts MP3 reliably, while formats such as M4A or AAC inside MP4 are often
+    rejected, and the smaller file uploads much faster.
+    """
+    is_video = extension in VIDEO_EXTENSIONS
+    duration = media_duration(source, is_video=is_video)
+    audio_path = folder / "prepared_audio.mp3"
+    try:
+        normalize_link_media_to_mp3(source, audio_path)
+    except RuntimeError as exc:
+        if is_video and "does not contain any stream" in str(exc).lower():
+            raise ValueError("This video does not contain an audio track.") from exc
+        if extension == ".mp3":
+            # Already Gemini friendly, so send the original file.
+            return source, "audio/mpeg", duration
+        if is_video:
+            raise RuntimeError(f"Could not extract audio from this video: {exc}") from exc
+        raise RuntimeError(f"Could not read this audio file: {exc}") from exc
+    if not duration:
+        duration = media_duration(audio_path, is_video=False)
+    return audio_path, "audio/mpeg", duration
 
 
 def _generate_audio_with_compatible_flash(
@@ -3143,12 +3156,17 @@ def _generate_audio_with_compatible_flash(
     )
     candidates = list(dict.fromkeys((
         CONTENT_MODEL,
+        "gemini-flash-latest",
         "gemini-3.6-flash",
         "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
+        "gemini-3-flash-preview",
         "gemini-2.5-flash",
+        "gemini-flash-lite-latest",
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash-lite",
     )))
-    last_not_found: Exception | None = None
+    last_error: Exception | None = None
+    last_rate_limit: errors.APIError | None = None
 
     for model_name in candidates:
         configs: list[Any] = (
@@ -3170,26 +3188,59 @@ def _generate_audio_with_compatible_flash(
                 }
                 if config is not None:
                     kwargs["config"] = config
-                response = client.models.generate_content(**kwargs)
-                if str(getattr(response, "text", "") or "").strip():
+                response = None
+                for attempt in range(2):
+                    try:
+                        response = client.models.generate_content(**kwargs)
+                        break
+                    except errors.APIError as exc:
+                        # Retry a short overload once before moving on.
+                        if api_error_code(exc) in (500, 503) and attempt == 0:
+                            time.sleep(3)
+                            continue
+                        raise
+                if response is not None and str(getattr(response, "text", "") or "").strip():
                     return response, model_name
-                raise RuntimeError(
+                last_error = RuntimeError(
                     f"{model_name} returned no transcript text for this audio."
                 )
+                break
             except errors.APIError as exc:
-                code = getattr(exc, "code", None)
-                if code == 404:
-                    last_not_found = exc
-                    break
+                code = api_error_code(exc)
+                message = api_error_text(exc)
                 if code == 400 and structured_schema and index == 0:
                     continue
+                if code in (401, 403) or (
+                    code == 400 and ("api key" in message or "api_key" in message)
+                ):
+                    # A bad key fails the same way for every model.
+                    raise
+                if code == 429:
+                    last_rate_limit = exc
+                    last_error = exc
+                    break
+                model_problem = code in (404, 500, 503, 504) or (
+                    code == 400 and (
+                        "model" in message or "not supported" in message
+                        or "unsupported" in message
+                    )
+                )
+                if model_problem:
+                    last_error = exc
+                    break
                 raise
 
+    if last_rate_limit is not None and isinstance(last_error, errors.APIError) and api_error_code(last_error) == 429:
+        # Let the API key failover move to the next configured key.
+        raise last_rate_limit
+    detail = ""
+    if last_error is not None:
+        detail = f" Last error: {str(getattr(last_error, 'message', '') or last_error)[:300]}"
     raise RuntimeError(
-        "No supported Gemini audio-understanding model is available to the "
-        "configured transcription API key. Check the key's accessible models "
-        "in Google AI Studio or use another Gemini API key."
-    ) from last_not_found
+        "No Gemini model could transcribe this audio with the configured API key. "
+        "Check that the key is valid and has quota in Google AI Studio, or add a backup key."
+        + detail
+    ) from last_error
 
 
 def flash_audio_transcription_fallback(
@@ -3767,12 +3818,30 @@ def transcribe_media(
 
 def _ai_text_once(api_key: str, prompt: str) -> str:
     client = genai.Client(api_key=api_key)
+    last_error: Exception | None = None
     try:
-        result = client.interactions.create(model=CONTENT_MODEL, input=prompt)
-        text = str(getattr(result, "output_text", "") or "").strip()
-        if not text:
-            raise RuntimeError("Gemini returned an empty result.")
-        return text
+        for model_name in dict.fromkeys((
+            CONTENT_MODEL,
+            "gemini-flash-latest",
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+            "gemini-flash-lite-latest",
+        )):
+            try:
+                result = client.models.generate_content(model=model_name, contents=prompt)
+            except errors.APIError as exc:
+                code = api_error_code(exc)
+                if code in (404, 500, 503, 504) or (code == 429 and model_name != "gemini-flash-lite-latest"):
+                    last_error = exc
+                    continue
+                raise
+            text = str(getattr(result, "text", "") or "").strip()
+            if text:
+                return text
+            last_error = RuntimeError("Gemini returned an empty result.")
+        if isinstance(last_error, errors.APIError) and api_error_code(last_error) == 429:
+            raise last_error
+        raise RuntimeError(f"Gemini could not generate this result. {last_error or ''}".strip())
     finally:
         try:
             client.close()
@@ -4021,7 +4090,7 @@ handle_frameio_oauth_callback()
 @st.fragment(key="ai_client_tools")
 def render_ai_client_tools(result: dict[str, Any], content_api_keys: list[str]) -> None:
     """Render AI client tools in an isolated fragment so AI actions don't rerun the whole app."""
-    st.subheader("Turn the transcript into client-ready deliverables")
+    st.markdown("**Turn the transcript into client-ready deliverables**")
     st.caption("These are generated only when you click a button, so you control extra API usage.")
 
     col_a, col_b, col_c = st.columns(3)
@@ -4124,292 +4193,204 @@ def render_ai_client_tools(result: dict[str, Any], content_api_keys: list[str]) 
         render_copy_button(st.session_state.content_pack, "Copy TXT")
 
 
-THEMES = {
-    "Midnight Neon": {
-        "bg": "#07111f", "panel": "#0d1728", "panel2": "#101d31", "text": "#f7fbff",
-        "muted": "#93a4bc", "accent": "#7c5cff", "accent2": "#00d7ff", "border": "rgba(148,163,184,.18)",
-        "hero1": "#161d46", "hero2": "#0d2944", "glow": "rgba(124,92,255,.30)",
-    },
-    "Ocean Glass": {
-        "bg": "#06151d", "panel": "#0a202b", "panel2": "#0d2835", "text": "#effcff",
-        "muted": "#99bcc7", "accent": "#11b5e4", "accent2": "#35f0c1", "border": "rgba(125,211,252,.18)",
-        "hero1": "#0b2d3c", "hero2": "#0a3b47", "glow": "rgba(17,181,228,.26)",
-    },
-    "Emerald Studio": {
-        "bg": "#071611", "panel": "#0b2019", "panel2": "#0f2a21", "text": "#f3fff9",
-        "muted": "#9ab9aa", "accent": "#28d17c", "accent2": "#8df3b9", "border": "rgba(134,239,172,.18)",
-        "hero1": "#123526", "hero2": "#0c2c28", "glow": "rgba(40,209,124,.26)",
-    },
-    "Retro Wave": {
-        "bg": "#120817", "panel": "#1a0d25", "panel2": "#241135", "text": "#fff4df",
-        "muted": "#d2a8c9", "accent": "#ff4fd8", "accent2": "#00e6ff", "border": "rgba(255,118,194,.18)",
-        "hero1": "#3b165d", "hero2": "#241357", "glow": "rgba(255,79,216,.28)",
-    },
-}
+SPEAKER_CLASSES = 5
 
-# Theme is intentionally stored in session state so switching it reruns the app instantly.
-if "ui_theme" not in st.session_state:
-    st.session_state.ui_theme = "Midnight Neon"
 
-with st.sidebar:
-    st.markdown("<div class='side-kicker'>APPEARANCE</div>", unsafe_allow_html=True)
-    selected_theme = st.selectbox(
-        "Dashboard theme",
-        list(THEMES.keys()),
-        index=list(THEMES.keys()).index(st.session_state.ui_theme),
-        key="theme_picker",
-    )
-    st.session_state.ui_theme = selected_theme
-    st.caption(f"Build {APP_BUILD}")
+def friendly_error(exc: Exception) -> str:
+    """Turn API errors into short messages a client can act on."""
+    code = api_error_code(exc) if isinstance(exc, errors.APIError) else None
+    message = str(getattr(exc, "message", "") or exc)
+    lowered = message.lower()
+    if code == 400 and "api key" in lowered:
+        return "The Gemini API key is not valid. Check the key in Streamlit Secrets."
+    if code in (401, 403):
+        return f"Gemini refused this API key ({code}). Make sure the key is active and allowed to use the Gemini API. Details: {message[:300]}"
+    if code == 429 or isinstance(exc, APIKeyPoolExhausted):
+        return "Gemini quota is used up for now. Wait a minute and try again, or add a backup key in Streamlit Secrets."
+    if code in (500, 503, 504):
+        return "Gemini is busy right now. Please try again in a minute."
+    if code:
+        return f"Gemini request failed ({code}): {message[:400]}"
+    return message
 
-t = THEMES[st.session_state.ui_theme]
 
+def word_count(text: str) -> int:
+    return len(re.findall(r"\w+", text or ""))
+
+
+def render_transcript_reader(segments: list[Segment], query: str = "") -> None:
+    """Show timed segments in a readable list, like a professional editor."""
+    import html as html_lib
+
+    speakers: dict[str, int] = {}
+    rows: list[str] = []
+    needle = query.strip().lower()
+    for segment in segments:
+        text = segment.text or ""
+        if needle and needle not in text.lower():
+            continue
+        safe_text = html_lib.escape(text)
+        if needle:
+            safe_text = re.sub(
+                re.escape(html_lib.escape(query.strip())),
+                lambda match: f"<mark class='tf-hit'>{match.group(0)}</mark>",
+                safe_text,
+                flags=re.IGNORECASE,
+            )
+        speaker_html = ""
+        if segment.speaker:
+            index = speakers.setdefault(segment.speaker, len(speakers)) % SPEAKER_CLASSES
+            speaker_html = (
+                f"<div class='tf-speaker tf-s{index}'>{html_lib.escape(segment.speaker)}</div>"
+            )
+        rows.append(
+            f"<div class='tf-seg'><div class='tf-time'>{format_clock(segment.start)}</div>"
+            f"<div>{speaker_html}<div class='tf-text'>{safe_text}</div></div></div>"
+        )
+    if not rows:
+        st.caption("No lines match your search.")
+        return
+    st.markdown(f"<div class='tf-reader'>{''.join(rows)}</div>", unsafe_allow_html=True)
+
+
+
+BRAND_NAME = "Team Fahad Transcriber"
+
+# Light and dark colors come from .streamlit/config.toml ([theme.light] and
+# [theme.dark]). The CSS below only adds layout and uses colors that read
+# well on both themes, so every Streamlit widget keeps proper contrast.
 st.markdown(
-    f"""
+    """
 <style>
-:root {{
-  --tf-bg:{t['bg']}; --tf-panel:{t['panel']}; --tf-panel2:{t['panel2']}; --tf-text:{t['text']};
-  --tf-muted:{t['muted']}; --tf-accent:{t['accent']}; --tf-accent2:{t['accent2']};
-  --tf-border:{t['border']}; --tf-hero1:{t['hero1']}; --tf-hero2:{t['hero2']}; --tf-glow:{t['glow']};
-}}
+:root {
+  --tf-accent: #4f46e5;
+  --tf-accent-soft: rgba(99,102,241,.12);
+  --tf-line: rgba(128,135,150,.22);
+  --tf-tint: rgba(128,135,150,.07);
+  --tf-muted: rgba(128,135,150,1);
+}
+.block-container {max-width: 1120px; padding-top: 2.2rem; padding-bottom: 4rem;}
+[data-testid="stHeader"] {background: transparent;}
+[data-testid="stSidebarHeader"] {padding-bottom: .25rem;}
+h1, h2, h3 {letter-spacing: -.015em;}
+h3 {font-weight: 650 !important;}
 
-html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {{
-  background: var(--tf-bg) !important;
-  color: var(--tf-text) !important;
-}}
-[data-testid="stHeader"] {{background: transparent !important;}}
-[data-testid="stToolbar"] {{right: 1rem;}}
-[data-testid="stSidebar"] {{
-  background: linear-gradient(180deg, var(--tf-panel), var(--tf-bg)) !important;
-  border-right: 1px solid var(--tf-border);
-}}
-[data-testid="stSidebar"] * {{color: var(--tf-text);}}
+/* App header */
+.tf-appbar {display:flex; align-items:center; justify-content:space-between; gap:1rem;
+  padding: 0 0 1.25rem 0; margin-bottom: 1.5rem; border-bottom: 1px solid var(--tf-line);}
+.tf-brand {display:flex; align-items:center; gap:.85rem; min-width:0;}
+.tf-logo {width:44px; height:44px; border-radius:12px; flex:0 0 44px; display:grid; place-items:center;
+  background: linear-gradient(135deg,#6366f1,#8b5cf6); box-shadow: 0 6px 18px rgba(99,102,241,.28);}
+.tf-logo svg {width:24px; height:24px;}
+.tf-brand-title {font-size:1.35rem; font-weight:700; line-height:1.2; letter-spacing:-.02em;}
+.tf-brand-sub {font-size:.88rem; color:var(--tf-muted); margin-top:.15rem;}
+.tf-pill {display:inline-flex; align-items:center; gap:.4rem; padding:.3rem .7rem; border-radius:999px;
+  border:1px solid var(--tf-line); font-size:.78rem; font-weight:600; white-space:nowrap; color:var(--tf-muted);}
+.tf-dot {width:7px; height:7px; border-radius:50%; background:#10b981;}
+.tf-dot.off {background:#f59e0b;}
 
-.block-container {{max-width: 1180px; padding-top: 1.45rem; padding-bottom: 4rem;}}
+/* Section headings */
+.tf-section {display:flex; align-items:baseline; justify-content:space-between; gap:1rem; margin:.25rem 0 .6rem;}
+.tf-section-title {font-size:1.15rem; font-weight:650; letter-spacing:-.01em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.tf-section-sub {font-size:.85rem; color:var(--tf-muted); white-space:nowrap;}
+.tf-eyebrow {font-size:.7rem; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:var(--tf-muted); margin:.2rem 0 .45rem;}
 
-.hero {{
-  position: relative; overflow: hidden; padding: 1.8rem 1.9rem; border: 1px solid var(--tf-border);
-  border-radius: 26px; margin-bottom: 1.25rem;
-  background: linear-gradient(135deg, var(--tf-hero1), var(--tf-hero2));
-  box-shadow: 0 24px 70px var(--tf-glow);
-}}
-.hero:after {{
-  content: ""; position:absolute; width:260px; height:260px; border-radius:50%; right:-95px; top:-125px;
-  background: radial-gradient(circle, var(--tf-accent2) 0%, transparent 67%); opacity:.22; filter: blur(8px);
-}}
-.hero-top {{display:flex; align-items:center; gap:.65rem; margin-bottom:.7rem; position:relative; z-index:1;}}
-.brand-dot {{width:10px; height:10px; border-radius:50%; background:var(--tf-accent2); box-shadow:0 0 18px var(--tf-accent2);}}
-.brand-chip {{font-size:.75rem; letter-spacing:.12em; text-transform:uppercase; color:var(--tf-muted); font-weight:800;}}
-.hero h1 {{margin: 0; font-size: clamp(2rem, 4vw, 3.35rem); line-height:1.03; letter-spacing:-.04em; position:relative; z-index:1;}}
-.hero p {{margin: .85rem 0 0 0; color:var(--tf-muted); max-width:780px; font-size:1.02rem; line-height:1.7; position:relative; z-index:1;}}
-.hero-badges {{display:flex; flex-wrap:wrap; gap:.55rem; margin-top:1.1rem; position:relative; z-index:1;}}
-.hero-badge {{padding:.42rem .72rem; border:1px solid var(--tf-border); border-radius:999px; background:rgba(255,255,255,.04); font-size:.8rem; font-weight:700;}}
+/* File and result summary */
+.tf-file {display:flex; align-items:center; gap:.85rem; padding:.85rem 1rem; border:1px solid var(--tf-line);
+  border-radius:12px; background:var(--tf-tint); margin:.5rem 0 .8rem;}
+.tf-file-icon {width:38px; height:38px; border-radius:10px; display:grid; place-items:center; flex:0 0 38px;
+  background:var(--tf-accent-soft); color:#6366f1; font-size:.68rem; font-weight:700; letter-spacing:.04em;}
+.tf-file-name {font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.tf-file-meta {font-size:.82rem; color:var(--tf-muted); margin-top:.1rem;}
+.tf-stats {display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.75rem; margin:.4rem 0 1rem;}
+.tf-stat {border:1px solid var(--tf-line); border-radius:12px; padding:.75rem .9rem;}
+.tf-stat b {display:block; font-size:1.05rem; font-weight:650; margin-top:.15rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.tf-stat small {font-size:.72rem; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--tf-muted);}
 
-.side-kicker {{font-size:.68rem; letter-spacing:.16em; font-weight:800; color:var(--tf-muted); margin:.15rem 0 .4rem;}}
-.section-label {{font-size:.72rem; text-transform:uppercase; letter-spacing:.14em; color:var(--tf-muted); font-weight:800; margin-bottom:.25rem;}}
-.empty-card {{padding:1.4rem; border:1px dashed var(--tf-border); border-radius:20px; background:var(--tf-panel); color:var(--tf-muted); margin-top:.8rem;}}
-.empty-card strong {{color:var(--tf-text);}}
+/* Transcript reader */
+.tf-reader {max-height:520px; overflow-y:auto; border:1px solid var(--tf-line); border-radius:12px; padding:.4rem 0;}
+.tf-seg {display:grid; grid-template-columns:72px minmax(0,1fr); gap:.9rem; padding:.7rem 1.1rem;}
+.tf-seg + .tf-seg {border-top:1px solid var(--tf-line);}
+.tf-time {font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.8rem; color:var(--tf-muted); padding-top:.15rem;}
+.tf-speaker {font-size:.8rem; font-weight:700; margin-bottom:.15rem;}
+.tf-text {line-height:1.65;}
+.tf-s0 {color:#6366f1;} .tf-s1 {color:#0d9488;} .tf-s2 {color:#d97706;} .tf-s3 {color:#db2777;} .tf-s4 {color:#2563eb;}
+mark.tf-hit {background:rgba(250,204,21,.45); color:inherit; border-radius:3px; padding:0 2px;}
 
-/* Cards / containers */
-[data-testid="stMetric"] {{
-  background: var(--tf-panel); border:1px solid var(--tf-border); border-radius:18px; padding: .9rem 1rem;
-  box-shadow: 0 10px 30px rgba(0,0,0,.10);
-}}
-[data-testid="stMetricLabel"] {{color:var(--tf-muted) !important;}}
-[data-testid="stMetricValue"] {{color:var(--tf-text) !important; font-size:1.15rem !important;}}
-[data-testid="stFileUploader"] {{
-  background:var(--tf-panel); border:1px solid var(--tf-border); border-radius:20px; padding:.35rem .65rem;
-}}
-[data-testid="stFileUploaderDropzone"] {{
-  border:1px dashed var(--tf-border) !important; background:var(--tf-panel2) !important; border-radius:16px !important;
-}}
+/* Widgets */
+.stTabs [data-baseweb="tab-list"] {gap:.25rem;}
+.stTabs [data-baseweb="tab"] {font-weight:600; padding-left:.35rem; padding-right:.35rem;}
+.stButton > button, .stDownloadButton > button, .stLinkButton > a {font-weight:600;}
+.stButton > button[kind="primary"] {min-height:2.75rem;}
+[data-testid="stFileUploaderDropzone"] {padding:1.6rem 1.2rem; border-style:dashed !important;}
+[data-testid="stMetric"] {border:1px solid var(--tf-line); border-radius:12px; padding:.75rem .9rem;}
+.stTextArea textarea {line-height:1.6;}
 
-/* Inputs */
-.stTextInput input, .stTextArea textarea, [data-baseweb="select"] > div {{
-  background:var(--tf-panel2) !important; color:var(--tf-text) !important; border-color:var(--tf-border) !important;
-}}
-.stTextArea textarea {{border-radius:14px !important;}}
+/* Sidebar */
+.side-kicker {font-size:.7rem; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:var(--tf-muted); margin:.4rem 0 .35rem;}
+.tf-side-brand {display:flex; align-items:center; gap:.6rem; margin:.1rem 0 1rem;}
+.tf-side-brand .tf-logo {width:32px; height:32px; flex-basis:32px; border-radius:9px; box-shadow:none;}
+.tf-side-brand .tf-logo svg {width:18px; height:18px;}
+.tf-side-brand b {font-size:.98rem; font-weight:700;}
+.dev-card {margin-top:1rem; padding:.75rem .9rem; border:1px solid var(--tf-line); border-radius:12px; font-size:.85rem;}
+.dev-card .dev-label {font-size:.68rem; letter-spacing:.08em; text-transform:uppercase; color:var(--tf-muted); font-weight:700; margin-bottom:.2rem;}
+.dev-card a {text-decoration:none !important; font-weight:600;}
+.dev-card .dev-sub {color:var(--tf-muted); font-size:.78rem; margin-top:.1rem;}
 
-/* Buttons */
-.stButton > button, .stDownloadButton > button {{
-  border-radius:13px !important; border:1px solid var(--tf-border) !important;
-  background:var(--tf-panel2) !important; color:var(--tf-text) !important; font-weight:750 !important;
-  transition:transform .16s ease, border-color .16s ease, box-shadow .16s ease;
-}}
-.stButton > button:hover, .stDownloadButton > button:hover {{
-  transform:translateY(-1px); border-color:var(--tf-accent) !important; box-shadow:0 10px 26px var(--tf-glow);
-}}
-.stButton > button[kind="primary"] {{
-  background:linear-gradient(90deg, var(--tf-accent), var(--tf-accent2)) !important;
-  color:white !important; border:0 !important; min-height:3rem;
-}}
+/* Batch link table header */
+.bulk-url-head {display:grid; grid-template-columns:minmax(0,2fr) minmax(180px,1fr); gap:1rem; padding:.5rem .2rem .2rem; font-weight:600;}
+.bulk-url-head div {display:flex; flex-direction:column; gap:.1rem;}
+.bulk-url-head span {color:var(--tf-muted); font-size:.75rem; font-weight:400;}
+.small-muted {color:var(--tf-muted); font-size:.85rem;}
 
-/* Calm native workspace tabs */
-.stTabs {{
-  margin: .35rem 0 1.1rem 0;
-}}
-.stTabs [data-baseweb="tab-list"] {{
-  gap: 0 !important;
-  padding: 3px !important;
-  border: 1px solid var(--tf-border) !important;
-  border-radius: 14px !important;
-  background: var(--tf-panel) !important;
-  overflow: hidden !important;
-}}
-.stTabs [data-baseweb="tab"] {{
-  min-height: 2.65rem !important;
-  padding: .55rem .95rem !important;
-  border-radius: 10px !important;
-  color: var(--tf-muted) !important;
-  font-weight: 750 !important;
-  transition:
-    color .28s ease,
-    background-color .28s ease,
-    transform .24s cubic-bezier(.22,1,.36,1) !important;
-}}
-.stTabs [data-baseweb="tab"]:hover {{
-  color: var(--tf-text) !important;
-  background: rgba(255,255,255,.035) !important;
-  transform: translateY(-1px);
-}}
-.stTabs [data-baseweb="tab"][aria-selected="true"] {{
-  color: var(--tf-text) !important;
-  background: linear-gradient(135deg, var(--tf-accent), var(--tf-accent2)) !important;
-  box-shadow: 0 8px 24px var(--tf-glow);
-}}
-.stTabs [data-baseweb="tab-highlight"] {{
-  display: none !important;
-}}
-.stTabs [data-baseweb="tab-border"] {{
-  display: none !important;
-}}
-.stTabs [role="tabpanel"] {{
-  animation: tfNativeTabEnter .28s ease-out both;
-  transform-origin: top center;
-}}
-@keyframes tfNativeTabEnter {{
-  from {{
-    opacity: 0;
-    transform: translate3d(0, 8px, 0);
-  }}
-  to {{
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
-  }}
-}}
-@media (prefers-reduced-motion: reduce) {{
-  .stTabs [data-baseweb="tab"],
-  .stTabs [role="tabpanel"] {{
-    animation: none !important;
-    transition: none !important;
-  }}
-}}
-
-/* Media source tabs */
-.stTabs [data-baseweb="tab-list"] {{
-  background: var(--tf-panel) !important;
-}}
-.stTabs [data-baseweb="tab"] {{
-  transition: color .24s ease, background-color .24s ease, transform .22s ease !important;
-}}
-.stTabs [data-baseweb="tab"]:hover {{
-  transform: translateY(-1px);
-}}
-.stTabs [data-baseweb="tab"][aria-selected="true"] {{
-  color: var(--tf-text) !important;
-  background: linear-gradient(135deg, var(--tf-accent), var(--tf-accent2)) !important;
-  border-radius: 10px !important;
-}}
-
-/* Bulk URL input */
-.bulk-url-head {{
-  display:grid;
-  grid-template-columns:minmax(0, 2fr) minmax(180px, 1fr);
-  gap:1rem;
-  padding:.75rem .9rem .35rem;
-  color:var(--tf-text);
-}}
-.bulk-url-head div {{
-  display:flex;
-  flex-direction:column;
-  gap:.15rem;
-}}
-.bulk-url-head span {{
-  color:var(--tf-muted);
-  font-size:.72rem;
-}}
-@media (max-width: 720px) {{
-  .bulk-url-head {{display:none;}}
-}}
-
-/* Status / alerts */
-[data-testid="stAlert"] {{border-radius:14px !important; border:1px solid var(--tf-border) !important;}}
-[data-testid="stStatusWidget"] {{border-radius:16px !important; border:1px solid var(--tf-border) !important; background:var(--tf-panel) !important;}}
-hr {{border-color:var(--tf-border) !important;}}
-
-.small-muted {{color:var(--tf-muted); font-size:.9rem;}}
-.output-card {{border:1px solid var(--tf-border); border-radius:16px; padding:1rem; background:var(--tf-panel);}}
-.copy-control {{margin: 0 0 .35rem 0;}}
-
-.dev-card {{
-  margin-top: 1.1rem;
-  padding: .9rem 1rem;
-  border: 1px solid var(--tf-border);
-  border-radius: 16px;
-  background: var(--tf-panel2);
-}}
-.dev-card .dev-label {{
-  font-size: .67rem;
-  letter-spacing: .14em;
-  text-transform: uppercase;
-  color: var(--tf-muted);
-  font-weight: 800;
-  margin-bottom: .28rem;
-}}
-.dev-card a {{
-  color: var(--tf-text) !important;
-  text-decoration: none !important;
-  font-weight: 800;
-}}
-.dev-card a:hover {{
-  color: var(--tf-accent2) !important;
-}}
-.dev-card .dev-sub {{
-  color: var(--tf-muted);
-  font-size: .78rem;
-  margin-top: .2rem;
-}}
-
-/* Streamlit text colors */
-p, label, .stMarkdown, .stCaption, [data-testid="stWidgetLabel"] {{color:var(--tf-text);}}
-.stCaption, small {{color:var(--tf-muted) !important;}}
-
-@media (max-width: 800px) {{
-  .block-container {{padding-left:1rem; padding-right:1rem;}}
-  .hero {{padding:1.35rem; border-radius:20px;}}
-  .hero h1 {{font-size:2rem;}}
-}}
+@media (max-width: 760px) {
+  .block-container {padding-left:1rem; padding-right:1rem; padding-top:1.2rem;}
+  .tf-appbar {flex-wrap:wrap;}
+  .tf-section-sub {display:none;}
+  .tf-stats {grid-template-columns:repeat(2,minmax(0,1fr));}
+  .tf-seg {grid-template-columns:1fr; gap:.2rem;}
+  .bulk-url-head {display:none;}
+}
 </style>
 """,
     unsafe_allow_html=True,
 )
 
+LOGO_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round">'
+    '<path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></svg>'
+)
+
+with st.sidebar:
+    st.markdown(
+        f'<div class="tf-side-brand"><div class="tf-logo">{LOGO_SVG}</div><b>{BRAND_NAME}</b></div>',
+        unsafe_allow_html=True,
+    )
+    st.page_link("app.py", label="Transcribe", icon=":material/graphic_eq:")
+    st.page_link(
+        "pages/2_Batch_Transcription.py",
+        label="Batch transcription",
+        icon=":material/playlist_add_check:",
+    )
+
 if not render_access_gate():
     st.stop()
 
+transcription_api_keys = load_api_key_pool("TRANSCRIBE")
+content_api_keys = load_api_key_pool("CONTENT")
+_keys_ready = bool(transcription_api_keys or content_api_keys)
+
 st.markdown(
     f"""
-<div class="hero">
-  <div class="hero-top"><span class="brand-dot"></span><span class="brand-chip">Team Fahad AI Studio</span></div>
-  <h1>{"Batch URL transcription." if batch_page_mode else "Turn media into usable content."}</h1>
-  <p>{"Paste multiple media links, assign custom VTT names, process them sequentially, and download all successful VTT files as one ZIP." if batch_page_mode else "Upload a file or paste one media link. Choose Smart Clean, Detailed Subtitles + Speakers, or Exact Verbatim from the same sidebar settings."}</p>
-  <div class="hero-badges">
-    <span class="hero-badge">Audio + Video</span>
-    <span class="hero-badge">Speaker Detection</span>
-    <span class="hero-badge">SRT / VTT</span>
-    <span class="hero-badge">AI Summary</span>
-    <span class="hero-badge">Translation</span>
+<div class="tf-appbar">
+  <div class="tf-brand">
+    <div class="tf-logo">{LOGO_SVG}</div>
+    <div>
+      <div class="tf-brand-title">{"Batch transcription" if batch_page_mode else "Transcribe audio and video"}</div>
+      <div class="tf-brand-sub">{"Process many media links in one run and download every subtitle file together." if batch_page_mode else "Accurate transcripts, speaker subtitles, summaries and translations in one place."}</div>
+    </div>
   </div>
+  <span class="tf-pill"><span class="tf-dot{'' if _keys_ready else ' off'}"></span>{"Gemini connected" if _keys_ready else "API key needed"}</span>
 </div>
 """,
     unsafe_allow_html=True,
@@ -4418,15 +4399,19 @@ st.markdown(
 if st.session_state.pop("frameio_connected_notice", False):
     st.success("Frame.io connected successfully. You can now transcribe Frame.io share links.")
 
-transcription_api_keys = load_api_key_pool("TRANSCRIBE")
-content_api_keys = load_api_key_pool("CONTENT")
-
 if not transcription_api_keys and not content_api_keys:
-    st.warning(
-        "Developer setup: no Gemini API key was found. Add GEMINI_API_KEY or GEMINI_API_KEYS "
-        "in Streamlit Secrets/environment variables."
-    )
-    local_api_key = st.text_input("Gemini API key for this local session", type="password")
+    with st.container(border=True):
+        st.markdown("**Connect a Gemini API key to start**")
+        st.caption(
+            "Add GEMINI_API_KEY (or GEMINI_API_KEYS) in Streamlit Secrets so visitors never need "
+            "their own key. For a quick local test you can paste a key below; it is kept only in this session."
+        )
+        local_api_key = st.text_input(
+            "Gemini API key",
+            type="password",
+            placeholder="Paste a key from Google AI Studio",
+            label_visibility="collapsed",
+        )
     if local_api_key:
         transcription_api_keys = [local_api_key]
         content_api_keys = [local_api_key]
@@ -4437,40 +4422,41 @@ if not transcription_api_keys and content_api_keys:
 if not content_api_keys and transcription_api_keys:
     content_api_keys = transcription_api_keys
 
+MODE_OPTIONS = ["Smart clean transcript", "Detailed subtitles + speakers", "Exact verbatim transcript"]
+MODE_LABELS = {
+    "Smart clean transcript": "Clean",
+    "Detailed subtitles + speakers": "Speakers + subtitles",
+    "Exact verbatim transcript": "Verbatim",
+}
+
 with st.sidebar:
-    st.markdown("<div class='side-kicker' style='margin-top:1.2rem'>TRANSCRIPTION</div>", unsafe_allow_html=True)
-    st.subheader("Settings")
+    st.divider()
+    st.markdown("<div class='side-kicker'>Transcription settings</div>", unsafe_allow_html=True)
     language_name = st.selectbox("Spoken language", list(LANGUAGES.keys()), index=0)
     mode = st.radio(
-        "Output mode",
-        ["Smart clean transcript", "Detailed subtitles + speakers", "Exact verbatim transcript"],
-        help=(
-            "Smart cleans filler words and formatting. Detailed enables speaker labels and word timestamps. "
-            "Exact verbatim preserves what was spoken."
-        ),
+        "Output",
+        MODE_OPTIONS,
+        format_func=lambda value: MODE_LABELS[value],
+        captions=[
+            "Readable text without filler words",
+            "Speaker labels with SRT and VTT files",
+            "Every word exactly as spoken",
+        ],
     )
 
     custom_vocab_text = ""
     if mode != "Detailed subtitles + speakers":
         custom_vocab_text = st.text_area(
-            "Custom vocabulary (optional)",
-            placeholder="Tamrin Institute, Team Fahad, product names...",
-            help="One term per line or comma-separated. Best for uncommon names and technical words.",
+            "Custom vocabulary",
+            placeholder="Names, brands, technical words",
+            help="One term per line or comma separated. Helps with uncommon names and technical words.",
+            height=90,
         )
-    else:
-        st.caption("Custom vocabulary is disabled in detailed speaker/timestamp mode.")
-
-    st.divider()
-    st.caption("Privacy: temporary local files are deleted after processing, and the Gemini Files API copy is deleted after the request.")
-    st.caption(
-        f"API failover: {len(transcription_api_keys)} transcription slot(s) · "
-        f"{len(content_api_keys)} AI-tool slot(s). HTTP 429 automatically moves to the next available slot."
-    )
 
     if frameio_oauth_config():
         frameio_ready = bool(get_frameio_access_token())
         if frameio_ready:
-            st.success("Frame.io connected")
+            st.success("Frame.io connected", icon=":material/check_circle:")
         else:
             try:
                 st.link_button(
@@ -4481,19 +4467,29 @@ with st.sidebar:
             except Exception as exc:
                 st.caption(f"Frame.io OAuth: {exc}")
 
+    st.divider()
+    st.caption(
+        f":material/lock: Files are deleted after processing. "
+        f"{len(transcription_api_keys)} transcription key(s) with automatic failover."
+    )
+    st.caption(":material/contrast: Switch light or dark mode from the ⋮ menu, then Settings.")
     st.markdown(
-        '''
+        f'''
         <div class="dev-card">
           <div class="dev-label">Developer</div>
           <a href="https://github.com/umar-vai" target="_blank">Umar Vai ↗</a>
-          <div class="dev-sub">github.com/umar-vai</div>
+          <div class="dev-sub">Build {APP_BUILD}</div>
         </div>
         ''',
         unsafe_allow_html=True,
     )
 
-st.markdown("<div class='section-label'>01 · Upload & process</div>", unsafe_allow_html=True)
-st.markdown("### Start with your media")
+if not batch_page_mode:
+    st.markdown(
+        "<div class='tf-section'><div class='tf-section-title'>New transcription</div>"
+        "<span class='tf-section-sub'>Upload a file, paste a link or record live</span></div>",
+        unsafe_allow_html=True,
+    )
 
 vocab = [item.strip() for item in re.split(r"[,\n]", custom_vocab_text) if item.strip()]
 
@@ -4503,8 +4499,11 @@ uploaded = None
 
 if batch_page_mode:
     bulk_link_rows: list[dict[str, str | int]] = []
-    st.markdown("<div class='section-label'>01 · Batch transcription</div>", unsafe_allow_html=True)
-    st.markdown("### Multiple URL transcription")
+    st.markdown(
+        "<div class='tf-section'><div class='tf-section-title'>Media links</div>"
+        "<span class='tf-section-sub'>Up to 50 links per run</span></div>",
+        unsafe_allow_html=True,
+    )
     st.caption(
         "Paste one or more public media URLs. Each URL can have its own custom name, "
         "and all successful VTT files can be downloaded together as one ZIP."
@@ -4785,15 +4784,14 @@ if batch_page_mode:
     st.stop()
 
 source_tabs = st.tabs(
-    ["Upload file", "Paste link", "Live voice"],
+    [":material/upload_file: Upload file", ":material/link: Paste link", ":material/mic: Live voice"],
     key="source_input_tabs",
     on_change="rerun",
 )
 
 with source_tabs[0]:
-    st.caption("Upload an audio or video file. Your selected transcription mode and language settings are applied automatically.")
     uploaded = st.file_uploader(
-        "Upload audio or video",
+        "Audio or video file",
         type=["mp3", "wav", "m4a", "aac", "ogg", "flac", "mp4", "mov", "mkv"],
         help=f"Maximum local upload size: {MAX_UPLOAD_MB} MB.",
         key="media_file_uploader",
@@ -4801,17 +4799,13 @@ with source_tabs[0]:
     )
 
 with source_tabs[1]:
-    st.caption("Paste one public media URL. It uses the same Spoken language, Output mode, and custom vocabulary settings as file upload.")
     single_media_link = st.text_input(
         "Media URL",
-        placeholder="https://drive.google.com/file/d/... or https://youtube.com/watch?v=...",
+        placeholder="Paste a YouTube, Google Drive, Facebook, Frame.io or direct media link",
         type="url",
         key="single_media_link",
     )
-    st.caption(
-        "Supports public Google Drive files, Frame.io shares, Facebook posts/reels, direct media links, YouTube and other supported sources. "
-        "Google Drive folder links are not single media files."
-    )
+    st.caption("Public links only. Google Drive folder links are not supported here; use Batch transcription.")
 
     if single_media_link.strip():
         is_frameio_link = bool(frameio_share_ids(single_media_link))
@@ -4820,18 +4814,13 @@ with source_tabs[1]:
                 "Public Frame.io review links are tried without OAuth first. "
                 "If the public page does not expose media, a connected Frame.io account is used as fallback when available."
             )
-        c1, c2 = st.columns([0.72, 0.28])
-        c1.metric("Source", "Media link")
-        c2.metric(
-            "Mode",
-            "Detailed" if mode.startswith("Detailed") else ("Verbatim" if mode.startswith("Exact") else "Smart"),
-        )
         if mode == "Detailed subtitles + speakers":
-            st.info("Detailed mode creates speaker labels plus SRT/VTT. Long linked recordings are automatically chunked and merged.")
+            st.caption(":material/info: Long recordings are split automatically and merged into one subtitle file.")
 
         if st.button(
             "Transcribe link",
             type="primary",
+            icon=":material/graphic_eq:",
             disabled=not bool(transcription_api_keys),
             use_container_width=True,
             key="transcribe_single_link",
@@ -4892,14 +4881,9 @@ with source_tabs[1]:
 
                     st.session_state.result = result
                 status.update(label="Transcription complete", state="complete", expanded=False)
-            except errors.APIError as exc:
-                status.update(label="Transcription failed", state="error")
-                code = getattr(exc, "code", "API")
-                message = getattr(exc, "message", str(exc))
-                st.error(f"Gemini request failed ({code}): {message}")
             except Exception as exc:
-                status.update(label="Transcription failed", state="error")
-                st.error(str(exc))
+                status.update(label="Transcription failed", state="error", expanded=False)
+                st.error(friendly_error(exc), icon=":material/error:")
 
 
 with source_tabs[2]:
@@ -4965,14 +4949,9 @@ with source_tabs[2]:
                     st.session_state.source_name = "voice_note.wav"
                     st.session_state["last_voice_note_signature"] = voice_signature
                     status.update(label="Voice note transcribed", state="complete", expanded=False)
-                except errors.APIError as exc:
-                    status.update(label="Voice transcription failed", state="error")
-                    code = getattr(exc, "code", "API")
-                    message = getattr(exc, "message", str(exc))
-                    st.error(f"Gemini request failed ({code}): {message}")
                 except Exception as exc:
-                    status.update(label="Voice transcription failed", state="error")
-                    st.error(str(exc))
+                    status.update(label="Voice transcription failed", state="error", expanded=False)
+                    st.error(friendly_error(exc), icon=":material/error:")
             elif not transcription_api_keys:
                 st.warning("No transcription API key is configured.")
 
@@ -5097,28 +5076,45 @@ with source_tabs[2]:
 
 if uploaded is not None:
     size_mb = getattr(uploaded, "size", 0) / (1024 * 1024)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("File", uploaded.name)
-    c2.metric("Size", f"{size_mb:.1f} MB")
-    c3.metric("Mode", "Detailed" if mode.startswith("Detailed") else "Standard")
+    extension = Path(uploaded.name).suffix.lstrip(".").upper() or "FILE"
+    import html as _html
+
+    st.markdown(
+        f"""
+<div class="tf-file">
+  <div class="tf-file-icon">{_html.escape(extension[:4])}</div>
+  <div style="min-width:0">
+    <div class="tf-file-name">{_html.escape(uploaded.name)}</div>
+    <div class="tf-file-meta">{(f"{size_mb:.1f} MB" if size_mb >= 1 else f"{max(1, round(size_mb * 1024))} KB")} · {MODE_LABELS[mode]} · {_html.escape(language_name)}</div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     if len(vocab) > 100:
-        st.info("Only the first 100 custom vocabulary terms will be sent for best results.")
-
+        st.info("Only the first 100 custom vocabulary terms will be used.")
     if mode == "Detailed subtitles + speakers":
-        st.info("Detailed mode is intended for recordings up to about 30 minutes. Standard modes support up to about 60 minutes per request.")
+        st.caption(":material/info: Speakers + subtitles works best for recordings up to about 30 minutes.")
 
-    if st.button("Transcribe file", type="primary", disabled=not bool(transcription_api_keys), use_container_width=True, key="transcribe_uploaded_file"):
+    if st.button(
+        "Start transcription",
+        type="primary",
+        icon=":material/graphic_eq:",
+        disabled=not bool(transcription_api_keys),
+        use_container_width=True,
+        key="transcribe_uploaded_file",
+    ):
         reset_outputs()
         st.session_state["source_kind"] = "file"
         if size_mb > MAX_UPLOAD_MB:
             st.error(f"Please upload a file smaller than {MAX_UPLOAD_MB} MB.")
         else:
-            status = st.status("Preparing media…", expanded=True)
+            status = st.status("Transcribing your file…", expanded=True)
             try:
-                status.write("Reading audio/video…")
-                status.write("Uploading securely for transcription…")
-                status.write("Running speech-to-text…")
+                status.write("Preparing audio")
+                status.write("Uploading securely to Gemini")
+                status.write("Converting speech to text")
                 result = transcribe_media(
                     uploaded=uploaded,
                     api_keys=transcription_api_keys,
@@ -5129,60 +5125,85 @@ if uploaded is not None:
                 st.session_state.result = result
                 st.session_state.source_name = uploaded.name
                 status.update(label="Transcription complete", state="complete", expanded=False)
-            except errors.APIError as exc:
-                status.update(label="Transcription failed", state="error")
-                code = getattr(exc, "code", "API")
-                message = getattr(exc, "message", str(exc))
-                st.error(f"Gemini request failed ({code}): {message}")
             except Exception as exc:
-                status.update(label="Transcription failed", state="error")
-                st.error(str(exc))
+                status.update(label="Transcription failed", state="error", expanded=False)
+                LOGGER.exception("Upload transcription failed")
+                st.error(friendly_error(exc), icon=":material/error:")
 
 result = st.session_state.get("result")
 if result:
     source_name = st.session_state.get("source_name", "transcript")
     base_name = safe_name(source_name)
+    transcript_text = result.get("transcript", "")
+    import html as _html
 
-    if result.get("duration"):
-        st.success(f"Completed • Media duration: {format_clock(result['duration'])}")
-    else:
-        st.success("Completed")
+    st.markdown(
+        f"<div class='tf-section' style='margin-top:2rem'><div class='tf-section-title'>{_html.escape(source_name)}</div>"
+        "<span class='tf-section-sub'>Transcript ready</span></div>",
+        unsafe_allow_html=True,
+    )
+    duration_text = format_clock(result["duration"]) if result.get("duration") else "Unknown"
+    st.markdown(
+        f"""
+<div class="tf-stats">
+  <div class="tf-stat"><small>Duration</small><b>{duration_text}</b></div>
+  <div class="tf-stat"><small>Words</small><b>{word_count(transcript_text):,}</b></div>
+  <div class="tf-stat"><small>Output</small><b>{_html.escape(MODE_LABELS.get(result.get("mode", ""), result.get("mode", "")))}</b></div>
+  <div class="tf-stat"><small>Language</small><b>{_html.escape(str(result.get("language", "Auto detect")))}</b></div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     if result.get("compatibility_notice"):
-        st.info(str(result["compatibility_notice"]))
-
-    st.markdown("<div class='section-label' style='margin-top:1.2rem'>02 · Workspace</div>", unsafe_allow_html=True)
-    st.markdown("### Your transcription workspace")
+        st.caption(f":material/info: {result['compatibility_notice']}")
 
     workspace_tabs_key = f"workspace_tabs_{st.session_state.get('workspace_instance', 0)}"
     tab_transcript, tab_subtitles, tab_ai, tab_downloads = st.tabs(
-        ["Transcript", "Speakers & subtitles", "AI client tools", "Downloads"],
-        default="Transcript",
+        [":material/article: Transcript", ":material/subtitles: Speakers & subtitles", ":material/auto_awesome: AI tools", ":material/download: Export"],
+        default=":material/article: Transcript",
         key=workspace_tabs_key,
         on_change="ignore",
     )
 
     with tab_transcript:
-        st.subheader("Transcript")
-        transcript_text = result.get("transcript", "")
-        st.text_area("Transcript text", transcript_text, height=430)
-        copy_col, _ = st.columns([0.28, 0.72])
+        st.text_area(
+            "Transcript text",
+            transcript_text,
+            height=460,
+            label_visibility="collapsed",
+        )
+        copy_col, txt_col, _ = st.columns([0.22, 0.22, 0.56])
         with copy_col:
-            render_copy_button(transcript_text, "Copy TXT")
+            render_copy_button(transcript_text, "Copy text")
+        txt_col.download_button(
+            "Download TXT",
+            transcript_text,
+            file_name=f"{base_name}.txt",
+            mime="text/plain",
+            icon=":material/download:",
+            use_container_width=True,
+        )
 
     with tab_subtitles:
         if result.get("segments"):
-            st.subheader("Speaker transcript")
-            speaker_text = result.get("speaker_transcript", "")
-            st.text_area("Speaker + timestamp transcript", speaker_text, height=330)
+            search = st.text_input(
+                "Search transcript",
+                placeholder="Search words or names",
+                key=f"segment_search_{st.session_state.get('workspace_instance', 0)}",
+                label_visibility="collapsed",
+            )
+            render_transcript_reader(list(result.get("segments") or []), search)
+            st.write("")
             d1, d2, d3 = st.columns(3)
             with d1:
-                render_copy_button(result.get("speaker_transcript", ""), "Copy TXT", height=42, top_offset=-8)
+                render_copy_button(result.get("speaker_transcript", ""), "Copy with speakers", height=42)
             d2.download_button(
                 "Download SRT",
                 result.get("srt", ""),
                 file_name=f"{base_name}.srt",
                 mime="application/x-subrip",
+                icon=":material/subtitles:",
                 use_container_width=True,
             )
             d3.download_button(
@@ -5190,11 +5211,15 @@ if result:
                 result.get("vtt", ""),
                 file_name=f"{base_name}.vtt",
                 mime="text/vtt",
+                icon=":material/subtitles:",
                 use_container_width=True,
             )
-            st.caption(f"Subtitle segments: {len(result.get('segments', []))}")
+            st.caption(f"{len(result.get('segments', []))} subtitle segments")
         else:
-            st.info("Speaker labels and subtitle files are created when you use “Detailed subtitles + speakers” mode.")
+            st.info(
+                "Choose **Speakers + subtitles** in the sidebar and transcribe again to get speaker labels and SRT/VTT files.",
+                icon=":material/subtitles:",
+            )
 
     with tab_ai:
         render_ai_client_tools(result, content_api_keys)
@@ -5206,7 +5231,7 @@ if result:
             f"translation_{str(st.session_state.get('translation_target', '')).lower()}": st.session_state.get("translation", ""),
             "content_pack": st.session_state.get("content_pack", ""),
         }
-        sections = [("Transcript", result.get("transcript", ""))]
+        sections = [("Transcript", transcript_text)]
         if result.get("speaker_transcript"):
             sections.append(("Speaker Transcript", result.get("speaker_transcript", "")))
         if st.session_state.get("summary"):
@@ -5221,32 +5246,32 @@ if result:
         docx_data = make_docx_bytes(APP_TITLE, sections)
         zip_data = make_zip_bytes(base_name, result, extras)
 
-        st.write("Download a polished document or one ZIP containing every output currently generated.")
+        st.caption("Export a formatted Word document, or one ZIP with every file generated so far.")
         dl1, dl2 = st.columns(2)
         dl1.download_button(
-            "Download complete DOCX",
+            "Word document (DOCX)",
             docx_data,
             file_name=f"{base_name}_complete.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            icon=":material/description:",
             use_container_width=True,
         )
         dl2.download_button(
-            "Download everything as ZIP",
+            "Everything (ZIP)",
             zip_data,
             file_name=f"{base_name}_team_fahad_pack.zip",
             mime="application/zip",
+            icon=":material/folder_zip:",
             use_container_width=True,
         )
 
 
-st.divider()
 st.markdown(
-    '''
-    <div class="small-muted" style="text-align:center;padding:.4rem 0 1rem">
-      Team Fahad AI Studio · Client-ready transcription workflow
-      <br>
-      Developed by <a href="https://github.com/umar-vai" target="_blank" style="color:var(--tf-accent2);text-decoration:none;font-weight:800;">Umar Vai</a>
+    """
+    <div class="small-muted" style="text-align:center;padding:3rem 0 1rem">
+      Team Fahad Transcriber · Developed by
+      <a href="https://github.com/umar-vai" target="_blank" style="text-decoration:none;font-weight:600;">Umar Vai</a>
     </div>
-    ''',
+    """,
     unsafe_allow_html=True,
 )
