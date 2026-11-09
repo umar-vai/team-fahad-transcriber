@@ -1,5 +1,10 @@
 # Video/Audio Transcriber by Team Fahad
 
+> **New:** the app now also runs fully on Cloudflare at
+> https://transcribe.abdullahfahad.com with Google sign-in and per-user history.
+> See [`web/README.md`](web/README.md). This Streamlit app (`app.py`) keeps working,
+> and its link download code is reused by the Cloudflare media container.
+
 A Streamlit app for client-ready video/audio transcription using the Gemini API.
 
 ## Included features

@@ -1,0 +1,56 @@
+---
+import Base from "../../layouts/Base.astro";
+import { env } from "cloudflare:workers";
+
+const user = Astro.locals.user;
+if (!user) return Astro.redirect("/login?next=/history");
+const q = (Astro.url.searchParams.get("q") || "").trim();
+const like = `%${q.replace(/[%_]/g, "")}%`;
+const { results } = await env.DB.prepare(
+  `SELECT id, title, source_type, mode, language, duration, created_at, substr(transcript, 1, 220) AS preview
+     FROM transcriptions WHERE user_id = ? AND (? = '' OR title LIKE ? OR transcript LIKE ?)
+    ORDER BY created_at DESC LIMIT 200`,
+).bind(user.id, q, like, like).all<any>();
+
+const sourceLabel: Record<string, string> = { upload: "File", link: "Link", youtube: "YouTube", live: "Live voice" };
+const modeLabel: Record<string, string> = { smart: "Smart clean", detailed: "Subtitles + speakers", verbatim: "Verbatim" };
+function length(seconds: number | null) {
+  if (!seconds) return "";
+  const s = Math.round(seconds);
+  return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+---
+<Base title="History · Team Fahad Transcriber">
+  <div class="page-head">
+    <div>
+      <h1>Your history</h1>
+      <p class="muted" style="margin:0">Every file, link and live recording you have transcribed. Only you can see these.</p>
+    </div>
+    <form method="get" class="row" style="min-width:260px">
+      <input type="search" name="q" value={q} placeholder="Search titles and text" />
+    </form>
+  </div>
+  {results.length === 0 ? (
+    <div class="card"><p class="muted" style="margin:0">{q ? "Nothing matches your search." : "No transcriptions yet."} <a href="/">Transcribe something</a>.</p></div>
+  ) : (
+    <div class="history-list">
+      {results.map((item) => (
+        <a class="card history-item" href={`/history/${item.id}`}>
+          <strong>{item.title}</strong>
+          <div class="chips">
+            <span class="chip">{sourceLabel[item.source_type] || item.source_type}</span>
+            <span class="chip">{modeLabel[item.mode] || item.mode}</span>
+            {item.duration ? <span class="chip">{length(item.duration)}</span> : null}
+            <span class="chip" data-time={item.created_at}>{new Date(item.created_at).toISOString().slice(0, 10)}</span>
+          </div>
+          <p>{item.preview}</p>
+        </a>
+      ))}
+    </div>
+  )}
+</Base>
+<script>
+  document.querySelectorAll<HTMLElement>("[data-time]").forEach((el) => {
+    el.textContent = new Date(Number(el.dataset.time)).toLocaleString();
+  });
+</script>
