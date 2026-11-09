@@ -5,6 +5,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  // Keep variables added in the Cloudflare dashboard when deploying.
+  "keep_vars": true,
   "observability": { "enabled": true },
   "routes": [{ "pattern": "transcribe.abdullahfahad.com", "custom_domain": true }],
   "d1_databases": [
