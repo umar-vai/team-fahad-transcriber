@@ -1,14 +1,13 @@
 /** Main page controller: files, links and live voice. */
 import { decodeToMono, encodeWav, hasSound, LiveRecorder, PIECE_SECONDS, splitIntoPieces, type Piece } from "./audio";
-import { mergePieces, type PieceResult, type Result, type Segment } from "./format";
-import { initResults, setHistoryId, showResult } from "./results";
+import { makeDocx, makeZip, download, mergePieces, safeName, speakerTranscript, toSrt, toVtt, type PieceResult, type Result, type Segment } from "./format";
+import { initResults, showResult } from "./results";
 
 const PARALLEL = 4;
 const BROWSER_DECODE_LIMIT = 300 * 1024 * 1024;
 const UPLOAD_PIECE = 50 * 1024 * 1024;
 
 const $ = (id: string): any => document.getElementById(id);
-let busy = false;
 
 interface Settings {
   mode: string;
@@ -24,15 +23,11 @@ function settings(): Settings {
   };
 }
 
-function setProgress(label: string, fraction: number | null, detail = ""): void {
-  $("progress-card").classList.remove("hidden");
-  $("progress-label").textContent = label;
-  $("progress-detail").textContent = detail;
-  ($("progress-bar") as HTMLDivElement).style.width = `${Math.round(Math.max(0.03, fraction ?? 0.05) * 100)}%`;
-}
+/** Progress goes to whichever queue item is running. */
+let progressSink: (label: string, fraction: number | null, detail: string) => void = () => {};
 
-function hideProgress(): void {
-  $("progress-card").classList.add("hidden");
+function setProgress(label: string, fraction: number | null, detail = ""): void {
+  progressSink(label, fraction, detail);
 }
 
 function showError(message: string): void {
@@ -43,12 +38,6 @@ function showError(message: string): void {
 
 function clearError(): void {
   $("error-box").classList.add("hidden");
-}
-
-function setBusy(value: boolean): void {
-  busy = value;
-  for (const id of ["upload-go", "link-go"]) ($(id) as HTMLButtonElement).disabled = value || (id === "upload-go" && !selectedFile);
-  ($("live-go") as HTMLButtonElement).disabled = value && !recorder;
 }
 
 class FatalError extends Error {}
@@ -124,7 +113,7 @@ async function finish(
   pieces: PieceResult[],
   meta: { title: string; sourceType: string; sourceRef?: string; duration: number | null; mode?: string },
   s: Settings,
-): Promise<void> {
+): Promise<Result> {
   const mode = meta.mode || s.mode;
   const merged = mergePieces(pieces, mode === "detailed");
   const result: Result = {
@@ -139,19 +128,14 @@ async function finish(
     estimatedTimes: merged.estimated,
     extras: {},
   };
-  hideProgress();
-  showResult(result);
-  document.getElementById("results")?.scrollIntoView({ behavior: "smooth", block: "start" });
-  if (!result.transcript.trim()) {
-    showError("No speech was found in this media.");
-    return;
-  }
+  if (!result.transcript.trim()) return result;
   try {
     const saved = await postJson("/api/history", { ...result, segments: result.segments });
-    setHistoryId(saved.id);
+    result.historyId = saved.id;
   } catch (error) {
     console.warn("Could not save to history", error);
   }
+  return result;
 }
 
 // ---------- Container jobs (links and large files) ----------
@@ -176,7 +160,7 @@ async function waitForJob(job: string, labelPrefix: string): Promise<{ title: st
   }
 }
 
-async function transcribeJob(job: string, s: Settings, meta: { sourceType: string; sourceRef?: string; fallbackTitle: string }): Promise<void> {
+async function transcribeJob(job: string, s: Settings, meta: { sourceType: string; sourceRef?: string; fallbackTitle: string }): Promise<Result> {
   const state = await waitForJob(job, "Preparing");
   const total = state.parts.length;
   setProgress("Transcribing…", 0, `0 of ${total} parts`);
@@ -187,7 +171,7 @@ async function transcribeJob(job: string, s: Settings, meta: { sourceType: strin
     }),
     (done) => setProgress("Transcribing…", done / total, `${done} of ${total} parts`),
   );
-  await finish(results, { title: state.title || meta.fallbackTitle, sourceType: meta.sourceType, sourceRef: meta.sourceRef, duration: state.duration }, s);
+  return finish(results, { title: state.title || meta.fallbackTitle, sourceType: meta.sourceType, sourceRef: meta.sourceRef, duration: state.duration }, s);
 }
 
 async function uploadToContainer(file: File): Promise<string> {
@@ -210,10 +194,7 @@ async function uploadToContainer(file: File): Promise<string> {
 
 // ---------- Sources ----------
 
-let selectedFile: File | null = null;
-
-async function transcribeFile(file: File): Promise<void> {
-  const s = settings();
+async function transcribeFile(file: File, s: Settings): Promise<Result> {
   const meta = { title: file.name.replace(/\.[^.]+$/, ""), sourceType: "upload", sourceRef: file.name };
   let samples: Float32Array | null = null;
   if (file.size <= BROWSER_DECODE_LIMIT) {
@@ -226,8 +207,7 @@ async function transcribeFile(file: File): Promise<void> {
   }
   if (!samples) {
     const job = await uploadToContainer(file);
-    await transcribeJob(job, s, { ...meta, fallbackTitle: meta.title });
-    return;
+    return transcribeJob(job, s, { ...meta, fallbackTitle: meta.title });
   }
   const duration = samples.length / 16000;
   const pieces = splitIntoPieces(samples, PIECE_SECONDS);
@@ -237,11 +217,10 @@ async function transcribeFile(file: File): Promise<void> {
     pieces.map((piece) => () => transcribeWav(piece, s)),
     (done) => setProgress("Transcribing…", done / pieces.length, `${done} of ${pieces.length} parts`),
   );
-  await finish(results, { ...meta, duration }, s);
+  return finish(results, { ...meta, duration }, s);
 }
 
-async function transcribeLink(url: string): Promise<void> {
-  const s = settings();
+async function transcribeLink(url: string, s: Settings): Promise<Result> {
   setProgress("Checking link…", null);
   const info = await postJson("/api/media/link", { url });
   if (info.kind === "youtube") {
@@ -260,17 +239,15 @@ async function transcribeLink(url: string): Promise<void> {
         }),
         (done) => setProgress("Transcribing YouTube video…", done / ranges.length, ranges.length > 1 ? `${done} of ${ranges.length} parts` : ""),
       );
-      await finish(results, { title: info.title, sourceType: "youtube", sourceRef: info.url, duration }, s);
-      return;
+      return await finish(results, { title: info.title, sourceType: "youtube", sourceRef: info.url, duration }, s);
     } catch (error) {
       console.info("Direct YouTube transcription failed; downloading instead.", error);
       setProgress("Downloading the video instead…", null);
       const job = await postJson("/api/media/link", { url, forceDownload: true });
-      await transcribeJob(job.job, s, { sourceType: "youtube", sourceRef: url, fallbackTitle: info.title });
-      return;
+      return transcribeJob(job.job, s, { sourceType: "youtube", sourceRef: url, fallbackTitle: info.title });
     }
   }
-  await transcribeJob(info.job, s, { sourceType: "link", sourceRef: url, fallbackTitle: "Linked media" });
+  return transcribeJob(info.job, s, { sourceType: "link", sourceRef: url, fallbackTitle: "Linked media" });
 }
 
 // ---------- Live voice ----------
@@ -312,7 +289,7 @@ async function toggleLive(): Promise<void> {
       showError("Microphone access was blocked. Allow the microphone in your browser and try again.");
       return;
     }
-    setBusy(true);
+    refreshButtons();
     button.textContent = "Stop recording";
     renderLive();
     liveTimer = window.setInterval(() => {
@@ -334,33 +311,168 @@ async function toggleLive(): Promise<void> {
   button.disabled = false;
   button.textContent = "Start recording";
   $("live-state").textContent = "";
-  setBusy(false);
+  refreshButtons();
   const s = settings();
   const stamp = new Date().toLocaleString();
-  await finish(liveResults, { title: `Live voice ${stamp}`, sourceType: "live", duration: active.elapsed, mode: s.mode === "smart" ? "smart" : "verbatim" }, s);
+  const result = await finish(liveResults, { title: `Live voice ${stamp}`, sourceType: "live", duration: active.elapsed, mode: s.mode === "smart" ? "smart" : "verbatim" }, s);
+  viewResult(result);
+  if (!result.transcript.trim()) showError("No speech was found in this recording.");
 }
 
-// ---------- Wiring ----------
+// ---------- Batch queue ----------
 
-async function run(work: () => Promise<void>): Promise<void> {
-  if (busy) return;
-  clearError();
-  setBusy(true);
+interface QueueItem {
+  id: number;
+  kind: "file" | "link";
+  name: string;
+  file?: File;
+  url?: string;
+  settings: Settings;
+  state: "queued" | "running" | "done" | "failed";
+  label: string;
+  fraction: number | null;
+  detail: string;
+  error?: string;
+  result?: Result;
+}
+
+const queue: QueueItem[] = [];
+let queueRunning = false;
+let nextId = 1;
+let pendingFiles: File[] = [];
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+function viewResult(result: Result): void {
+  showResult(result);
+  document.getElementById("results")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function refreshButtons(): void {
+  ($("upload-go") as HTMLButtonElement).disabled = pendingFiles.length === 0 || !!recorder;
+  ($("link-go") as HTMLButtonElement).disabled = !!recorder;
+  ($("live-go") as HTMLButtonElement).disabled = queueRunning && !recorder;
+}
+
+function itemHtml(item: QueueItem): string {
+  const stateText =
+    item.state === "queued" ? "Waiting" : item.state === "running" ? `${item.label}${item.detail ? ` · ${item.detail}` : ""}` : item.state === "done" ? "Done" : item.error || "Failed";
+  const actions: string[] = [];
+  if (item.state === "done") actions.push(`<button class="btn small" data-act="view" data-id="${item.id}" type="button">View</button>`);
+  if (item.state === "failed") actions.push(`<button class="btn ghost small" data-act="retry" data-id="${item.id}" type="button">Retry</button>`);
+  if (item.state !== "running") actions.push(`<button class="btn ghost small" data-act="remove" data-id="${item.id}" type="button">Remove</button>`);
+  const bar = item.state === "running" ? `<div class="progress"><div style="width:${Math.round(Math.max(0.03, item.fraction ?? 0.05) * 100)}%"></div></div>` : "";
+  return `<div class="q-head"><span class="q-name">${escapeHtml(item.name)}</span><div class="q-actions">${actions.join("")}</div></div>
+    <div class="q-state ${item.state === "done" ? "done" : item.state === "failed" ? "failed" : ""}">${escapeHtml(stateText)}</div>${bar}`;
+}
+
+function renderQueue(): void {
+  const list = $("queue-list") as HTMLElement;
+  $("queue-card").classList.toggle("hidden", queue.length === 0);
+  const present = new Set<string>();
+  for (const item of queue) {
+    const key = `q-${item.id}`;
+    present.add(key);
+    let node = document.getElementById(key);
+    if (!node) {
+      node = document.createElement("div");
+      node.id = key;
+      list.appendChild(node);
+    }
+    node.className = `q-item${item.state === "running" ? " active" : ""}`;
+    node.innerHTML = itemHtml(item);
+  }
+  Array.from(list.children).forEach((child) => {
+    if (!present.has(child.id)) child.remove();
+  });
+  const done = queue.filter((i) => i.state === "done").length;
+  const failed = queue.filter((i) => i.state === "failed").length;
+  $("queue-summary").textContent = `${done} of ${queue.length} done${failed ? `, ${failed} failed` : ""}${queueRunning ? ", working…" : ""}`;
+  $("queue-zip").classList.toggle("hidden", done < 2);
+  $("queue-clear").classList.toggle("hidden", !queue.some((i) => i.state === "done" || i.state === "failed"));
+  refreshButtons();
+}
+
+async function runQueue(): Promise<void> {
+  if (queueRunning) return;
+  queueRunning = true;
+  renderQueue();
   try {
-    await work();
-  } catch (error) {
-    hideProgress();
-    showError(error instanceof Error ? error.message : String(error));
+    let item: QueueItem | undefined;
+    while ((item = queue.find((i) => i.state === "queued"))) {
+      const current = item;
+      current.state = "running";
+      current.label = "Starting…";
+      current.fraction = null;
+      current.detail = "";
+      progressSink = (label, fraction, detail) => {
+        current.label = label;
+        current.fraction = fraction;
+        current.detail = detail;
+        renderQueue();
+      };
+      renderQueue();
+      try {
+        const result = current.kind === "file" ? await transcribeFile(current.file!, current.settings) : await transcribeLink(current.url!, current.settings);
+        if (!result.transcript.trim()) {
+          current.state = "failed";
+          current.error = "No speech was found in this media.";
+        } else {
+          current.state = "done";
+          current.result = result;
+          if (queue.length === 1) viewResult(result);
+        }
+      } catch (error) {
+        current.state = "failed";
+        current.error = error instanceof Error ? error.message : String(error);
+      }
+      current.file = current.state === "done" ? undefined : current.file;
+      renderQueue();
+    }
   } finally {
-    setBusy(false);
+    queueRunning = false;
+    progressSink = () => {};
+    renderQueue();
   }
 }
 
-function chooseFile(file: File | undefined | null): void {
-  if (!file) return;
-  selectedFile = file;
-  $("file-label").textContent = `${file.name} (${(file.size / 1048576).toFixed(1)} MB)`;
-  ($("upload-go") as HTMLButtonElement).disabled = busy;
+function enqueue(entries: { kind: "file" | "link"; name: string; file?: File; url?: string }[]): void {
+  clearError();
+  const s = settings();
+  for (const entry of entries) queue.push({ id: nextId++, ...entry, settings: s, state: "queued", label: "", fraction: null, detail: "" });
+  renderQueue();
+  void runQueue();
+}
+
+function downloadAll(): void {
+  const files: Record<string, string | Uint8Array> = {};
+  const used = new Set<string>();
+  for (const item of queue) {
+    const result = item.result;
+    if (item.state !== "done" || !result) continue;
+    let base = safeName(result.title);
+    for (let n = 2; used.has(base); n++) base = `${safeName(result.title)}_${n}`;
+    used.add(base);
+    const timed = speakerTranscript(result.segments);
+    const extras: [string, string][] = Object.entries(result.extras).map(([k, v]) => [k.startsWith("translate:") ? `Translation (${k.split(":")[1]})` : k, v]);
+    files[`${base}/${base}.txt`] = result.transcript;
+    files[`${base}/${base}.srt`] = toSrt(result.segments);
+    files[`${base}/${base}.vtt`] = toVtt(result.segments);
+    files[`${base}/${base}_timestamped.txt`] = timed;
+    files[`${base}/${base}.docx`] = makeDocx(result.title, [["Transcript", result.transcript], ["Timestamped transcript", result.mode === "detailed" ? timed : ""], ...extras]);
+  }
+  if (Object.keys(files).length) download("transcripts.zip", makeZip(files), "application/zip");
+}
+
+function chooseFiles(list: FileList | File[] | undefined | null): void {
+  const files = Array.from(list || []);
+  if (!files.length) return;
+  pendingFiles = files;
+  const total = files.reduce((sum, f) => sum + f.size, 0) / 1048576;
+  $("file-label").textContent = files.length === 1 ? `${files[0].name} (${total.toFixed(1)} MB)` : `${files.length} files selected (${total.toFixed(1)} MB)`;
+  refreshButtons();
 }
 
 export function initTranscriber(): void {
@@ -384,7 +496,7 @@ export function initTranscriber(): void {
     }),
   );
   const input = $("file") as HTMLInputElement;
-  input.addEventListener("change", () => chooseFile(input.files?.[0]));
+  input.addEventListener("change", () => chooseFiles(input.files));
   const zone = $("dropzone");
   zone.addEventListener("dragover", (e: DragEvent) => {
     e.preventDefault();
@@ -394,18 +506,49 @@ export function initTranscriber(): void {
   zone.addEventListener("drop", (e: DragEvent) => {
     e.preventDefault();
     zone.classList.remove("drag");
-    chooseFile(e.dataTransfer?.files?.[0]);
+    chooseFiles(e.dataTransfer?.files);
   });
-  $("upload-go").addEventListener("click", () => selectedFile && run(() => transcribeFile(selectedFile!)));
+  $("upload-go").addEventListener("click", () => {
+    if (!pendingFiles.length) return;
+    const files = pendingFiles;
+    pendingFiles = [];
+    input.value = "";
+    $("file-label").textContent = "Drop audio or video files here, or click to choose (you can pick many)";
+    enqueue(files.map((file) => ({ kind: "file" as const, name: file.name, file })));
+  });
   $("link-go").addEventListener("click", () => {
-    const url = ($("link") as HTMLInputElement).value.trim();
-    if (!url) return showError("Please paste a link first.");
-    run(() => transcribeLink(url));
+    const box = $("link") as HTMLTextAreaElement;
+    const urls = Array.from(new Set(box.value.split(/\s+/).map((u) => u.trim()).filter(Boolean)));
+    if (!urls.length) return showError("Please paste at least one link first.");
+    const bad = urls.filter((u) => !/^https?:\/\//i.test(u));
+    if (bad.length) return showError(`These do not look like links (they must start with http:// or https://): ${bad.slice(0, 3).join(", ")}`);
+    box.value = "";
+    enqueue(urls.map((url) => ({ kind: "link" as const, name: url, url })));
+  });
+  $("queue-list").addEventListener("click", (e: Event) => {
+    const button = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-act]");
+    if (!button) return;
+    const item = queue.find((i) => i.id === Number(button.dataset.id));
+    if (!item) return;
+    if (button.dataset.act === "view" && item.result) viewResult(item.result);
+    if (button.dataset.act === "remove" && item.state !== "running") queue.splice(queue.indexOf(item), 1);
+    if (button.dataset.act === "retry" && item.state === "failed" && (item.file || item.url)) {
+      item.state = "queued";
+      item.error = undefined;
+      void runQueue();
+    }
+    renderQueue();
+  });
+  $("queue-zip").addEventListener("click", downloadAll);
+  $("queue-clear").addEventListener("click", () => {
+    for (let i = queue.length - 1; i >= 0; i--) if (queue[i].state === "done" || queue[i].state === "failed") queue.splice(i, 1);
+    renderQueue();
   });
   $("live-go").addEventListener("click", () => toggleLive());
   window.addEventListener("beforeunload", (event) => {
-    if (busy) event.preventDefault();
+    if (queueRunning || recorder) event.preventDefault();
   });
+  refreshButtons();
 }
 
 export type { Segment };

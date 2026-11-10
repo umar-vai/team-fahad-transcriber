@@ -14,6 +14,7 @@ The container reuses the link download code from the root `app.py`, so keep that
 
 ## How transcription works
 
+- **Batch:** pick or drop many files and paste many links (one per line). They join a queue and run one after another, each with its own progress, retry and remove buttons. Finished items can be opened one by one or downloaded together as one ZIP.
 - **Files:** the browser decodes the audio, splits it into ~5 minute parts at
   quiet points, and sends up to 4 parts to Gemini at the same time. Only small
   16 kHz audio is uploaded, not the whole video. Files the browser cannot read
