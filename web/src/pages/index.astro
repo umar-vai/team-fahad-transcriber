@@ -47,19 +47,19 @@ const connected = apiKeys().length > 0;
 
       <div data-source-panel="upload" class="stack">
         <label class="dropzone" id="dropzone">
-          <input type="file" id="file" accept="audio/*,video/*,.mkv,.mov,.m4a,.aac,.flac,.ogg,.opus,.wma,.webm" hidden />
-          <strong id="file-label">Drop an audio or video file here, or click to choose</strong>
-          <span class="muted small-text">MP3, WAV, M4A, MP4, MOV, MKV and more. Long recordings are split and transcribed in parallel.</span>
+          <input type="file" id="file" multiple accept="audio/*,video/*,.mkv,.mov,.m4a,.aac,.flac,.ogg,.opus,.wma,.webm" hidden />
+          <strong id="file-label">Drop audio or video files here, or click to choose (you can pick many)</strong>
+          <span class="muted small-text">MP3, WAV, M4A, MP4, MOV, MKV and more. Files are transcribed one after another, long ones are split and run in parallel.</span>
         </label>
-        <button class="btn block" id="upload-go" type="button" disabled>Transcribe file</button>
+        <button class="btn block" id="upload-go" type="button" disabled>Transcribe files</button>
       </div>
 
       <div data-source-panel="link" class="stack hidden">
-        <label>Media URL
-          <input type="url" id="link" placeholder="YouTube, Google Drive, Facebook, Frame.io or a direct media link" />
+        <label>Media URLs (one per line)
+          <textarea id="link" rows="4" placeholder="YouTube, Google Drive, Facebook, Frame.io or a direct media link. Paste many links, one on each line."></textarea>
         </label>
         <p class="muted small-text" style="margin:0">Public links only. For Google Drive, share the single file (not a folder).</p>
-        <button class="btn block" id="link-go" type="button">Transcribe link</button>
+        <button class="btn block" id="link-go" type="button">Transcribe links</button>
       </div>
 
       <div data-source-panel="live" class="stack hidden">
@@ -73,9 +73,18 @@ const connected = apiKeys().length > 0;
       </div>
     </section>
 
-    <section class="card stack hidden" id="progress-card">
-      <div class="status-line"><strong id="progress-label">Working…</strong><span id="progress-detail"></span></div>
-      <div class="progress"><div id="progress-bar"></div></div>
+    <section class="card stack hidden" id="queue-card">
+      <div class="page-head" style="margin:0">
+        <div>
+          <h2 style="margin:0">Batch queue</h2>
+          <span class="muted small-text" id="queue-summary"></span>
+        </div>
+        <div class="row">
+          <button class="btn small hidden" id="queue-zip" type="button">Download all (ZIP)</button>
+          <button class="btn ghost small hidden" id="queue-clear" type="button">Clear finished</button>
+        </div>
+      </div>
+      <div class="queue" id="queue-list"></div>
     </section>
     <div class="notice error hidden" id="error-box" role="alert"></div>
 
