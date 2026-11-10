@@ -160,7 +160,19 @@ async function waitForJob(job: string, labelPrefix: string): Promise<{ title: st
   }
 }
 
+function releaseJob(job: string): void {
+  fetch(`/api/media/release?job=${job}`, { method: "POST", keepalive: true }).catch(() => {});
+}
+
 async function transcribeJob(job: string, s: Settings, meta: { sourceType: string; sourceRef?: string; fallbackTitle: string }): Promise<Result> {
+  try {
+    return await transcribeJobInner(job, s, meta);
+  } finally {
+    releaseJob(job);
+  }
+}
+
+async function transcribeJobInner(job: string, s: Settings, meta: { sourceType: string; sourceRef?: string; fallbackTitle: string }): Promise<Result> {
   const state = await waitForJob(job, "Preparing");
   const total = state.parts.length;
   setProgress("Transcribing…", 0, `0 of ${total} parts`);

@@ -13,7 +13,7 @@ interface Env {
  */
 export class MediaContainer extends Container<Env> {
   defaultPort = 8080;
-  sleepAfter = "15m";
+  sleepAfter = "5m";
 
   constructor(ctx: DurableObjectState<{}>, env: Env) {
     super(ctx, env);
@@ -38,6 +38,11 @@ export default {
     const [, jobId, rest] = match;
     const target = new URL(rest + url.search, "http://container");
     const container = env.MEDIA_CONTAINER.getByName(jobId);
+    // Free the slot as soon as a job is finished instead of waiting for sleepAfter.
+    if (rest === "/release") {
+      await container.destroy().catch(() => {});
+      return Response.json({ ok: true });
+    }
     return container.fetch(new Request(target, request));
   },
 } satisfies ExportedHandler<Env>;
