@@ -63,6 +63,7 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+      - run: npm run test:quality
       - run: npx astro check
       - run: npx wrangler d1 migrations apply team-fahad-transcriber --remote
       - run: npm run deploy
