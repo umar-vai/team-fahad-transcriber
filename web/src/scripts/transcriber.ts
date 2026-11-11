@@ -2,6 +2,7 @@
 import { decodeToMono, encodeWav, hasSound, LiveRecorder, PIECE_SECONDS, splitIntoPieces, type Piece } from "./audio";
 import { makeDocx, makeZip, download, mergePieces, safeName, speakerTranscript, toSrt, toVtt, type PieceResult, type Result, type Segment } from "./format";
 import { initResults, showResult } from "./results";
+import { inferBanglaLanguage } from "../lib/transcription-quality";
 
 const PARALLEL = 4;
 const BROWSER_DECODE_LIMIT = 300 * 1024 * 1024;
@@ -85,6 +86,50 @@ async function runPool<T>(tasks: (() => Promise<T>)[], onDone: (done: number) =>
   await Promise.all(Array.from({ length: Math.min(PARALLEL, tasks.length) }, worker));
   if (failure) throw failure;
   return results;
+}
+
+/**
+ * Auto-detect was causing each parallel chunk to independently choose a script.
+ * Recognize the first chunk before starting the rest; once it strongly confirms
+ * Bengali speech, pass that hint to every following chunk. Explicit user
+ * language selections are never overridden.
+ */
+async function transcribePieces<T>(
+  parts: T[],
+  s: Settings,
+  work: (part: T, chosen: Settings) => Promise<PieceResult>,
+  label = "Transcribing…",
+): Promise<PieceResult[]> {
+  const total = parts.length;
+  const update = (done: number) =>
+    setProgress(label, done / Math.max(total, 1), total > 1 ? `${done} of ${total} parts` : "");
+
+  if (s.language !== "Auto detect / mixed language" || total < 2) {
+    return runPool(parts.map((part) => () => work(part, s)), update);
+  }
+
+  const first = await work(parts[0], s);
+  update(1);
+  let completed = 1;
+  let lockedLanguage = inferBanglaLanguage(first.transcript);
+
+  // If the recording starts with silence, inspect the next spoken piece
+  // rather than letting every other piece independently guess its language.
+  const initial: PieceResult[] = [first];
+  if (!lockedLanguage && !first.transcript.trim() && total > 2) {
+    const second = await work(parts[1], s);
+    initial.push(second);
+    completed = 2;
+    update(completed);
+    lockedLanguage = inferBanglaLanguage(second.transcript);
+  }
+
+  const chosen = lockedLanguage ? { ...s, language: lockedLanguage } : s;
+  const remaining = await runPool(
+    parts.slice(completed).map((part) => () => work(part, chosen)),
+    (done) => update(completed + done),
+  );
+  return [...initial, ...remaining];
 }
 
 function query(s: Settings, duration: number): string {
@@ -176,13 +221,10 @@ async function transcribeJobInner(job: string, s: Settings, meta: { sourceType: 
   const state = await waitForJob(job, "Preparing");
   const total = state.parts.length;
   setProgress("Transcribing…", 0, `0 of ${total} parts`);
-  const results = await runPool(
-    state.parts.map((part) => async (): Promise<PieceResult> => {
-      const payload = await withRetry(() => postJson("/api/transcribe", { source: "job", job, part: part.index, duration: part.duration, ...s }));
-      return { offset: part.offset, duration: part.duration, transcript: payload.transcript || "", segments: payload.segments || [] };
-    }),
-    (done) => setProgress("Transcribing…", done / total, `${done} of ${total} parts`),
-  );
+  const results = await transcribePieces(state.parts, s, async (part, chosen): Promise<PieceResult> => {
+    const payload = await withRetry(() => postJson("/api/transcribe", { source: "job", job, part: part.index, duration: part.duration, ...chosen }));
+    return { offset: part.offset, duration: part.duration, transcript: payload.transcript || "", segments: payload.segments || [] };
+  });
   return finish(results, { title: state.title || meta.fallbackTitle, sourceType: meta.sourceType, sourceRef: meta.sourceRef, duration: state.duration }, s);
 }
 
@@ -225,10 +267,7 @@ async function transcribeFile(file: File, s: Settings): Promise<Result> {
   const pieces = splitIntoPieces(samples, PIECE_SECONDS);
   samples = null;
   setProgress("Transcribing…", 0, `0 of ${pieces.length} parts`);
-  const results = await runPool(
-    pieces.map((piece) => () => transcribeWav(piece, s)),
-    (done) => setProgress("Transcribing…", done / pieces.length, `${done} of ${pieces.length} parts`),
-  );
+  const results = await transcribePieces(pieces, s, transcribeWav);
   return finish(results, { ...meta, duration }, s);
 }
 
@@ -243,14 +282,11 @@ async function transcribeLink(url: string, s: Settings): Promise<Result> {
         for (let start = 0; start < duration; start += PIECE_SECONDS) ranges.push({ start, end: Math.min(duration, start + PIECE_SECONDS) });
       } else ranges.push({});
       setProgress("Transcribing YouTube video…", 0, ranges.length > 1 ? `0 of ${ranges.length} parts` : "");
-      const results = await runPool(
-        ranges.map((range) => async (): Promise<PieceResult> => {
-          const payload = await withRetry(() => postJson("/api/transcribe", { source: "youtube", url: info.url, ...range, ...s }), 2);
-          const start = range.start ?? 0;
-          return { offset: start, duration: (range.end ?? duration ?? 0) - start, transcript: payload.transcript || "", segments: payload.segments || [] };
-        }),
-        (done) => setProgress("Transcribing YouTube video…", done / ranges.length, ranges.length > 1 ? `${done} of ${ranges.length} parts` : ""),
-      );
+      const results = await transcribePieces(ranges, s, async (range, chosen): Promise<PieceResult> => {
+        const payload = await withRetry(() => postJson("/api/transcribe", { source: "youtube", url: info.url, ...range, ...chosen }), 2);
+        const start = range.start ?? 0;
+        return { offset: start, duration: (range.end ?? duration ?? 0) - start, transcript: payload.transcript || "", segments: payload.segments || [] };
+      }, "Transcribing YouTube video…");
       return await finish(results, { title: info.title, sourceType: "youtube", sourceRef: info.url, duration }, s);
     } catch (error) {
       console.info("Direct YouTube transcription failed; downloading instead.", error);
@@ -283,11 +319,16 @@ async function toggleLive(): Promise<void> {
     clearError();
     const s = settings();
     const liveSettings = { ...s, mode: s.mode === "detailed" ? "verbatim" : s.mode };
+    let detectedLiveLanguage: string | null = null;
     liveResults = [];
     livePending = [];
     recorder = new LiveRecorder((piece) => {
-      const task = withRetry(() => transcribeWav(piece, liveSettings))
+      const chosen = detectedLiveLanguage ? { ...liveSettings, language: detectedLiveLanguage } : liveSettings;
+      const task = withRetry(() => transcribeWav(piece, chosen))
         .then((result) => {
+          if (liveSettings.language === "Auto detect / mixed language" && !detectedLiveLanguage) {
+            detectedLiveLanguage = inferBanglaLanguage(result.transcript);
+          }
           liveResults.push(result);
           renderLive();
         })
