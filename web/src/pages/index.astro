@@ -22,7 +22,7 @@ const connected = apiKeys().length > 0;
       <div class="grid-3">
         <label>Language
           <select id="language">
-            {Object.keys(LANGUAGES).map((name) => <option value={name}>{name}</option>)}
+            {Object.keys(LANGUAGES).map((name) => <option value={name} selected={name === "Bangla (Bangladesh)"}>{name}</option>)}
           </select>
         </label>
         <label>Output

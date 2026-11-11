@@ -8,6 +8,7 @@
  * - Spreads requests over all configured keys and fails over on quota errors.
  */
 import { env } from "cloudflare:workers";
+import { transcriptionQualityIssue } from "./transcription-quality";
 
 const DEFAULT_API = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -61,6 +62,7 @@ export class GeminiError extends Error {
 }
 
 export class UserFacingError extends Error {}
+export class TranscriptionQualityError extends UserFacingError {}
 
 // Per-isolate caches. Isolates are short-lived, so these are only a speed-up.
 const modelListCache = new Map<string, { at: number; models: string[] }>();
@@ -290,14 +292,24 @@ const SEGMENT_SCHEMA = {
   required: ["transcript", "segments"],
 };
 
-function buildPrompt(mode: Mode, codes: string[], vocabulary: string[]): string {
+function buildPrompt(mode: Mode, codes: string[], vocabulary: string[], strictRetry = false): string {
   const vocab = vocabulary.length
     ? `\nUse these names only when they match the audio: ${vocabulary.slice(0, 100).join(", ")}`
     : "";
   const lang = languageHint(codes);
+  const languageRule = codes.includes("bn-BD")
+    ? "This recording is primarily in Bangla (Bangladesh). Write spoken Bangla in বাংলা লিপি (Bengali script). Never translate Bangla into English or render Bengali sounds in Arabic, Urdu or Hindi script. Preserve short English words only when actually spoken in English."
+    : "For every utterance, identify the language actually spoken in the AUDIO. Write Bangla speech in Bengali script, English speech in English, and so on. Never translate or romanize Bangla speech.";
+  const audioRule = "The AUDIO is the only source of truth. Never continue from imagination, background silence, music, or a previous chunk. Never insert examples, lectures, interviews, conversations or transcript instructions that are not audible. For silence or unintelligible audio, output no invented text.";
+  const retryRule = strictRetry
+    ? "STRICT SECOND PASS: The earlier recognition was unreliable. Listen to this audio clip independently from the beginning. Do not rely on the previous transcript. Be especially careful to preserve Bengali speech in Bengali script. If no words are clearly audible, return the no-speech response."
+    : "";
   if (mode === "detailed") {
     return `Transcribe all audible speech from this audio in its original language(s).
 Language guidance: ${lang}.
+${languageRule}
+${audioRule}
+${retryRule}
 Return JSON with "transcript" (complete transcription) and "segments"
 (array with "start_seconds", "end_seconds", "text", and "speaker").
 Times are in seconds from the start of this audio clip.
@@ -307,14 +319,22 @@ If there is no speech, return an empty transcript and no segments.${vocab}`;
   }
   if (mode === "smart") {
     return `Transcribe the complete audio in its original language(s).
-Language guidance: ${lang}. Preserve facts, names, numbers and meaning.
+Language guidance: ${lang}.
+${languageRule}
+${audioRule}
+${retryRule}
+Preserve facts, names, numbers and meaning.
 Remove filler words, stutters and false starts; use clear punctuation and paragraphs.
 Do not summarize, translate, invent words or omit complete ideas.
 If there is no speech, return exactly: [no speech]
 Return only the transcript.${vocab}`;
   }
   return `Transcribe the complete audio VERBATIM in its original language(s).
-Language guidance: ${lang}. Preserve fillers, repetitions, false starts,
+Language guidance: ${lang}.
+${languageRule}
+${audioRule}
+${retryRule}
+Preserve fillers, repetitions, false starts,
 names, numbers, and the exact wording as spoken. Do not clean up, summarize,
 translate or invent content. If there is no speech, return exactly: [no speech]
 Return only the transcript.${vocab}`;
@@ -345,24 +365,44 @@ export async function transcribe(
   languageCodes: string[],
   vocabulary: string[],
   clipDuration?: number,
+  strictRetry = false,
 ): Promise<TranscribeResult> {
-  const prompt = buildPrompt(mode, languageCodes, vocabulary);
+  const prompt = buildPrompt(mode, languageCodes, vocabulary, strictRetry);
   const parts = [{ text: prompt }, ...audioParts(input)];
   const mediaResolutionLow = input.kind === "youtube";
+  const transcriptionOptions = { mediaResolutionLow, fastThinking: !strictRetry };
+  const enforceLanguage = async (transcript: string): Promise<TranscribeResult | null> => {
+    const issue = transcriptionQualityIssue(transcript, languageCodes);
+    if (!issue) return null;
+    if (!strictRetry) {
+      // Re-listen to the same AUDIO with a stricter prompt, not to the
+      // model-generated words. Never persist the questionable first result.
+      return transcribe(input, mode, languageCodes, vocabulary, clipDuration, true);
+    }
+    throw new TranscriptionQualityError(
+      "This audio part produced an unreliable transcript after a second pass (unexpected language or unrelated text). " +
+      "It was not added to your transcript. Retry this item; if the speaker actually changed languages, select Auto detect / mixed language.",
+    );
+  };
 
   if (mode !== "detailed") {
-    const { text, model } = await generate(parts, { mediaResolutionLow });
+    const { text, model } = await generate(parts, transcriptionOptions);
     const transcript = /^\[no speech\]$/i.test(text.trim()) ? "" : text.trim();
+    const recovered = await enforceLanguage(transcript);
+    if (recovered) return recovered;
     return { transcript, segments: [], model };
   }
 
-  const { text, model } = await generate(parts, { schema: SEGMENT_SCHEMA, mediaResolutionLow });
+  const { text, model } = await generate(parts, { ...transcriptionOptions, schema: SEGMENT_SCHEMA });
   let payload: any;
   try {
     payload = JSON.parse(stripFences(text));
   } catch {
     // The model ignored JSON mode; keep the text and estimate timings later.
-    return { transcript: stripFences(text), segments: [], model };
+    const fallbackTranscript = stripFences(text);
+    const recovered = await enforceLanguage(fallbackTranscript);
+    if (recovered) return recovered;
+    return { transcript: fallbackTranscript, segments: [], model };
   }
   const clipStart = input.kind === "youtube" ? input.startSeconds || 0 : 0;
   let segments: Segment[] = [];
@@ -384,6 +424,8 @@ export async function transcribe(
   }
   let transcript = String(payload?.transcript || "").trim();
   if (!transcript && segments.length) transcript = segments.map((s) => s.text).join("\n");
+  const recovered = await enforceLanguage(transcript);
+  if (recovered) return recovered;
   return { transcript, segments, model };
 }
 

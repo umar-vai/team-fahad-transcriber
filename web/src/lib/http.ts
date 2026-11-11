@@ -1,5 +1,5 @@
 import type { APIContext } from "astro";
-import { GeminiError, UserFacingError } from "./gemini";
+import { GeminiError, TranscriptionQualityError, UserFacingError } from "./gemini";
 
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -27,6 +27,7 @@ export function handler(fn: (context: APIContext) => Promise<Response>) {
       return await fn(context);
     } catch (error) {
       if (error instanceof HttpError) return json({ error: error.message }, error.status);
+      if (error instanceof TranscriptionQualityError) return json({ error: error.message }, 422);
       if (error instanceof UserFacingError) return json({ error: error.message }, 502);
       if (error instanceof GeminiError) return json({ error: error.message }, 502);
       console.error(error);
