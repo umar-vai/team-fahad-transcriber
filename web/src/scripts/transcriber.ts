@@ -219,8 +219,7 @@ async function transcribeJob(job: string, s: Settings, meta: { sourceType: strin
 
 async function transcribeJobInner(job: string, s: Settings, meta: { sourceType: string; sourceRef?: string; fallbackTitle: string }): Promise<Result> {
   const state = await waitForJob(job, "Preparing");
-  const total = state.parts.length;
-  setProgress("Transcribing…", 0, `0 of ${total} parts`);
+  setProgress("Transcribing…", 0, `0 of ${state.parts.length} parts`);
   const results = await transcribePieces(state.parts, s, async (part, chosen): Promise<PieceResult> => {
     const payload = await withRetry(() => postJson("/api/transcribe", { source: "job", job, part: part.index, duration: part.duration, ...chosen }));
     return { offset: part.offset, duration: part.duration, transcript: payload.transcript || "", segments: payload.segments || [] };
