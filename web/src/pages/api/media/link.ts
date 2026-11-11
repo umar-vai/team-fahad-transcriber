@@ -32,6 +32,12 @@ export const POST: APIRoute = handler(async (context) => {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ url }),
   });
-  if (!response.ok) throw new HttpError(502, "The media helper could not start. Please try again.");
+  if (!response.ok) {
+    const detail: any = await response.json().catch(() => ({}));
+    const message = typeof detail?.error === "string" && detail.error.length < 240
+      ? detail.error
+      : "The media helper could not start. Please try again.";
+    throw new HttpError(response.status === 503 ? 503 : 502, message);
+  }
   return json({ kind: "job", job });
 });

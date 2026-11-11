@@ -15,6 +15,14 @@ export class MediaContainer extends Container<Env> {
   defaultPort = 8080;
   sleepAfter = "5m";
 
+  // Cloudflare's default idle handler sends SIGTERM. The Python HTTP server
+  // runs as PID 1 in the container and can remain alive after that signal,
+  // leaving all max_instances slots permanently occupied. Forcefully reclaim
+  // the container on idle; active jobs poll /status every two seconds.
+  override async onActivityExpired(): Promise<void> {
+    await this.destroy();
+  }
+
   constructor(ctx: DurableObjectState<{}>, env: Env) {
     super(ctx, env);
     const vars: Record<string, string> = {};
@@ -38,11 +46,40 @@ export default {
     const [, jobId, rest] = match;
     const target = new URL(rest + url.search, "http://container");
     const container = env.MEDIA_CONTAINER.getByName(jobId);
-    // Free the slot as soon as a job is finished instead of waiting for sleepAfter.
+    // Explicit cleanup when a job finishes. Never silently swallow release failures.
     if (rest === "/release") {
-      await container.destroy().catch(() => {});
-      return Response.json({ ok: true });
+      try {
+        await container.destroy();
+        return Response.json({ ok: true });
+      } catch (error) {
+        console.error("Could not release media container:", error);
+        return Response.json({ error: "Could not release media resources." }, { status: 502 });
+      }
     }
-    return container.fetch(new Request(target, request));
+
+    try {
+      const response = await container.fetch(new Request(target, request));
+      // A failed /link request has no job ID on the client, so it otherwise
+      // leaks a container until the inactivity timeout.
+      if (rest === "/link" && !response.ok) {
+        await container.destroy().catch((error) => console.error("Failed link cleanup:", error));
+      }
+      return response;
+    } catch (error) {
+      if (rest === "/link") {
+        await container.destroy().catch((cleanupError) => console.error("Failed link cleanup:", cleanupError));
+      }
+      if (/maximum number of running container instances exceeded/i.test(String(error))) {
+        return Response.json(
+          { error: "The media processors are currently at capacity. Please retry shortly." },
+          { status: 503 },
+        );
+      }
+      console.error("Media container request failed:", error);
+      return Response.json(
+        { error: "The media processor could not start. Please retry." },
+        { status: 502 },
+      );
+    }
   },
 } satisfies ExportedHandler<Env>;
