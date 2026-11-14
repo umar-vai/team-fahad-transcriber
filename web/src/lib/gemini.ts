@@ -180,11 +180,22 @@ async function generateWithKey(
       if (thinking) generationConfig.thinkingConfig = thinking;
       if (options.mediaResolutionLow) generationConfig.mediaResolution = "MEDIA_RESOLUTION_LOW";
       if (options.maxOutputTokens) generationConfig.maxOutputTokens = options.maxOutputTokens;
+      const started = Date.now();
+      // One line per Gemini attempt in Cloudflare Worker logs, to see where time goes.
+      const logAttempt = (status: string | number, payload?: any) => {
+        const usage = payload?.usageMetadata || {};
+        console.log(JSON.stringify({
+          gemini: model, keyNumber: apiKeys().indexOf(key) + 1, attempt, status, ms: Date.now() - started,
+          thinking: thinking ? JSON.stringify(thinking) : "default", finish: payload?.candidates?.[0]?.finishReason,
+          inTokens: usage.promptTokenCount, outTokens: usage.candidatesTokenCount, thoughtTokens: usage.thoughtsTokenCount,
+        }));
+      };
       try {
         const payload = await geminiFetch(key, `models/${model}:generateContent`, {
           contents: [{ role: "user", parts }],
           generationConfig,
         });
+        logAttempt("ok", payload);
         const text = (payload.candidates?.[0]?.content?.parts || [])
           .filter((p: any) => !p.thought)
           .map((p: any) => p.text || "")
@@ -198,6 +209,7 @@ async function generateWithKey(
         workingModel.set(keyId(key), model);
         return { text, model };
       } catch (error) {
+        logAttempt(error instanceof GeminiError ? error.status : "network");
         if (!(error instanceof GeminiError)) throw error;
         const message = error.message.toLowerCase();
         if (error.status === 401 || error.status === 403 || (error.status === 400 && message.includes("api key"))) {
