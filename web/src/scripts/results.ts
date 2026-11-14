@@ -86,14 +86,25 @@ export function showResult(result: Result): void {
   chips.push(`${(result.transcript.match(/\S+/g) || []).length} words`);
   $("result-chips").innerHTML = chips.map((c) => `<span class="chip">${escapeHtml(c)}</span>`).join("");
   const note = $("result-note");
-  if (result.estimatedTimes && result.segments.length) {
-    note.textContent = "Subtitle times are estimated from the text. Use the \"Subtitles + speakers\" mode for timed subtitles.";
-    note.classList.remove("hidden");
-  } else note.classList.add("hidden");
+  const message =
+    result.meaningState === "loading"
+      ? "বাংলা অনুবাদ তৈরি হচ্ছে, কয়েক সেকেন্ডের মধ্যে নিচে যোগ হবে।"
+      : result.meaningState === "failed"
+        ? "বাংলা অনুবাদ আনা যায়নি। উচ্চারণ ঠিক আছে। অনুবাদের জন্য AI tools থেকে \"Translate full transcript\" ব্যবহার করতে পারেন।"
+        : result.estimatedTimes && result.segments.length
+          ? "Subtitle times are estimated from the text. Use the \"Subtitles + speakers\" mode for timed subtitles."
+          : "";
+  note.textContent = message;
+  note.classList.toggle("hidden", !message);
   setHistoryId(result.historyId);
   renderTranscript(($("find") as HTMLInputElement).value);
   renderSegments();
   renderAiOutput();
+}
+
+/** Re-draw a result that changed later (shayari meaning arrived), if it is the one on screen. */
+export function refreshResult(result: Result): void {
+  if (current === result) showResult(result);
 }
 
 export function setHistoryId(id?: string): void {

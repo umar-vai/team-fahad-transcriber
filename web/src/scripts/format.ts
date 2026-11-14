@@ -29,6 +29,9 @@ export interface Result {
   estimatedTimes: boolean;
   historyId?: string;
   extras: Record<string, string>;
+  /** Shayari mode: sections so far, and whether the Bangla meaning is still on its way. */
+  shayari?: ShayariSections;
+  meaningState?: "loading" | "failed";
 }
 
 export function clock(seconds: number): string {

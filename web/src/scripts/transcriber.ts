@@ -1,7 +1,7 @@
 /** Main page controller: files, links and live voice. */
 import { decodeToMono, encodeWav, hasSound, LiveRecorder, PIECE_SECONDS, splitIntoPieces, type Piece } from "./audio";
 import { makeDocx, makeZip, download, mergePieces, safeName, speakerTranscript, toSrt, toVtt, type PieceResult, type Result, type Segment } from "./format";
-import { initResults, showResult } from "./results";
+import { initResults, refreshResult, showResult } from "./results";
 import { inferBanglaLanguage } from "../lib/transcription-quality";
 import { formatShayari, mergeShayari } from "../lib/shayari";
 
@@ -17,7 +17,12 @@ interface Settings {
   mode: string;
   language: string;
   vocab: string;
+  /** Shayari mode only: "pron" (Bangla + English letters) or "meaning". Unset means both in one call. */
+  shayariPart?: "pron" | "meaning";
 }
+
+/** Pronunciation results, with the Bangla meaning still running in parallel. */
+type PieceResults = PieceResult[] & { meaning?: Promise<PieceResult[]> };
 
 function settings(): Settings {
   return {
@@ -102,10 +107,20 @@ async function transcribePieces<T>(
   s: Settings,
   work: (part: T, chosen: Settings) => Promise<PieceResult>,
   label = "Transcribing…",
-): Promise<PieceResult[]> {
+): Promise<PieceResults> {
   const total = parts.length;
   const update = (done: number) =>
     setProgress(label, done / Math.max(total, 1), total > 1 ? `${done} of ${total} parts` : "");
+
+  if (s.mode === "shayari") {
+    // Two parallel calls per piece: the pronunciation is shown as soon as it is ready,
+    // and the Bangla meaning is added when its own call finishes.
+    const meaning = runPool(parts.map((part) => () => work(part, { ...s, shayariPart: "meaning" })), () => {});
+    meaning.catch(() => {}); // Handled in finish(); avoids an unhandled rejection if pronunciation fails first.
+    const pron: PieceResults = await runPool(parts.map((part) => () => work(part, { ...s, shayariPart: "pron" })), update);
+    pron.meaning = meaning;
+    return pron;
+  }
 
   // Shayari mode ignores the language setting, so there is nothing to lock.
   if (s.language !== "Auto detect / mixed language" || total < 2 || s.mode === "shayari") {
@@ -137,7 +152,9 @@ async function transcribePieces<T>(
 }
 
 function query(s: Settings, duration: number): string {
-  return new URLSearchParams({ mode: s.mode, language: s.language, vocab: s.vocab, duration: duration.toFixed(2) }).toString();
+  const params = new URLSearchParams({ mode: s.mode, language: s.language, vocab: s.vocab, duration: duration.toFixed(2) });
+  if (s.shayariPart) params.set("shayariPart", s.shayariPart);
+  return params.toString();
 }
 
 async function transcribeWav(piece: Piece, s: Settings): Promise<PieceResult> {
@@ -163,16 +180,17 @@ function pieceResult(offset: number, duration: number, payload: any): PieceResul
 }
 
 async function finish(
-  pieces: PieceResult[],
+  pieces: PieceResults,
   meta: { title: string; sourceType: string; sourceRef?: string; duration: number | null; mode?: string },
   s: Settings,
 ): Promise<Result> {
   const mode = meta.mode || s.mode;
   const merged = mergePieces(pieces, mode === "detailed");
+  let shayari;
   if (mode === "shayari") {
     // Keep each section (Bangla letters, English letters, meaning) together across pieces.
-    const ordered = [...pieces].sort((a, b) => a.offset - b.offset);
-    merged.transcript = formatShayari(mergeShayari(ordered.map((p) => p.shayari)));
+    shayari = mergeShayari(sortedShayari(pieces));
+    merged.transcript = formatShayari(shayari);
     merged.segments = [];
     merged.estimated = false;
   }
@@ -187,15 +205,51 @@ async function finish(
     segments: merged.segments,
     estimatedTimes: merged.estimated,
     extras: {},
+    shayari,
+    meaningState: pieces.meaning ? "loading" : undefined,
   };
-  if (!result.transcript.trim()) return result;
+  if (!result.transcript.trim()) {
+    result.meaningState = undefined;
+    return result;
+  }
   try {
     const saved = await postJson("/api/history", { ...result, segments: result.segments });
     result.historyId = saved.id;
   } catch (error) {
     console.warn("Could not save to history", error);
   }
+  // Started after the save so the meaning can update the saved history entry.
+  if (pieces.meaning) pendingMeanings.set(result, addMeaning(result, pieces.meaning));
   return result;
+}
+
+function sortedShayari(pieces: PieceResult[]) {
+  return [...pieces].sort((a, b) => a.offset - b.offset).map((p) => p.shayari);
+}
+
+/** Shayari meaning calls still running, so a media job is not released before they read their audio. */
+const pendingMeanings = new WeakMap<Result, Promise<void>>();
+
+/** Add the Bangla meaning to a shayari result once its parallel call finishes. */
+async function addMeaning(result: Result, meaning: Promise<PieceResult[]>): Promise<void> {
+  try {
+    const meaningPieces = await meaning;
+    const text = mergeShayari(sortedShayari(meaningPieces)).meaning;
+    result.shayari = { ...(result.shayari || { bangla: "", english: "", meaning: "" }), meaning: text };
+    result.transcript = formatShayari(result.shayari);
+    result.meaningState = undefined;
+    if (result.historyId && text) {
+      fetch(`/api/history/${result.historyId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcript: result.transcript }),
+      }).catch(() => {});
+    }
+  } catch (error) {
+    console.warn("Bangla meaning failed", error);
+    result.meaningState = "failed";
+  }
+  refreshResult(result);
 }
 
 // ---------- Container jobs (links and large files) ----------
@@ -225,11 +279,18 @@ function releaseJob(job: string): void {
 }
 
 async function transcribeJob(job: string, s: Settings, meta: { sourceType: string; sourceRef?: string; fallbackTitle: string }): Promise<Result> {
+  let result: Result;
   try {
-    return await transcribeJobInner(job, s, meta);
-  } finally {
+    result = await transcribeJobInner(job, s, meta);
+  } catch (error) {
     releaseJob(job);
+    throw error;
   }
+  // The shayari meaning calls still read audio parts from this job; release it after them.
+  const meaning = pendingMeanings.get(result);
+  if (meaning) meaning.finally(() => releaseJob(job));
+  else releaseJob(job);
+  return result;
 }
 
 async function transcribeJobInner(job: string, s: Settings, meta: { sourceType: string; sourceRef?: string; fallbackTitle: string }): Promise<Result> {

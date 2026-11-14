@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { LANGUAGES, MODES, transcribe, type Mode } from "../../lib/gemini";
+import { LANGUAGES, MODES, SHAYARI_PARTS, transcribe, transcribeShayari, type AudioInput, type Mode, type ShayariPart } from "../../lib/gemini";
 import { handler, HttpError, json, requireUser } from "../../lib/http";
 import { checkJobId, mediaFetch, youtubeId } from "../../lib/media";
 
@@ -16,7 +16,15 @@ function readOptions(source: { get(name: string): string | null }) {
     .map((v) => v.trim())
     .filter(Boolean)
     .slice(0, 100);
-  return { mode, codes, vocabulary };
+  const shayariPart = (source.get("shayariPart") || "all") as ShayariPart;
+  if (!SHAYARI_PARTS.includes(shayariPart)) throw new HttpError(400, "Unknown shayari part.");
+  return { mode, codes, vocabulary, shayariPart };
+}
+
+/** Shayari parts go to their own call; every other mode uses the normal transcription. */
+function run(input: AudioInput, options: ReturnType<typeof readOptions>, clipDuration?: number) {
+  if (options.mode === "shayari") return transcribeShayari(input, options.vocabulary, options.shayariPart);
+  return transcribe(input, options.mode, options.codes, options.vocabulary, clipDuration);
 }
 
 /**
@@ -40,9 +48,9 @@ export const POST: APIRoute = handler(async (context) => {
       if (!youtubeId(String(body.url || ""))) throw new HttpError(400, "Not a YouTube link.");
       const start = body.start == null ? undefined : Number(body.start);
       const end = body.end == null ? undefined : Number(body.end);
-      const result = await transcribe(
+      const result = await run(
         { kind: "youtube", url: String(body.url), startSeconds: start, endSeconds: end },
-        options.mode, options.codes, options.vocabulary,
+        options,
         start !== undefined && end !== undefined ? end - start : undefined,
       );
       return json(result);
@@ -54,10 +62,7 @@ export const POST: APIRoute = handler(async (context) => {
       const audio = await mediaFetch(job, `/part/${part}`);
       if (!audio.ok) throw new HttpError(404, "This audio part is no longer available. Please start again.");
       const data = await audio.arrayBuffer();
-      const result = await transcribe(
-        { kind: "inline", mimeType: "audio/mpeg", data },
-        options.mode, options.codes, options.vocabulary, Number(body.duration) || undefined,
-      );
+      const result = await run({ kind: "inline", mimeType: "audio/mpeg", data }, options, Number(body.duration) || undefined);
       return json(result);
     }
     throw new HttpError(400, "Unknown audio source.");
@@ -69,9 +74,6 @@ export const POST: APIRoute = handler(async (context) => {
   const data = await request.arrayBuffer();
   if (!data.byteLength) throw new HttpError(400, "Empty audio.");
   if (data.byteLength > MAX_INLINE_BYTES) throw new HttpError(413, "This audio piece is too large. Use pieces of 5 minutes or less.");
-  const result = await transcribe(
-    { kind: "inline", mimeType, data },
-    options.mode, options.codes, options.vocabulary, Number(url.searchParams.get("duration")) || undefined,
-  );
+  const result = await run({ kind: "inline", mimeType, data }, options, Number(url.searchParams.get("duration")) || undefined);
   return json(result);
 });
