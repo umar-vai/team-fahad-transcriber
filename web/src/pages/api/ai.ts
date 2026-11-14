@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { aiText } from "../../lib/gemini";
+import { aiText, shayariMeaning } from "../../lib/gemini";
 import { handler, HttpError, json, requireUser } from "../../lib/http";
 
 const MAX_CHARS = 120_000;
@@ -48,6 +48,12 @@ Do not invent claims that are not in the transcript.${text}`;
 export const POST: APIRoute = handler(async (context) => {
   requireUser(context);
   const body: any = await context.request.json().catch(() => ({}));
+  if (body.task === "shayari-meaning") {
+    const english = String(body.english || "").trim().slice(0, MAX_CHARS);
+    const bangla = String(body.bangla || "").trim().slice(0, MAX_CHARS);
+    if (!english && !bangla) throw new HttpError(400, "There is no shayari text yet.");
+    return json({ text: await shayariMeaning(english, bangla) });
+  }
   const transcript = String(body.transcript || "").trim().slice(0, MAX_CHARS);
   if (!transcript) throw new HttpError(400, "There is no transcript yet.");
   const target = TARGETS.includes(body.target) ? body.target : "English";
