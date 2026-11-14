@@ -1,5 +1,6 @@
 /** Subtitle, text, DOCX and ZIP helpers (run in the browser). */
 import { strToU8, zipSync } from "fflate";
+import type { ShayariSections } from "../lib/shayari";
 
 export interface Segment {
   start: number;
@@ -13,6 +14,7 @@ export interface PieceResult {
   duration: number;
   transcript: string;
   segments: Segment[];
+  shayari?: ShayariSections;
 }
 
 export interface Result {

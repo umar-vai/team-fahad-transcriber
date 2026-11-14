@@ -9,6 +9,7 @@
  */
 import { env } from "cloudflare:workers";
 import { transcriptionQualityIssue } from "./transcription-quality";
+import { cleanShayari, formatShayari, isEmptyShayari, type ShayariSections } from "./shayari";
 
 const DEFAULT_API = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -16,6 +17,7 @@ export const MODES = {
   smart: "Smart clean transcript",
   detailed: "Detailed subtitles + speakers",
   verbatim: "Exact verbatim transcript",
+  shayari: "Shayari transcribe (Urdu/Hindi in Bangla + English letters)",
 } as const;
 export type Mode = keyof typeof MODES;
 
@@ -39,6 +41,7 @@ export interface TranscribeResult {
   transcript: string;
   segments: Segment[];
   model: string;
+  shayari?: ShayariSections;
 }
 
 export type AudioInput =
@@ -292,6 +295,44 @@ const SEGMENT_SCHEMA = {
   required: ["transcript", "segments"],
 };
 
+const SHAYARI_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    bangla: { type: "STRING" },
+    english: { type: "STRING" },
+    meaning: { type: "STRING" },
+  },
+  required: ["bangla", "english", "meaning"],
+};
+
+function buildShayariPrompt(vocabulary: string[], strictRetry: boolean): string {
+  const vocab = vocabulary.length
+    ? `\nUse these names only when they match the audio: ${vocabulary.slice(0, 100).join(", ")}`
+    : "";
+  return `This audio contains Urdu or Hindi poetry (shayari, sher, ghazal, nazm) recited or sung.
+Listen carefully and write down exactly what is recited, keeping the original Urdu/Hindi words and pronunciation.
+Do NOT write Urdu (Nastaliq) or Devanagari script. Return JSON with three fields:
+
+"bangla": the recited Urdu/Hindi words written phonetically in Bengali letters (বাংলা লিপি),
+  so a Bangla reader pronounces it exactly like the reciter. This is transliteration, NOT translation:
+  keep every Urdu/Hindi word, only change the letters. Example: "দিল-এ-নাদাঁ তুঝে হুয়া ক্যা হ্যায়".
+  Show Urdu sounds as closely as Bengali allows (ز/ذ/ظ/ض as জ, ف as ফ, خ as খ, غ as গ, ق as ক, ع silent or as the vowel heard),
+  use ঁ for nasal sounds and keep the long vowels that are heard.
+"english": the same recited words written in simple, common Roman (English) letters, the way
+  Urdu poetry is usually written on social media, without diacritic marks. Example: "dil-e-naadaan tujhe hua kya hai".
+"meaning": a natural Bangla translation of the meaning, line by line.
+
+Line rules (all three fields must have the same line structure):
+- Put each misra (line of poetry) on its own line.
+- Leave one empty line between two shers / stanzas.
+- If the reciter repeats a line for effect, write it only once, unless the repetition is part of the poem.
+- If there is spoken introduction or commentary in Urdu/Hindi, transliterate it the same way as its own lines.
+- Skip music, applause and audience reactions such as "wah wah", "kya baat hai", "mukarrar".
+The AUDIO is the only source of truth. Never add verses from memory that are not audible, never complete
+a famous poem beyond what is recited, and never invent text for silence or music.
+If there is no speech, return all three fields as empty strings.${strictRetry ? "\nSTRICT SECOND PASS: listen again from the beginning and follow the rules exactly." : ""}${vocab}`;
+}
+
 function buildPrompt(mode: Mode, codes: string[], vocabulary: string[], strictRetry = false): string {
   const vocab = vocabulary.length
     ? `\nUse these names only when they match the audio: ${vocabulary.slice(0, 100).join(", ")}`
@@ -367,6 +408,7 @@ export async function transcribe(
   clipDuration?: number,
   strictRetry = false,
 ): Promise<TranscribeResult> {
+  if (mode === "shayari") return transcribeShayari(input, vocabulary, strictRetry);
   const prompt = buildPrompt(mode, languageCodes, vocabulary, strictRetry);
   const parts = [{ text: prompt }, ...audioParts(input)];
   const mediaResolutionLow = input.kind === "youtube";
@@ -427,6 +469,31 @@ export async function transcribe(
   const recovered = await enforceLanguage(transcript);
   if (recovered) return recovered;
   return { transcript, segments, model };
+}
+
+/** Shayari mode ignores the language setting: the audio is Urdu/Hindi poetry by definition. */
+async function transcribeShayari(input: AudioInput, vocabulary: string[], strictRetry: boolean): Promise<TranscribeResult> {
+  const parts = [{ text: buildShayariPrompt(vocabulary, strictRetry) }, ...audioParts(input)];
+  const { text, model } = await generate(parts, {
+    schema: SHAYARI_SCHEMA,
+    mediaResolutionLow: input.kind === "youtube",
+    fastThinking: !strictRetry,
+  });
+  let payload: any;
+  try {
+    payload = JSON.parse(stripFences(text));
+  } catch {
+    if (!strictRetry) return transcribeShayari(input, vocabulary, true);
+    throw new UserFacingError("The shayari result could not be read. Please retry this item.");
+  }
+  const shayari = cleanShayari(payload);
+  const transcript = formatShayari(shayari);
+  // Only the prompt-echo check applies here: the output is meant to be Bangla/Roman letters for Urdu speech.
+  if (transcriptionQualityIssue(transcript, [])) {
+    if (!strictRetry) return transcribeShayari(input, vocabulary, true);
+    throw new TranscriptionQualityError("This audio part produced an unreliable shayari result. Please retry this item.");
+  }
+  return { transcript, segments: [], model, shayari: isEmptyShayari(shayari) ? undefined : shayari };
 }
 
 export async function aiText(prompt: string): Promise<string> {

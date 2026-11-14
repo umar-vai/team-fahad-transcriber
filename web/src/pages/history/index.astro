@@ -13,7 +13,7 @@ const { results } = await env.DB.prepare(
 ).bind(user.id, q, like, like).all<any>();
 
 const sourceLabel: Record<string, string> = { upload: "File", link: "Link", youtube: "YouTube", live: "Live voice" };
-const modeLabel: Record<string, string> = { smart: "Smart clean", detailed: "Subtitles + speakers", verbatim: "Verbatim" };
+const modeLabel: Record<string, string> = { smart: "Smart clean", detailed: "Subtitles + speakers", verbatim: "Verbatim", shayari: "Shayari" };
 function length(seconds: number | null) {
   if (!seconds) return "";
   const s = Math.round(seconds);

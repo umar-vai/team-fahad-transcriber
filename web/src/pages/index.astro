@@ -30,12 +30,16 @@ const connected = apiKeys().length > 0;
             <option value="smart">Smart clean transcript</option>
             <option value="detailed">Subtitles + speakers (timed)</option>
             <option value="verbatim">Exact verbatim transcript</option>
+            <option value="shayari">Shayari transcribe (Urdu/Hindi in Bangla + English letters)</option>
           </select>
         </label>
         <label>Names and terms (optional)
           <input type="text" id="vocab" placeholder="e.g. Team Fahad, Umar Vai" />
         </label>
       </div>
+      <p class="notice small-text hidden" id="shayari-hint" style="margin:0">
+        শায়েরি মোড: উর্দু বা হিন্দি শায়েরির লিঙ্ক বা ফাইল দিন। রেজাল্টে তিনটা অংশ আসবে: বাংলা অক্ষরে উচ্চারণ, ইংলিশ অক্ষরে উচ্চারণ, আর বাংলা অনুবাদ। এই মোডে উপরের Language সেটিং লাগে না।
+      </p>
     </section>
 
     <section class="card">
