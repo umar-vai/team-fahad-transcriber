@@ -3,6 +3,9 @@ import { decodeToMono, encodeWav, hasSound, LiveRecorder, PIECE_SECONDS, splitIn
 import { makeDocx, makeZip, download, mergePieces, safeName, speakerTranscript, toSrt, toVtt, type PieceResult, type Result, type Segment } from "./format";
 import { initResults, showResult } from "./results";
 import { inferBanglaLanguage } from "../lib/transcription-quality";
+import { formatShayari, mergeShayari } from "../lib/shayari";
+
+const SHAYARI_LANGUAGE = "Urdu / Hindi shayari";
 
 const PARALLEL = 4;
 const BROWSER_DECODE_LIMIT = 300 * 1024 * 1024;
@@ -104,7 +107,8 @@ async function transcribePieces<T>(
   const update = (done: number) =>
     setProgress(label, done / Math.max(total, 1), total > 1 ? `${done} of ${total} parts` : "");
 
-  if (s.language !== "Auto detect / mixed language" || total < 2) {
+  // Shayari mode ignores the language setting, so there is nothing to lock.
+  if (s.language !== "Auto detect / mixed language" || total < 2 || s.mode === "shayari") {
     return runPool(parts.map((part) => () => work(part, s)), update);
   }
 
@@ -151,7 +155,11 @@ async function transcribeWav(piece: Piece, s: Settings): Promise<PieceResult> {
     }
     return data;
   });
-  return { offset: piece.offset, duration: piece.duration, transcript: payload.transcript || "", segments: payload.segments || [] };
+  return pieceResult(piece.offset, piece.duration, payload);
+}
+
+function pieceResult(offset: number, duration: number, payload: any): PieceResult {
+  return { offset, duration, transcript: payload.transcript || "", segments: payload.segments || [], shayari: payload.shayari || undefined };
 }
 
 async function finish(
@@ -161,12 +169,19 @@ async function finish(
 ): Promise<Result> {
   const mode = meta.mode || s.mode;
   const merged = mergePieces(pieces, mode === "detailed");
+  if (mode === "shayari") {
+    // Keep each section (Bangla letters, English letters, meaning) together across pieces.
+    const ordered = [...pieces].sort((a, b) => a.offset - b.offset);
+    merged.transcript = formatShayari(mergeShayari(ordered.map((p) => p.shayari)));
+    merged.segments = [];
+    merged.estimated = false;
+  }
   const result: Result = {
     title: meta.title,
     sourceType: meta.sourceType,
     sourceRef: meta.sourceRef,
     mode,
-    language: s.language,
+    language: mode === "shayari" ? SHAYARI_LANGUAGE : s.language,
     duration: meta.duration,
     transcript: merged.transcript,
     segments: merged.segments,
@@ -222,7 +237,7 @@ async function transcribeJobInner(job: string, s: Settings, meta: { sourceType: 
   setProgress("Transcribing…", 0, `0 of ${state.parts.length} parts`);
   const results = await transcribePieces(state.parts, s, async (part, chosen): Promise<PieceResult> => {
     const payload = await withRetry(() => postJson("/api/transcribe", { source: "job", job, part: part.index, duration: part.duration, ...chosen }));
-    return { offset: part.offset, duration: part.duration, transcript: payload.transcript || "", segments: payload.segments || [] };
+    return pieceResult(part.offset, part.duration, payload);
   });
   return finish(results, { title: state.title || meta.fallbackTitle, sourceType: meta.sourceType, sourceRef: meta.sourceRef, duration: state.duration }, s);
 }
@@ -284,7 +299,7 @@ async function transcribeLink(url: string, s: Settings): Promise<Result> {
       const results = await transcribePieces(ranges, s, async (range, chosen): Promise<PieceResult> => {
         const payload = await withRetry(() => postJson("/api/transcribe", { source: "youtube", url: info.url, ...range, ...chosen }), 2);
         const start = range.start ?? 0;
-        return { offset: start, duration: (range.end ?? duration ?? 0) - start, transcript: payload.transcript || "", segments: payload.segments || [] };
+        return pieceResult(start, (range.end ?? duration ?? 0) - start, payload);
       }, "Transcribing YouTube video…");
       return await finish(results, { title: info.title, sourceType: "youtube", sourceRef: info.url, duration }, s);
     } catch (error) {
@@ -307,7 +322,10 @@ let liveTimer = 0;
 function renderLive(): void {
   const box = $("live-text");
   box.classList.remove("hidden");
-  const text = [...liveResults].sort((a, b) => a.offset - b.offset).map((r) => r.transcript).filter(Boolean).join(" ");
+  const ordered = [...liveResults].sort((a, b) => a.offset - b.offset);
+  const text = ordered.some((r) => r.shayari)
+    ? formatShayari(mergeShayari(ordered.map((r) => r.shayari)))
+    : ordered.map((r) => r.transcript).filter(Boolean).join(" ");
   box.textContent = text || "Listening…";
   box.scrollTop = box.scrollHeight;
 }
@@ -325,7 +343,7 @@ async function toggleLive(): Promise<void> {
       const chosen = detectedLiveLanguage ? { ...liveSettings, language: detectedLiveLanguage } : liveSettings;
       const task = withRetry(() => transcribeWav(piece, chosen))
         .then((result) => {
-          if (liveSettings.language === "Auto detect / mixed language" && !detectedLiveLanguage) {
+          if (liveSettings.language === "Auto detect / mixed language" && liveSettings.mode !== "shayari" && !detectedLiveLanguage) {
             detectedLiveLanguage = inferBanglaLanguage(result.transcript);
           }
           liveResults.push(result);
@@ -366,7 +384,7 @@ async function toggleLive(): Promise<void> {
   refreshButtons();
   const s = settings();
   const stamp = new Date().toLocaleString();
-  const result = await finish(liveResults, { title: `Live voice ${stamp}`, sourceType: "live", duration: active.elapsed, mode: s.mode === "smart" ? "smart" : "verbatim" }, s);
+  const result = await finish(liveResults, { title: `Live voice ${stamp}`, sourceType: "live", duration: active.elapsed, mode: s.mode === "smart" || s.mode === "shayari" ? s.mode : "verbatim" }, s);
   viewResult(result);
   if (!result.transcript.trim()) showError("No speech was found in this recording.");
 }
@@ -541,6 +559,10 @@ export function initTranscriber(): void {
       } catch {}
     });
   }
+  const modeSelect = $("mode") as HTMLSelectElement;
+  const syncShayariHint = () => $("shayari-hint").classList.toggle("hidden", modeSelect.value !== "shayari");
+  modeSelect.addEventListener("change", syncShayariHint);
+  syncShayariHint();
   document.querySelectorAll<HTMLButtonElement>("[data-source]").forEach((button) =>
     button.addEventListener("click", () => {
       document.querySelectorAll<HTMLButtonElement>("[data-source]").forEach((b) => b.setAttribute("aria-selected", String(b === button)));

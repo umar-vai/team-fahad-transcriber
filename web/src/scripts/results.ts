@@ -7,6 +7,7 @@ const MODE_LABELS: Record<string, string> = {
   smart: "Smart clean",
   detailed: "Subtitles + speakers",
   verbatim: "Exact verbatim",
+  shayari: "Shayari transcribe",
   live: "Live voice",
 };
 const AI_LABELS: Record<string, string> = {

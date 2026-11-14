@@ -7,7 +7,7 @@
     "build": "astro build",
     "preview": "astro build && wrangler dev",
     "check": "astro check",
-    "test:quality": "node --experimental-strip-types --test tests/transcription-quality.test.mjs",
+    "test:quality": "node --experimental-strip-types --test tests/transcription-quality.test.mjs tests/shayari.test.mjs",
     "deploy": "astro build && wrangler deploy",
     "cf-typegen": "wrangler types"
   },
