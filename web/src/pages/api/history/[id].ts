@@ -11,7 +11,7 @@ export const GET: APIRoute = handler(async (context) => {
   return json(row);
 });
 
-/** Update the title or store AI tool results (summary, translations...). */
+/** Update the title or transcript, or store AI tool results (summary, translations...). */
 export const PATCH: APIRoute = handler(async (context) => {
   const user = requireUser(context);
   const body: any = await context.request.json().catch(() => ({}));
@@ -22,6 +22,13 @@ export const PATCH: APIRoute = handler(async (context) => {
   if (typeof body.title === "string" && body.title.trim()) {
     await env.DB.prepare("UPDATE transcriptions SET title = ? WHERE id = ? AND user_id = ?")
       .bind(body.title.trim().slice(0, 200), context.params.id, user.id)
+      .run();
+  }
+  if (typeof body.transcript === "string" && body.transcript.trim()) {
+    if (body.transcript.length > 1_500_000) throw new HttpError(413, "Transcript too large to save.");
+    // Shayari mode saves the pronunciation first and adds the Bangla meaning when it arrives.
+    await env.DB.prepare("UPDATE transcriptions SET transcript = ? WHERE id = ? AND user_id = ?")
+      .bind(body.transcript, context.params.id, user.id)
       .run();
   }
   if (body.extras && typeof body.extras === "object") {
