@@ -48,10 +48,12 @@ export type AudioInput =
   | { kind: "inline"; mimeType: string; data: ArrayBuffer }
   | { kind: "youtube"; url: string; startSeconds?: number; endSeconds?: number };
 
+// gemini-flash-latest is not first: it rejects minimal thinking, and with full thinking a
+// transcription request ran into a 125 second timeout (Worker logs, 2026-11-14).
 const PREFERRED_MODELS = [
-  "gemini-flash-latest",
   "gemini-3.5-flash",
   "gemini-3-flash-preview",
+  "gemini-flash-latest",
   "gemini-flash-lite-latest",
   "gemini-3.5-flash-lite",
   "gemini-2.5-flash",
@@ -80,7 +82,8 @@ export class TranscriptionQualityError extends UserFacingError {}
 const modelListCache = new Map<string, { at: number; models: string[] }>();
 const workingModel = new Map<string, string>();
 const badModels = new Map<string, Set<string>>();
-const noThinkingModels = new Set<string>();
+const noThinkingModels = new Set<string>(); // Reject every low-thinking setting.
+const lowThinkingModels = new Set<string>(); // Reject MINIMAL but accept LOW.
 const keyCooldownUntil = new Map<string, number>();
 let keyCursor = 0;
 
@@ -155,7 +158,7 @@ async function candidateModels(key: string): Promise<string[]> {
 function thinkingConfig(model: string): Record<string, unknown> | undefined {
   if (noThinkingModels.has(model)) return undefined;
   if (model.includes("2.5")) return { thinkingBudget: 0 };
-  return { thinkingLevel: "MINIMAL" };
+  return { thinkingLevel: lowThinkingModels.has(model) ? "LOW" : "MINIMAL" };
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -169,8 +172,15 @@ async function generateWithKey(
   const failures: string[] = [];
   let rateLimited: GeminiError | null = null;
 
-  for (const model of await candidateModels(key)) {
-    let useThinking = options.fastThinking !== false;
+  // Models that cannot keep thinking low are tried last, with their default (slow) thinking.
+  const queue = (await candidateModels(key)).map((model) => ({ model, slow: false }));
+  for (let index = 0; index < queue.length; index++) {
+    const { model, slow } = queue[index];
+    let useThinking = options.fastThinking !== false && !slow;
+    if (useThinking && noThinkingModels.has(model)) {
+      queue.push({ model, slow: true });
+      continue;
+    }
     let useSchema = Boolean(options.schema);
     for (let attempt = 0; attempt < 5; attempt++) {
       const generationConfig: Record<string, unknown> = {};
@@ -216,9 +226,15 @@ async function generateWithKey(
           throw error; // A bad key fails the same way for every model.
         }
         if (error.status === 400 && useThinking && message.includes("think")) {
-          useThinking = false;
+          if (thinking?.thinkingLevel === "MINIMAL") {
+            lowThinkingModels.add(model);
+            continue; // Retry with LOW thinking.
+          }
+          // Full thinking is slow; try the other models first and keep this one as a last resort.
           noThinkingModels.add(model);
-          continue;
+          queue.push({ model, slow: true });
+          failures.push(`${model}: no low thinking`);
+          break;
         }
         if (error.status === 400 && useSchema) {
           useSchema = false;
