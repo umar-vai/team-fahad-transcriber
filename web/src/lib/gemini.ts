@@ -58,6 +58,15 @@ const PREFERRED_MODELS = [
 ];
 const SKIP_WORDS = ["image", "tts", "live", "audio", "embedding", "transcribe", "thinking-exp"];
 
+interface GenerateOptions {
+  schema?: unknown;
+  json?: boolean;
+  mediaResolutionLow?: boolean;
+  fastThinking?: boolean;
+  /** Caps runaway output (a model repeating lines until its limit can take minutes). */
+  maxOutputTokens?: number;
+}
+
 export class GeminiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -155,7 +164,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function generateWithKey(
   key: string,
   parts: unknown[],
-  options: { schema?: unknown; json?: boolean; mediaResolutionLow?: boolean; fastThinking?: boolean },
+  options: GenerateOptions,
 ): Promise<{ text: string; model: string }> {
   const failures: string[] = [];
   let rateLimited: GeminiError | null = null;
@@ -170,6 +179,7 @@ async function generateWithKey(
       const thinking = useThinking ? thinkingConfig(model) : undefined;
       if (thinking) generationConfig.thinkingConfig = thinking;
       if (options.mediaResolutionLow) generationConfig.mediaResolution = "MEDIA_RESOLUTION_LOW";
+      if (options.maxOutputTokens) generationConfig.maxOutputTokens = options.maxOutputTokens;
       try {
         const payload = await geminiFetch(key, `models/${model}:generateContent`, {
           contents: [{ role: "user", parts }],
@@ -241,7 +251,7 @@ async function generateWithKey(
 /** Try every configured key, starting from a rotating position to spread load. */
 async function generate(
   parts: unknown[],
-  options: { schema?: unknown; json?: boolean; mediaResolutionLow?: boolean; fastThinking?: boolean } = {},
+  options: GenerateOptions = {},
 ) {
   const keys = apiKeys();
   if (!keys.length) throw new UserFacingError("No Gemini API key is configured on the server (GEMINI_API_KEYS).");
@@ -296,17 +306,16 @@ const SEGMENT_SCHEMA = {
 };
 
 /**
- * Shayari parts. The website runs "pron" and "meaning" as two parallel calls, because
- * writing all three sections in one call is about three times slower. "all" is one call
- * (used by live voice).
+ * Shayari parts. The website asks for "pron" (Bangla + English letters) from the audio, then
+ * translates that text with shayariMeaning(): writing all three sections in one audio call is
+ * about three times slower. "all" is one call (used by live voice).
  */
-export const SHAYARI_PARTS = ["all", "pron", "meaning"] as const;
+export const SHAYARI_PARTS = ["all", "pron"] as const;
 export type ShayariPart = (typeof SHAYARI_PARTS)[number];
 
 const SHAYARI_FIELDS: Record<ShayariPart, ("bangla" | "english" | "meaning")[]> = {
   all: ["bangla", "english", "meaning"],
   pron: ["bangla", "english"],
-  meaning: ["meaning"],
 };
 
 function shayariSchema(part: ShayariPart) {
@@ -335,9 +344,7 @@ function buildShayariPrompt(vocabulary: string[], strictRetry: boolean, part: Sh
     ? `\nUse these names only when they match the audio: ${vocabulary.slice(0, 100).join(", ")}`
     : "";
   const fields = SHAYARI_FIELDS[part];
-  const task = part === "meaning"
-    ? "Listen carefully to exactly what is recited and translate its meaning into Bangla."
-    : "Listen carefully and write down exactly what is recited, keeping the original Urdu/Hindi words and pronunciation.\nDo NOT write Urdu (Nastaliq) or Devanagari script.";
+  const task = "Listen carefully and write down exactly what is recited, keeping the original Urdu/Hindi words and pronunciation.\nDo NOT write Urdu (Nastaliq) or Devanagari script.";
   const fieldWord = fields.length === 1 ? "one field" : `${fields.length} fields`;
   return `This audio contains Urdu or Hindi poetry (shayari, sher, ghazal, nazm) recited or sung.
 ${task}
@@ -506,6 +513,7 @@ export async function transcribeShayari(
     schema: shayariSchema(part),
     mediaResolutionLow: input.kind === "youtube",
     fastThinking: !strictRetry,
+    maxOutputTokens: SHAYARI_MAX_TOKENS,
   });
   let payload: any;
   try {
@@ -522,6 +530,33 @@ export async function transcribeShayari(
     throw new TranscriptionQualityError("This audio part produced an unreliable shayari result. Please retry this item.");
   }
   return { transcript, segments: [], model, shayari: isEmptyShayari(shayari) ? undefined : shayari };
+}
+
+// A 5 minute piece of poetry needs far less; this only stops runaway repetition.
+const SHAYARI_MAX_TOKENS = 8192;
+
+/** Bangla meaning of shayari, translated from its romanized (and Bengali-letter) text. Text only, so it is fast. */
+export async function shayariMeaning(english: string, bangla: string): Promise<string> {
+  const prompt = `Below is Urdu/Hindi poetry (shayari) written in Roman letters, and the same lines written in Bengali letters.
+Translate its MEANING into natural, simple Bangla (বাংলা).
+Write exactly one Bangla line for each poetry line, in the same order, and keep the empty lines between shers.
+Do not add explanations, headings or extra lines. Return JSON with one field "meaning".
+
+ROMAN LETTERS:
+${english}
+
+BENGALI LETTERS:
+${bangla}`;
+  const { text } = await generate([{ text: prompt }], {
+    schema: { type: "OBJECT", properties: { meaning: { type: "STRING" } }, required: ["meaning"] },
+    fastThinking: true,
+    maxOutputTokens: SHAYARI_MAX_TOKENS,
+  });
+  try {
+    return cleanShayari({ meaning: JSON.parse(stripFences(text)).meaning }).meaning;
+  } catch {
+    throw new UserFacingError("The Bangla meaning could not be read. Please try again.");
+  }
 }
 
 export async function aiText(prompt: string): Promise<string> {

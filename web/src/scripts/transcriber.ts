@@ -17,12 +17,14 @@ interface Settings {
   mode: string;
   language: string;
   vocab: string;
-  /** Shayari mode only: "pron" (Bangla + English letters) or "meaning". Unset means both in one call. */
-  shayariPart?: "pron" | "meaning";
+  /** Shayari mode only: "pron" asks for Bangla + English letters. Unset means all three sections in one call. */
+  shayariPart?: "pron";
 }
 
-/** Pronunciation results, with the Bangla meaning still running in parallel. */
-type PieceResults = PieceResult[] & { meaning?: Promise<PieceResult[]> };
+/** Pronunciation results, with the Bangla meaning still on its way. */
+type PieceResults = PieceResult[] & { meaning?: Promise<string> };
+
+const MEANING_TIMEOUT_MS = 120_000;
 
 function settings(): Settings {
   return {
@@ -113,12 +115,17 @@ async function transcribePieces<T>(
     setProgress(label, done / Math.max(total, 1), total > 1 ? `${done} of ${total} parts` : "");
 
   if (s.mode === "shayari") {
-    // Two parallel calls per piece: the pronunciation is shown as soon as it is ready,
-    // and the Bangla meaning is added when its own call finishes.
-    const meaning = runPool(parts.map((part) => () => work(part, { ...s, shayariPart: "meaning" })), () => {});
-    meaning.catch(() => {}); // Handled in finish(); avoids an unhandled rejection if pronunciation fails first.
+    // The pronunciation is shown as soon as it is ready; the Bangla meaning is then
+    // translated from that text (a fast, text-only call) and added below it.
     const pron: PieceResults = await runPool(parts.map((part) => () => work(part, { ...s, shayariPart: "pron" })), update);
-    pron.meaning = meaning;
+    const sections = mergeShayari(sortedShayari(pron));
+    if (sections.english || sections.bangla) {
+      pron.meaning = withTimeout(
+        withRetry(() => postJson("/api/ai", { task: "shayari-meaning", english: sections.english, bangla: sections.bangla }), 2),
+        MEANING_TIMEOUT_MS,
+      ).then((payload: any) => String(payload.text || ""));
+      pron.meaning.catch(() => {}); // Handled in addMeaning().
+    }
     return pron;
   }
 
@@ -219,7 +226,7 @@ async function finish(
     console.warn("Could not save to history", error);
   }
   // Started after the save so the meaning can update the saved history entry.
-  if (pieces.meaning) pendingMeanings.set(result, addMeaning(result, pieces.meaning));
+  if (pieces.meaning) void addMeaning(result, pieces.meaning);
   return result;
 }
 
@@ -227,14 +234,15 @@ function sortedShayari(pieces: PieceResult[]) {
   return [...pieces].sort((a, b) => a.offset - b.offset).map((p) => p.shayari);
 }
 
-/** Shayari meaning calls still running, so a media job is not released before they read their audio. */
-const pendingMeanings = new WeakMap<Result, Promise<void>>();
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([work, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Timed out")), ms))]);
+}
 
-/** Add the Bangla meaning to a shayari result once its parallel call finishes. */
-async function addMeaning(result: Result, meaning: Promise<PieceResult[]>): Promise<void> {
+/** Add the Bangla meaning to a shayari result once its call finishes. */
+async function addMeaning(result: Result, meaning: Promise<string>): Promise<void> {
   try {
-    const meaningPieces = await meaning;
-    const text = mergeShayari(sortedShayari(meaningPieces)).meaning;
+    const text = await meaning;
+    if (!text) throw new Error("Empty meaning");
     result.shayari = { ...(result.shayari || { bangla: "", english: "", meaning: "" }), meaning: text };
     result.transcript = formatShayari(result.shayari);
     result.meaningState = undefined;
@@ -279,18 +287,11 @@ function releaseJob(job: string): void {
 }
 
 async function transcribeJob(job: string, s: Settings, meta: { sourceType: string; sourceRef?: string; fallbackTitle: string }): Promise<Result> {
-  let result: Result;
   try {
-    result = await transcribeJobInner(job, s, meta);
-  } catch (error) {
+    return await transcribeJobInner(job, s, meta);
+  } finally {
     releaseJob(job);
-    throw error;
   }
-  // The shayari meaning calls still read audio parts from this job; release it after them.
-  const meaning = pendingMeanings.get(result);
-  if (meaning) meaning.finally(() => releaseJob(job));
-  else releaseJob(job);
-  return result;
 }
 
 async function transcribeJobInner(job: string, s: Settings, meta: { sourceType: string; sourceRef?: string; fallbackTitle: string }): Promise<Result> {
