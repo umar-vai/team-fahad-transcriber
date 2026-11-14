@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Build context is the repository root, so app.py can be shared with the container.
+# Build context is the repository root.
 # The Playwright image already has Chromium and its system libraries.
 FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
 
@@ -13,8 +13,7 @@ RUN --mount=type=secret,id=ca,required=false \
     && ln -sf "$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" /usr/local/bin/ffmpeg \
     && ffmpeg -hide_banner -version | head -1
 
-COPY app.py /app/app.py
-COPY media/container/stub /app/stub
+COPY media/container/link_tools.py /app/link_tools.py
 COPY media/container/server.py /app/server.py
 
 EXPOSE 8080
