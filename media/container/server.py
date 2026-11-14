@@ -5,12 +5,11 @@ uploaded file), converts it to small 16 kHz mono MP3, and splits it into
 5 minute parts that the Worker sends to Gemini in parallel.
 
 The link download logic (YouTube, Google Drive, Facebook, Frame.io, generic
-yt-dlp sites) is loaded from the original app.py so both apps share it.
+yt-dlp sites) lives in link_tools.py.
 """
 
 from __future__ import annotations
 
-import ast
 import json
 import re
 import shutil
@@ -18,44 +17,16 @@ import subprocess
 import sys
 import threading
 import traceback
-import types
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import link_tools
+
 PART_SECONDS = 300
 WORK = Path("/work")
-APP_SOURCE = Path("/app/app.py")
 STATE_LOCK = threading.Lock()
 STATE: dict = {"status": "idle"}
-REQUIRED_TOOLS = ("download_media_from_link", "LocalMediaSource", "download_google_drive_media", "download_facebook_public_fallback", "download_frameio_media", "download_youtube_media")
-
-
-def load_link_tools() -> dict:
-    """Load imports, constants, classes and functions from app.py, skipping UI code."""
-    sys.path.insert(0, "/app/stub")
-    tree = ast.parse(APP_SOURCE.read_text(encoding="utf-8"))
-    # A real module object is needed so @dataclass classes can be created.
-    module_obj = types.ModuleType("app_link_tools")
-    sys.modules["app_link_tools"] = module_obj
-    namespace: dict = module_obj.__dict__
-    keep = (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign)
-    for node in tree.body:
-        if not isinstance(node, keep):
-            continue
-        module = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
-        try:
-            exec(compile(module, str(APP_SOURCE), "exec"), namespace)
-        except Exception as exc:
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)):
-                print(f"Could not load {getattr(node, 'name', type(node).__name__)} from app.py: {exc}", flush=True)
-    missing = [n for n in REQUIRED_TOOLS if n not in namespace]
-    if missing:
-        raise RuntimeError(f"app.py is missing link tools: {missing}")
-    return namespace
-
-
-TOOLS = load_link_tools()
 
 
 def ffmpeg() -> str:
@@ -121,7 +92,7 @@ def run_link_job(url: str) -> None:
         folder = WORK / "download"
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir(parents=True)
-        media = TOOLS["download_media_from_link"](url, folder)
+        media = link_tools.download_media_from_link(url, folder)
         title = Path(str(getattr(media, "name", "") or "linked_media")).stem
         prepare_parts(Path(media.path), title)
     except Exception as exc:

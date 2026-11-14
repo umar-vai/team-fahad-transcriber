@@ -10,7 +10,7 @@ Everything runs on Cloudflare:
 | D1 `team-fahad-transcriber` | Cloudflare D1 | Users, login sessions, transcription history |
 | `media/` | Worker `team-fahad-transcriber-media` + Container | Downloads links (Drive, Facebook, Frame.io, other sites) and large files, converts with FFmpeg, splits into 5 minute parts |
 
-The container reuses the link download code from the root `app.py`, so keep that file.
+The link download code lives in `media/container/link_tools.py`.
 
 ## How transcription works
 

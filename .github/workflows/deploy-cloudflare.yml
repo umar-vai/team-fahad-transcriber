@@ -6,7 +6,6 @@ on:
     paths:
       - "web/**"
       - "media/**"
-      - "app.py"
       - ".github/workflows/deploy-cloudflare.yml"
   workflow_dispatch:
 
@@ -29,7 +28,7 @@ jobs:
           fetch-depth: 2
       - id: filter
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || git diff --name-only HEAD~1 HEAD | grep -qE '^(media/|app\.py$)'; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || git diff --name-only HEAD~1 HEAD | grep -qE '^media/'; then
             echo "media=true" >> "$GITHUB_OUTPUT"
           else
             echo "media=false" >> "$GITHUB_OUTPUT"
