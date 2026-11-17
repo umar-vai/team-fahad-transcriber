@@ -1,0 +1,708 @@
+/**
+ * BatchRunner: one Durable Object per Google Drive folder batch.
+ *
+ * It works through the folder's videos one after another on the server, so the
+ * browser can be closed. Each alarm does one small step (start a download, check
+ * it, transcribe up to 4 parts, save), stores its progress and sets the next alarm.
+ *
+ * Usage of Cloudflare D1 is kept tiny on purpose: progress lives in this Durable
+ * Object's own storage. D1 only gets one row per batch (written at start and end)
+ * and one history row per finished video.
+ */
+import { DurableObject } from "cloudflare:workers";
+import { LANGUAGES, TranscriptionQualityError, UserFacingError, transcribe, type Mode } from "../lib/gemini";
+import { inferBanglaLanguage } from "../lib/transcription-quality";
+import { clock, mergePieces, speakerTranscript, type PieceResult, type Segment } from "../lib/segments";
+import { driveFileUrl } from "../lib/drive";
+import { addNotionTranscript, archiveNotionPage, createNotionFolder, finishNotionFolder, notionConfigured, transcriptBlocks, type NotionFolder } from "../lib/notion";
+import { appendSheetRow, createSheetTab, replaceFailedRow, sheetRow, sheetsConfigured, type SheetTab } from "../lib/sheets";
+
+export type BatchMode = "smart" | "detailed";
+
+export const BATCH_MODES: Record<BatchMode, string> = {
+  smart: "Smart clean",
+  detailed: "Subtitles (timed)",
+};
+
+export interface BatchConfig {
+  id: string;
+  userId: string;
+  folderId: string;
+  folderName: string;
+  folderUrl: string;
+  mode: BatchMode;
+  language: string;
+  vocab: string[];
+  appUrl: string;
+  createdAt: number;
+  total: number;
+}
+
+type ItemStatus = "queued" | "preparing" | "ready" | "transcribing" | "saving" | "done" | "failed";
+
+interface PartInfo {
+  index: number;
+  offset: number;
+  duration: number;
+}
+
+export interface BatchItem {
+  index: number;
+  fileId: string;
+  name: string;
+  title: string;
+  status: ItemStatus;
+  detail?: string;
+  error?: string;
+  job?: string;
+  jobStartedAt?: number;
+  prepAttempts: number;
+  partErrors: number;
+  quotaWaitSince?: number;
+  parts?: PartInfo[];
+  partsDone: number;
+  languageDecided?: boolean;
+  lockedLanguage?: string | null;
+  duration?: number | null;
+  words?: number;
+  historyId?: string;
+  notionUrl?: string;
+  notionPageId?: string;
+  sheetDone?: boolean;
+  /** Set when a video that was exported as "Failed" is retried. */
+  replaceFailed?: { notionPageId?: string; sheetRow?: boolean };
+  exportAttempts?: number;
+  exportError?: string;
+  finishedAt?: number;
+}
+
+interface BatchState {
+  status: "running" | "done" | "cancelled";
+  exportsReady: boolean;
+  notion?: NotionFolder | null;
+  notionError?: string;
+  sheet?: SheetTab | null;
+  sheetError?: string;
+  finishedAt?: number;
+  summaryWritten?: boolean;
+}
+
+const PARALLEL_PARTS = 4;
+const POLL_MS = 5000;
+const MAX_PREP_ATTEMPTS = 3;
+const MAX_PART_ERRORS = 6;
+const PREP_TIMEOUT_MS = 50 * 60_000;
+const QUOTA_WAIT_LIMIT_MS = 6 * 3600_000;
+const AUTO_LANGUAGE = "Auto detect / mixed language";
+
+const itemKey = (index: number) => `item:${String(index).padStart(4, "0")}`;
+const partKey = (index: number, part: number) => `part:${String(index).padStart(4, "0")}:${String(part).padStart(4, "0")}`;
+
+function message(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
+}
+
+function wordCount(text: string): number {
+  return (text.match(/\S+/g) || []).length;
+}
+
+export class BatchRunner extends DurableObject<Env> {
+  // ---------- Storage helpers ----------
+
+  private config(): Promise<BatchConfig | undefined> {
+    return this.ctx.storage.get<BatchConfig>("config");
+  }
+
+  private state(): Promise<BatchState | undefined> {
+    return this.ctx.storage.get<BatchState>("state");
+  }
+
+  private async items(): Promise<BatchItem[]> {
+    const map = await this.ctx.storage.list<BatchItem>({ prefix: "item:" });
+    return [...map.values()].sort((a, b) => a.index - b.index);
+  }
+
+  private saveItem(item: BatchItem): Promise<void> {
+    return this.ctx.storage.put(itemKey(item.index), item);
+  }
+
+  private media(path: string, init?: RequestInit): Promise<Response> {
+    return this.env.MEDIA.fetch(`https://media/job/${path}`, init);
+  }
+
+  private release(item: BatchItem): void {
+    if (!item.job) return;
+    const job = item.job;
+    item.job = undefined;
+    this.ctx.waitUntil(this.media(`${job}/release`, { method: "POST" }).catch(() => undefined) as Promise<unknown>);
+  }
+
+  // ---------- Public RPC methods (called by the API routes) ----------
+
+  async start(config: BatchConfig, files: { id: string; path: string; name: string }[]): Promise<void> {
+    if (await this.config()) return;
+    const puts: Record<string, unknown> = { config, state: { status: "running", exportsReady: false } satisfies BatchState };
+    files.forEach((file, i) => {
+      const item: BatchItem = {
+        index: i + 1,
+        fileId: file.id,
+        name: file.path,
+        title: file.path.replace(/\.[^./\\]+$/, ""),
+        status: "queued",
+        prepAttempts: 0,
+        partErrors: 0,
+        partsDone: 0,
+      };
+      puts[itemKey(item.index)] = item;
+    });
+    // put() with an object accepts at most 128 keys per call.
+    const entries = Object.entries(puts);
+    for (let i = 0; i < entries.length; i += 128) await this.ctx.storage.put(Object.fromEntries(entries.slice(i, i + 128)));
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  async status(userId: string) {
+    const config = await this.config();
+    if (!config || config.userId !== userId) return null;
+    const state = (await this.state())!;
+    const items = await this.items();
+    return {
+      id: config.id,
+      folderName: config.folderName,
+      folderUrl: config.folderUrl,
+      mode: config.mode,
+      language: config.language,
+      createdAt: config.createdAt,
+      status: state.status,
+      finishedAt: state.finishedAt,
+      notion: { configured: notionConfigured(), url: state.notion?.pageUrl || null, error: state.notionError || null },
+      sheet: { configured: sheetsConfigured(), url: state.sheet?.url || null, error: state.sheetError || null },
+      items: items.map((item) => ({
+        index: item.index,
+        name: item.name,
+        title: item.title,
+        status: item.status,
+        detail: item.detail || null,
+        error: item.error || null,
+        parts: item.parts?.length || 0,
+        partsDone: item.partsDone,
+        duration: item.duration ?? null,
+        words: item.words ?? null,
+        historyId: item.historyId || null,
+        notionUrl: item.notionUrl || null,
+        exportError: item.exportError || null,
+      })),
+    };
+  }
+
+  async cancel(userId: string): Promise<boolean> {
+    const config = await this.config();
+    const state = await this.state();
+    if (!config || !state || config.userId !== userId) return false;
+    if (state.status !== "running") return true;
+    for (const item of await this.items()) {
+      const inProgress = item.status !== "done" && item.status !== "failed" && item.status !== "queued";
+      if (!item.job && !inProgress) continue;
+      this.release(item);
+      if (inProgress) {
+        // Its finished parts are deleted below, so it starts again from the download.
+        Object.assign(item, { status: "queued", detail: undefined, parts: undefined, partsDone: 0, languageDecided: undefined, lockedLanguage: undefined });
+      }
+      await this.saveItem(item);
+    }
+    await this.ctx.storage.delete([...(await this.ctx.storage.list({ prefix: "part:" })).keys()]);
+    state.status = "cancelled";
+    state.finishedAt = Date.now();
+    await this.ctx.storage.put("state", state);
+    await this.ctx.storage.deleteAlarm();
+    await this.writeSummary(config, state, await this.items());
+    return true;
+  }
+
+  /** Retry failed videos, continue a cancelled batch, or redo missing Notion/Sheets exports. */
+  async resume(userId: string): Promise<boolean> {
+    const config = await this.config();
+    const state = await this.state();
+    if (!config || !state || config.userId !== userId) return false;
+    for (const item of await this.items()) {
+      if (item.status === "failed") {
+        if (item.notionPageId || item.sheetDone) {
+          item.replaceFailed = { notionPageId: item.notionPageId, sheetRow: item.sheetDone };
+        }
+        Object.assign(item, { notionUrl: undefined, notionPageId: undefined, sheetDone: undefined, exportAttempts: 0, exportError: undefined });
+        Object.assign(item, { status: "queued", error: undefined, detail: undefined, prepAttempts: 0, partErrors: 0, partsDone: 0, parts: undefined, quotaWaitSince: undefined });
+      }
+      if (item.status === "done") {
+        item.exportAttempts = 0;
+        item.exportError = undefined;
+      }
+      // A step that was still running when the batch was stopped starts again from the download.
+      if (state.status !== "running" && !["queued", "done", "failed"].includes(item.status)) {
+        this.release(item);
+        Object.assign(item, { status: "queued", detail: undefined, parts: undefined, partsDone: 0, languageDecided: undefined, lockedLanguage: undefined });
+      }
+      await this.saveItem(item);
+    }
+    state.status = "running";
+    state.finishedAt = undefined;
+    state.summaryWritten = false;
+    if (!state.notion) state.notionError = undefined;
+    if (!state.sheet) state.sheetError = undefined;
+    state.exportsReady = false;
+    await this.ctx.storage.put("state", state);
+    await this.ctx.storage.setAlarm(Date.now());
+    await this.writeSummary(config, state, await this.items());
+    return true;
+  }
+
+  // ---------- The work loop ----------
+
+  async alarm(): Promise<void> {
+    let delay = 30_000;
+    try {
+      const next = await this.tick();
+      if (next === null) return;
+      delay = next;
+    } catch (error) {
+      console.error("Batch step failed:", error);
+    }
+    await this.ctx.storage.setAlarm(Date.now() + delay);
+  }
+
+  /** Do one step. Returns the delay before the next step, or null when there is nothing left. */
+  private async tick(): Promise<number | null> {
+    const config = await this.config();
+    const state = await this.state();
+    if (!config || !state || state.status !== "running") return null;
+
+    if (!state.exportsReady) {
+      await this.setupExports(config, state);
+      return 0;
+    }
+
+    const items = await this.items();
+    const current = items.find((i) => i.status !== "done" && i.status !== "failed");
+    if (!current) {
+      // Exports that failed or were not set up earlier, one video per step.
+      const pending = items.find((i) => this.needsExport(i, state));
+      if (pending) {
+        await this.exportItem(config, state, pending);
+        return 0;
+      }
+      await this.finish(config, state, items);
+      return null;
+    }
+
+    const delay = await this.advance(config, current);
+
+    // While a video is being transcribed, download the next one in the background.
+    if (current.status === "transcribing" || current.status === "saving") {
+      const next = items.find((i) => i.index > current.index && i.status !== "done" && i.status !== "failed");
+      if (next && (next.status === "queued" || next.status === "preparing")) {
+        await this.prepare(next).catch((error) => console.warn("Prefetch failed:", error));
+      } else if (next?.status === "ready" && next.job) {
+        // Containers sleep after 5 idle minutes and would lose the prepared audio.
+        await this.media(`${next.job}/ping`).catch(() => undefined);
+      }
+    }
+    return delay;
+  }
+
+  private async advance(config: BatchConfig, item: BatchItem): Promise<number> {
+    if (item.status === "queued" || item.status === "preparing") {
+      const delay = await this.prepare(item);
+      return (item.status as ItemStatus) === "ready" ? 0 : delay;
+    }
+    if (item.status === "ready") {
+      item.status = "transcribing";
+      item.detail = undefined;
+      await this.saveItem(item);
+      return 0;
+    }
+    if (item.status === "transcribing") return this.transcribeParts(config, item);
+    if (item.status === "saving") {
+      await this.save(config, item);
+      return 0;
+    }
+    return 0;
+  }
+
+  // ---------- Step 1: download and split in the media container ----------
+
+  private async prepare(item: BatchItem): Promise<number> {
+    if (item.status === "queued") {
+      const job = `${(await this.config())!.id}-${item.index}-${item.prepAttempts}`;
+      const response = await this.media(`${job}/link`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: driveFileUrl(item.fileId) }),
+      });
+      if (response.status === 503) {
+        item.detail = "Waiting for a free media processor";
+        await this.saveItem(item);
+        return 20_000;
+      }
+      if (!response.ok) {
+        const detail: any = await response.json().catch(() => ({}));
+        return this.prepFailed(item, String(detail?.error || "The media helper could not start."));
+      }
+      item.job = job;
+      item.jobStartedAt = Date.now();
+      item.status = "preparing";
+      item.detail = "Downloading from Google Drive";
+      await this.saveItem(item);
+      return POLL_MS;
+    }
+
+    // preparing: check the container
+    const response = await this.media(`${item.job}/status`).catch(() => null);
+    const state: any = response ? await response.json().catch(() => ({})) : {};
+    if (state.status === "ready") {
+      item.parts = (state.parts || []).map((p: any) => ({ index: Number(p.index), offset: Number(p.offset), duration: Number(p.duration) }));
+      item.duration = Number(state.duration) || null;
+      item.partsDone = 0;
+      item.status = "ready";
+      item.detail = "Ready to transcribe";
+      await this.saveItem(item);
+      return 0;
+    }
+    if (state.status === "error") return this.prepFailed(item, String(state.error || "Could not prepare this video."));
+    const elapsed = Date.now() - (item.jobStartedAt || Date.now());
+    // "idle" means the container restarted and lost the job.
+    if (state.status === "idle" && elapsed > 60_000) return this.prepFailed(item, "The media helper restarted.");
+    if (elapsed > PREP_TIMEOUT_MS) return this.prepFailed(item, "Downloading this video took too long.");
+    const labels: Record<string, string> = { downloading: "Downloading from Google Drive", converting: "Extracting audio" };
+    item.detail = labels[state.status] || "Starting media helper";
+    await this.saveItem(item);
+    return POLL_MS;
+  }
+
+  private async prepFailed(item: BatchItem, error: string): Promise<number> {
+    this.release(item);
+    item.prepAttempts++;
+    if (item.prepAttempts >= MAX_PREP_ATTEMPTS) {
+      await this.fail(item, error);
+      return 0;
+    }
+    item.status = "queued";
+    item.detail = `Retrying download (${error.slice(0, 120)})`;
+    await this.saveItem(item);
+    return 10_000;
+  }
+
+  // ---------- Step 2: transcribe the parts with Gemini ----------
+
+  private async transcribeParts(config: BatchConfig, item: BatchItem): Promise<number> {
+    const parts = item.parts || [];
+    const stored = await this.ctx.storage.list<PieceResult>({ prefix: `part:${String(item.index).padStart(4, "0")}:` });
+    const doneIndexes = new Set([...stored.keys()].map((k) => Number(k.split(":")[2])));
+    const pending = parts.filter((p) => !doneIndexes.has(p.index));
+    if (!pending.length) {
+      item.status = "saving";
+      item.detail = "Saving";
+      await this.saveItem(item);
+      return 0;
+    }
+
+    // With auto-detect, the first part decides the language for the rest (as on the website).
+    const auto = config.language === AUTO_LANGUAGE && parts.length > 1 && !item.languageDecided;
+    const batch = pending.slice(0, auto ? 1 : PARALLEL_PARTS);
+    const language = item.lockedLanguage || config.language;
+    const codes = LANGUAGES[language] || [];
+    item.detail = `Transcribing part ${doneIndexes.size + 1} of ${parts.length}`;
+    await this.saveItem(item);
+
+    const outcomes = await Promise.allSettled(batch.map((part) => this.transcribePart(config, item, part, codes)));
+    let lostAudio = false;
+    let quota = false;
+    let quality: string | null = null;
+    let other: string | null = null;
+    for (const [i, outcome] of outcomes.entries()) {
+      const part = batch[i];
+      if (outcome.status === "fulfilled") {
+        await this.ctx.storage.put(partKey(item.index, part.index), outcome.value);
+        doneIndexes.add(part.index);
+        if (auto && !item.languageDecided) {
+          const found = inferBanglaLanguage(outcome.value.transcript);
+          if (found) item.lockedLanguage = found;
+          if (found || outcome.value.transcript.trim() || doneIndexes.size >= 2) item.languageDecided = true;
+        }
+        continue;
+      }
+      const reason = outcome.reason;
+      const text = message(reason);
+      if (reason instanceof LostAudioError) lostAudio = true;
+      else if (reason instanceof UserFacingError && /rate limit|quota/i.test(text)) quota = true;
+      else if (reason instanceof TranscriptionQualityError) quality = text;
+      else other = text;
+    }
+    item.partsDone = doneIndexes.size;
+
+    if (lostAudio) {
+      // The container was reclaimed; download again (finished parts are kept).
+      this.release(item);
+      item.status = "queued";
+      item.detail = "Downloading again";
+      item.prepAttempts++;
+      if (item.prepAttempts >= MAX_PREP_ATTEMPTS) await this.fail(item, "The downloaded audio was lost several times.");
+      else await this.saveItem(item);
+      return 0;
+    }
+    if (quota) {
+      item.quotaWaitSince ||= Date.now();
+      if (Date.now() - item.quotaWaitSince > QUOTA_WAIT_LIMIT_MS) {
+        await this.fail(item, "Gemini quota stayed exhausted for hours. Add another API key, then press Retry.");
+        return 0;
+      }
+      item.detail = "Waiting for Gemini quota (all keys busy), retrying in a minute";
+      await this.saveItem(item);
+      return 60_000;
+    }
+    item.quotaWaitSince = undefined;
+    if (quality || other) {
+      item.partErrors++;
+      if (item.partErrors >= (quality ? 2 : MAX_PART_ERRORS)) {
+        await this.fail(item, quality || other || "Transcription failed.");
+        return 0;
+      }
+      item.detail = `Retrying a part (${(quality || other || "").slice(0, 120)})`;
+      await this.saveItem(item);
+      return 10_000;
+    }
+    await this.saveItem(item);
+    return 0;
+  }
+
+  private async transcribePart(config: BatchConfig, item: BatchItem, part: PartInfo, codes: string[]): Promise<PieceResult> {
+    const audio = await this.media(`${item.job}/part/${part.index}`);
+    if (audio.status === 404 || !audio.ok) throw new LostAudioError();
+    const data = await audio.arrayBuffer();
+    const result = await transcribe({ kind: "inline", mimeType: "audio/mpeg", data }, config.mode as Mode, codes, config.vocab, part.duration);
+    return { offset: part.offset, duration: part.duration, transcript: result.transcript, segments: result.segments };
+  }
+
+  // ---------- Step 3: save to history, Notion and Sheets ----------
+
+  private async save(config: BatchConfig, item: BatchItem): Promise<void> {
+    const stored = await this.ctx.storage.list<PieceResult>({ prefix: `part:${String(item.index).padStart(4, "0")}:` });
+    const merged = mergePieces([...stored.values()], config.mode === "detailed");
+    this.release(item);
+    if (!merged.transcript.trim()) {
+      await this.ctx.storage.delete([...stored.keys()]);
+      await this.fail(item, "No speech was found in this video.");
+      return;
+    }
+    item.historyId ||= crypto.randomUUID();
+    // INSERT OR IGNORE: a repeated step after a restart never creates a second row.
+    await this.env.DB.prepare(
+      `INSERT OR IGNORE INTO transcriptions (id, user_id, title, source_type, source_ref, mode, language, duration, transcript, segments_json, extras_json, created_at, batch_id)
+       VALUES (?, ?, ?, 'drive', ?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
+    )
+      .bind(
+        item.historyId,
+        config.userId,
+        item.title.slice(0, 200),
+        driveFileUrl(item.fileId),
+        config.mode,
+        item.lockedLanguage || config.language,
+        item.duration ?? null,
+        merged.transcript,
+        JSON.stringify(merged.segments),
+        Date.now(),
+        config.id,
+      )
+      .run();
+    item.words = wordCount(merged.transcript);
+    item.status = "done";
+    item.detail = undefined;
+    item.finishedAt = Date.now();
+    await this.saveItem(item);
+    await this.ctx.storage.delete([...stored.keys()]);
+
+    const state = (await this.state())!;
+    await this.exportItem(config, state, item, { transcript: merged.transcript, segments: merged.segments });
+  }
+
+  private async fail(item: BatchItem, error: string): Promise<void> {
+    this.release(item);
+    item.status = "failed";
+    item.error = error.slice(0, 500);
+    item.detail = undefined;
+    item.finishedAt = Date.now();
+    await this.saveItem(item);
+  }
+
+  private async setupExports(config: BatchConfig, state: BatchState): Promise<void> {
+    const modeLabel = BATCH_MODES[config.mode];
+    if (!state.notion && notionConfigured()) {
+      try {
+        state.notion = await createNotionFolder({
+          folderName: config.folderName,
+          folderUrl: config.folderUrl,
+          fileCount: config.total,
+          modeLabel,
+          appUrl: `${config.appUrl}/batches/${config.id}`,
+        });
+        state.notionError = undefined;
+      } catch (error) {
+        state.notionError = message(error);
+      }
+    }
+    if (!state.sheet && sheetsConfigured()) {
+      try {
+        state.sheet = await createSheetTab(config.folderName);
+        state.sheetError = undefined;
+      } catch (error) {
+        state.sheetError = message(error);
+      }
+    }
+    state.exportsReady = true;
+    await this.ctx.storage.put("state", state);
+  }
+
+  private needsExport(item: BatchItem, state: BatchState): boolean {
+    if (item.status !== "done" || (item.exportAttempts || 0) >= 3) return false;
+    return Boolean((state.notion && !item.notionUrl) || (state.sheet && !item.sheetDone));
+  }
+
+  private async exportItem(
+    config: BatchConfig,
+    state: BatchState,
+    item: BatchItem,
+    content?: { transcript: string; segments: Segment[] },
+  ): Promise<void> {
+    if (!this.needsExport(item, state)) return;
+    item.exportAttempts = (item.exportAttempts || 0) + 1;
+    if (!content) {
+      const row = await this.env.DB.prepare("SELECT transcript, segments_json FROM transcriptions WHERE id = ?")
+        .bind(item.historyId || "")
+        .first<{ transcript: string; segments_json: string | null }>();
+      if (!row) {
+        item.exportError = "The saved transcript was deleted from history.";
+        item.exportAttempts = 3;
+        await this.saveItem(item);
+        return;
+      }
+      content = { transcript: row.transcript, segments: JSON.parse(row.segments_json || "[]") };
+    }
+    const timed = config.mode === "detailed";
+    const errors: string[] = [];
+    if (state.notion && !item.notionUrl) {
+      try {
+        const page = await addNotionTranscript(state.notion, {
+          index: item.index,
+          title: item.title,
+          duration: item.duration ?? null,
+          styleLabel: BATCH_MODES[config.mode],
+          status: "Done",
+          driveUrl: driveFileUrl(item.fileId),
+          words: item.words || 0,
+          blocks: transcriptBlocks(content.transcript, content.segments, timed),
+        });
+        item.notionUrl = page.url;
+        item.notionPageId = page.id;
+        const old = item.replaceFailed?.notionPageId;
+        if (old) {
+          await archiveNotionPage(old).catch((error) => console.warn("Could not remove the old Failed page:", error));
+          item.replaceFailed = { ...item.replaceFailed, notionPageId: undefined };
+        }
+      } catch (error) {
+        errors.push(message(error));
+      }
+    }
+    if (state.sheet && !item.sheetDone) {
+      try {
+        const row = sheetRow({
+          index: item.index,
+          title: item.title,
+          duration: item.duration ? clock(item.duration) : "",
+          style: BATCH_MODES[config.mode],
+          status: "Done",
+          words: item.words || 0,
+          driveUrl: driveFileUrl(item.fileId),
+          notionUrl: item.notionUrl || "",
+          transcript: timed && content.segments.length ? speakerTranscript(content.segments) : content.transcript,
+        });
+        const replaced = item.replaceFailed?.sheetRow ? await replaceFailedRow(state.sheet, item.index, row).catch(() => false) : false;
+        if (!replaced) await appendSheetRow(state.sheet, row);
+        item.sheetDone = true;
+        item.replaceFailed = undefined;
+      } catch (error) {
+        errors.push(`Sheets: ${message(error)}`);
+      }
+    }
+    item.exportError = errors.length ? errors.join(" | ") : undefined;
+    await this.saveItem(item);
+  }
+
+  private async finish(config: BatchConfig, state: BatchState, items: BatchItem[]): Promise<void> {
+    const done = items.filter((i) => i.status === "done").length;
+    const failed = items.filter((i) => i.status === "failed");
+    // Failed videos are listed once at the end, so the table shows every file of the folder.
+    if (!state.summaryWritten) {
+      for (const item of failed) {
+        // Already listed (or listed as Failed before a retry that failed again).
+        if (item.notionUrl || item.sheetDone || item.replaceFailed) continue;
+        try {
+          if (state.notion) {
+            const page = await addNotionTranscript(state.notion, {
+              index: item.index, title: item.title, duration: item.duration ?? null, styleLabel: BATCH_MODES[config.mode],
+              status: "Failed", driveUrl: driveFileUrl(item.fileId), words: 0,
+              blocks: transcriptBlocks(`Could not transcribe: ${item.error || "unknown error"}`, [], false),
+            });
+            item.notionUrl = page.url;
+            item.notionPageId = page.id;
+          }
+        } catch (error) {
+          console.warn("Notion failed-row export:", error);
+        }
+        try {
+          if (state.sheet) {
+            await appendSheetRow(state.sheet, sheetRow({
+              index: item.index, title: item.title, duration: item.duration ? clock(item.duration) : "", style: BATCH_MODES[config.mode],
+              status: "Failed", words: 0, driveUrl: driveFileUrl(item.fileId), notionUrl: item.notionUrl || "", transcript: item.error || "",
+            }));
+            item.sheetDone = true;
+          }
+        } catch (error) {
+          console.warn("Sheets failed-row export:", error);
+        }
+        await this.saveItem(item);
+      }
+      if (state.notion) {
+        const summary = `Finished ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC: ${done} of ${items.length} videos transcribed` +
+          (failed.length ? `, ${failed.length} failed.` : ".");
+        await finishNotionFolder(state.notion, summary).catch((error) => console.warn("Notion summary:", error));
+      }
+      state.summaryWritten = true;
+    }
+    state.status = "done";
+    state.finishedAt = Date.now();
+    await this.ctx.storage.put("state", state);
+    await this.writeSummary(config, state, items);
+  }
+
+  /** The only D1 update for a batch: its status, counts and links (used by the Folders list page). */
+  private async writeSummary(config: BatchConfig, state: BatchState, items: BatchItem[]): Promise<void> {
+    await this.env.DB.prepare(
+      `UPDATE batches SET status = ?, done_count = ?, failed_count = ?, notion_url = ?, sheet_url = ?, finished_at = ? WHERE id = ?`,
+    )
+      .bind(
+        state.status,
+        items.filter((i) => i.status === "done").length,
+        items.filter((i) => i.status === "failed").length,
+        state.notion?.pageUrl || null,
+        state.sheet?.url || null,
+        state.finishedAt || null,
+        config.id,
+      )
+      .run()
+      .catch((error) => console.error("Batch summary write failed:", error));
+  }
+}
+
+class LostAudioError extends Error {
+  constructor() {
+    super("The prepared audio is no longer available.");
+  }
+}

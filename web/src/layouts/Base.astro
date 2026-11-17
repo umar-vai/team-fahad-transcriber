@@ -26,6 +26,7 @@ const path = Astro.url.pathname;
         {user && (
           <nav class="nav">
             <a href="/" class:list={{ active: path === "/" }}>Transcribe</a>
+            <a href="/batches" class:list={{ active: path.startsWith("/batches") }}>Folders</a>
             <a href="/history" class:list={{ active: path.startsWith("/history") }}>History</a>
             <details class="account">
               <summary>

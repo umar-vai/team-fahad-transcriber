@@ -374,6 +374,29 @@ async function transcribeLink(url: string, s: Settings): Promise<Result> {
   return transcribeJob(info.job, s, { sourceType: "link", sourceRef: url, fallbackTitle: "Linked media" });
 }
 
+// ---------- Google Drive folder (runs on the server) ----------
+
+async function startFolder(): Promise<void> {
+  clearError();
+  const url = ($("folder-link") as HTMLInputElement).value.trim();
+  if (!/^https?:\/\/drive\.google\.com\/.*(folders\/|[?&]id=)/i.test(url)) {
+    return showError("Please paste a Google Drive folder link (https://drive.google.com/drive/folders/...).");
+  }
+  const mode = (document.querySelector<HTMLInputElement>('input[name="folder-mode"]:checked')?.value) || "smart";
+  const button = $("folder-go") as HTMLButtonElement;
+  button.disabled = true;
+  button.textContent = "Reading the folder…";
+  try {
+    const s = settings();
+    const batch = await postJson("/api/batches", { url, mode, language: s.language, vocab: s.vocab });
+    location.href = `/batches/${batch.id}`;
+  } catch (error) {
+    showError(error instanceof Error ? error.message : String(error));
+    button.disabled = false;
+    button.textContent = "Transcribe whole folder";
+  }
+}
+
 // ---------- Live voice ----------
 
 let recorder: LiveRecorder | null = null;
@@ -629,8 +652,11 @@ export function initTranscriber(): void {
     button.addEventListener("click", () => {
       document.querySelectorAll<HTMLButtonElement>("[data-source]").forEach((b) => b.setAttribute("aria-selected", String(b === button)));
       document.querySelectorAll<HTMLElement>("[data-source-panel]").forEach((p) => p.classList.toggle("hidden", p.dataset.sourcePanel !== button.dataset.source));
+      // Folders have their own style choice (Smart clean or timed subtitles).
+      ($("mode") as HTMLElement).closest("label")?.classList.toggle("hidden", button.dataset.source === "folder");
     }),
   );
+  if (location.hash === "#folder") document.querySelector<HTMLButtonElement>('[data-source="folder"]')?.click();
   const input = $("file") as HTMLInputElement;
   input.addEventListener("change", () => chooseFiles(input.files));
   const zone = $("dropzone");
@@ -681,6 +707,7 @@ export function initTranscriber(): void {
     renderQueue();
   });
   $("live-go").addEventListener("click", () => toggleLive());
+  $("folder-go").addEventListener("click", () => startFolder());
   window.addEventListener("beforeunload", (event) => {
     if (queueRunning || recorder) event.preventDefault();
   });

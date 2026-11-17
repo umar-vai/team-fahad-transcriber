@@ -1,0 +1,46 @@
+---
+import Base from "../../layouts/Base.astro";
+import { env } from "cloudflare:workers";
+
+const user = Astro.locals.user;
+if (!user) return Astro.redirect("/login?next=/batches");
+const { results } = await env.DB.prepare(
+  `SELECT id, folder_name, mode, total, done_count, failed_count, status, notion_url, sheet_url, created_at
+     FROM batches WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`,
+).bind(user.id).all<any>();
+const statusLabel: Record<string, string> = { running: "Running", done: "Finished", cancelled: "Stopped" };
+const modeLabel: Record<string, string> = { smart: "Smart clean", detailed: "Subtitles (timed)" };
+---
+<Base title="Folders · Team Fahad Transcriber">
+  <div class="page-head">
+    <div>
+      <h1>Drive folders</h1>
+      <p class="muted" style="margin:0">Whole Google Drive folders transcribed on the server, with Notion and Google Sheets export.</p>
+    </div>
+    <a class="btn" href="/#folder">New folder</a>
+  </div>
+  {results.length === 0 ? (
+    <div class="card"><p class="muted" style="margin:0">No folders yet. Open <a href="/#folder">Transcribe, Drive folder</a> and paste a folder link.</p></div>
+  ) : (
+    <div class="history-list">
+      {results.map((b) => (
+        <a class="card batch-row" href={`/batches/${b.id}`}>
+          <strong>📁 {b.folder_name}</strong>
+          <div class="chips">
+            <span class="chip" style={b.status === "running" ? "color:var(--accent-2)" : b.status === "done" ? "color:var(--good)" : ""}>{statusLabel[b.status] || b.status}</span>
+            <span class="chip">{modeLabel[b.mode] || b.mode}</span>
+            <span class="chip">{b.status === "running" ? `${b.total} videos` : `${b.done_count} of ${b.total} done${b.failed_count ? `, ${b.failed_count} failed` : ""}`}</span>
+            {b.notion_url ? <span class="chip">Notion</span> : null}
+            {b.sheet_url ? <span class="chip">Sheets</span> : null}
+            <span class="chip" data-time={b.created_at}>{new Date(b.created_at).toISOString().slice(0, 10)}</span>
+          </div>
+        </a>
+      ))}
+    </div>
+  )}
+</Base>
+<script>
+  document.querySelectorAll<HTMLElement>("[data-time]").forEach((el) => {
+    el.textContent = new Date(Number(el.dataset.time)).toLocaleString();
+  });
+</script>

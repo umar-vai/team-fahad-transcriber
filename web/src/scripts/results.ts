@@ -9,6 +9,7 @@ const MODE_LABELS: Record<string, string> = {
   verbatim: "Exact verbatim",
   shayari: "Shayari transcribe",
   live: "Live voice",
+  drive: "Drive folder",
 };
 const AI_LABELS: Record<string, string> = {
   summary: "Summary",

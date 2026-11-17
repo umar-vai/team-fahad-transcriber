@@ -7,7 +7,8 @@ Everything runs on Cloudflare:
 | Part | Where | What it does |
 | --- | --- | --- |
 | `web/` | Worker `team-fahad-transcriber` (Astro) | Pages, Google sign-in, Gemini calls, history API |
-| D1 `team-fahad-transcriber` | Cloudflare D1 | Users, login sessions, transcription history |
+| D1 `team-fahad-transcriber` | Cloudflare D1 | Users, login sessions, transcription history, one summary row per Drive folder |
+| Durable Object `BatchRunner` | inside the web Worker | Runs Google Drive folder batches in the background and keeps their live progress |
 | `media/` | Worker `team-fahad-transcriber-media` + Container | Downloads links (Drive, Facebook, Frame.io, other sites) and large files, converts with FFmpeg, splits into 5 minute parts |
 
 The link download code lives in `media/container/link_tools.py`.
@@ -23,6 +24,18 @@ The link download code lives in `media/container/link_tools.py`.
   clips. If that fails, the container downloads the video.
 - **Other links:** the container downloads and splits the media, then the parts
   are transcribed in parallel.
+- **Google Drive folder:** paste a public folder link and pick Smart clean or
+  Subtitles (timed). The server lists every video and audio file (subfolders
+  too, sorted by name so "2" comes before "10") and works through them one by
+  one in a `BatchRunner` Durable Object, so the browser can be closed. While a
+  video is transcribed, the next one is already downloading. Each finished video
+  is saved to History, gets a row in the folder's Notion table (open the row to
+  read the transcript) and a row in the folder's Google Sheets tab. Failed videos
+  are listed as "Failed"; "Retry failed" replaces those rows when they succeed.
+  Progress is shown on the **Folders** page.
+- **Low Cloudflare usage:** live progress is stored in the Durable Object, not in
+  D1. D1 gets one row per folder (written at start and end) and one history row
+  per video. The progress page only polls while it is open and visible.
 - **Live voice:** the microphone audio is cut at each short pause (6 to 15
   seconds) and each piece is transcribed right away.
 - The Worker asks Gemini which models the key can use, skips retired models and
@@ -60,7 +73,42 @@ in. Publish it to let anyone sign in.
 By default any Google account can sign in. To limit it, set `ALLOWED_EMAILS` in
 `wrangler.jsonc`, for example `"a@gmail.com, b@gmail.com"` or `"@yourdomain.com"`.
 
-### 4. Optional cookies for difficult links
+### 4. Notion (for Drive folders)
+
+1. Open https://www.notion.so/profile/integrations, create an **Internal** integration
+   for the team workspace and copy its secret.
+2. Create a page, for example "Team Fahad Transcripts". Open its `...` menu,
+   **Connections**, and add the integration.
+3. Save both:
+
+```bash
+cd web
+npx wrangler secret put NOTION_TOKEN            # the integration secret
+npx wrangler secret put NOTION_PARENT_PAGE_ID   # the page link
+```
+
+Every folder becomes a page under it with a "Transcripts" table: No., Title,
+Duration, Status, Style, Words and Drive file. Open a row to read the transcript.
+
+### 5. Google Sheets (for Drive folders)
+
+1. In Google Cloud Console, enable the **Google Sheets API** and the **Google Drive API**.
+2. Create a **service account** (IAM & Admin, Service accounts), open it, Keys,
+   Add key, JSON. A key file downloads.
+3. Share the team spreadsheet with the service account's email (`...@...iam.gserviceaccount.com`) as **Editor**.
+4. Save both:
+
+```bash
+npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON   # paste the whole key file
+npx wrangler secret put SHEETS_SPREADSHEET_ID         # the spreadsheet link
+```
+
+Every folder becomes a new tab at the bottom of the spreadsheet. The same service
+account also lists Drive folders through the Drive API, which has no file limit.
+Without it, folders are read from Drive's public folder page.
+`GOOGLE_DRIVE_API_KEY` (an API key with the Drive API enabled) is an optional extra way.
+
+### 6. Optional cookies for difficult links
 
 For Facebook or YouTube links that need a signed-in session, set these secrets on
 the **media** Worker (Netscape cookie file text):

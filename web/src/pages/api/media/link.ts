@@ -11,7 +11,7 @@ function validateUrl(raw: string): string {
   }
   if (!["http:", "https:"].includes(url.protocol)) throw new HttpError(400, "Only http and https links are supported.");
   if (/(^|\.)drive\.google\.com$/.test(url.hostname) && /\/folders?\//.test(url.pathname)) {
-    throw new HttpError(400, "This is a Google Drive folder link. Please paste the share link of a single video or audio file.");
+    throw new HttpError(400, "This is a Google Drive folder link. Use the Drive folder tab to transcribe every video in it, or paste the link of a single file here.");
   }
   return url.toString();
 }
