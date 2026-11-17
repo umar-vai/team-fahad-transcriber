@@ -230,6 +230,65 @@ def download_google_drive_media(url: str, folder: Path) -> LocalMediaSource:
     )
 
 
+def download_private_drive_media(url: str, token: str, folder: Path) -> LocalMediaSource:
+    """Download a private Google Drive file with an OAuth access token (Drive API, alt=media)."""
+    file_id = google_drive_file_id(url)
+    if not file_id:
+        raise ValueError("No Google Drive file ID could be detected in this link.")
+
+    download_dir = folder / "google_drive_download"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    output = download_dir / "google_drive_source"
+    max_bytes = MAX_LINK_SOURCE_MB * 1024 * 1024
+    api = f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(file_id)}"
+
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            with requests.get(
+                api,
+                params={"alt": "media", "supportsAllDrives": "true", "acknowledgeAbuse": "true"},
+                headers={"Authorization": f"Bearer {token}"},
+                stream=True,
+                timeout=(15, 120),
+            ) as response:
+                if response.status_code in (401, 403, 404):
+                    # Not retryable: the token or the file permission is wrong.
+                    raise ValueError(
+                        f"Google Drive refused the download (HTTP {response.status_code}). "
+                        "Connect the Drive account again on the Auto page."
+                    )
+                response.raise_for_status()
+                written = 0
+                with output.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise ValueError(
+                                f"Drive file is larger than the {MAX_LINK_SOURCE_MB // 1024} GB download limit."
+                            )
+                        handle.write(chunk)
+            last_error = None
+            break
+        except ValueError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(2 * attempt)
+
+    if last_error is not None:
+        raise RuntimeError(f"Could not download the Drive file: {str(last_error)[:450]}") from last_error
+    if not output.exists() or output.stat().st_size == 0:
+        raise RuntimeError("Google Drive returned an empty file.")
+
+    normalized = folder / "google_drive_media.mp3"
+    normalize_link_media_to_mp3(output, normalized)
+    return LocalMediaSource(path=normalized, name="google_drive_media.mp3", size=normalized.stat().st_size)
+
+
 def frameio_oauth_config() -> tuple[str, str, str] | None:
     client_id = str(secret_or_env("FRAMEIO_CLIENT_ID") or "").strip()
     client_secret = str(secret_or_env("FRAMEIO_CLIENT_SECRET") or "").strip()

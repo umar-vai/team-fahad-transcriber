@@ -5,7 +5,7 @@
  *   <parent page> (NOTION_PARENT_PAGE_ID, shared with the integration)
  *     └─ 📁 <Drive folder name>              one page per folder batch
  *          ├─ info box: Drive link, number of videos, output style, date
- *          └─ table "Transcripts"            one row per video (No., Title, Duration, Status, Drive file, Words)
+ *          └─ table "Transcripts"            one row per video (No., Title, Duration, Status, Drive file, Words, Date)
  *               └─ 🎬 <video title>           open a row to read its full transcript
  *
  * Secrets: NOTION_TOKEN (internal integration secret), NOTION_PARENT_PAGE_ID (page link or id).
@@ -126,6 +126,8 @@ export async function createNotionFolder(info: {
   fileCount: number;
   modeLabel: string;
   appUrl: string;
+  /** A permanent per-computer page: no video count, and the table gets a Date column. */
+  ongoing?: boolean;
 }): Promise<NotionFolder> {
   const parent = notionPageId(env.NOTION_PARENT_PAGE_ID)!;
   const date = new Date().toISOString().slice(0, 10);
@@ -142,7 +144,9 @@ export async function createNotionFolder(info: {
           color: "gray_background",
           rich_text: [
             ...richText("Google Drive folder", { bold: true }, info.folderUrl),
-            ...richText(`  ·  ${info.fileCount} videos  ·  ${info.modeLabel}  ·  ${date}  ·  `),
+            ...richText(info.ongoing
+              ? `  ·  transcribed automatically every night  ·  ${info.modeLabel}  ·  `
+              : `  ·  ${info.fileCount} videos  ·  ${info.modeLabel}  ·  ${date}  ·  `),
             ...richText("Open in Team Fahad Transcriber", undefined, info.appUrl),
           ],
         },
@@ -164,6 +168,7 @@ export async function createNotionFolder(info: {
         Style: { select: { options: [{ name: "Smart clean", color: "blue" }, { name: "Subtitles (timed)", color: "purple" }] } },
         Words: { number: { format: "number" } },
         "Drive file": { url: {} },
+        ...(info.ongoing ? { Date: { date: {} } } : {}),
       },
     });
     databaseId = database.id;
@@ -184,6 +189,8 @@ export async function addNotionTranscript(
     driveUrl: string;
     words: number;
     blocks: any[];
+    /** YYYY-MM-DD, filled in the Date column of per-computer tables. */
+    date?: string;
   },
 ): Promise<{ id: string; url: string }> {
   // The first chunk goes with the new page; the rest is appended in more requests.
@@ -205,6 +212,7 @@ export async function addNotionTranscript(
         Style: { select: { name: item.styleLabel } },
         Words: { number: item.words },
         "Drive file": { url: item.driveUrl },
+        ...(item.date ? { Date: { date: { start: item.date } } } : {}),
       },
     });
   } else {

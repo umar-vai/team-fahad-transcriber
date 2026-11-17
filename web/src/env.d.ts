@@ -28,6 +28,8 @@ declare namespace Cloudflare {
     /** Overridable for local tests only. */
     SHEETS_API_BASE?: string;
     GOOGLE_DRIVE_API_KEY?: string;
+    /** Optional: comma separated Drive folder ids to treat as computers (fallback or extras). */
+    DRIVE_COMPUTER_FOLDER_IDS?: string;
     /** Overridable for local tests only. */
     DRIVE_API_BASE?: string;
   }

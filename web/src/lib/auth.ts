@@ -1,9 +1,11 @@
 /** Google sign-in and D1-backed login sessions. */
 import { env } from "cloudflare:workers";
 import type { AstroCookies } from "astro";
+import { DRIVE_READONLY_SCOPE, saveConnection } from "./autodrive";
 
 export const SESSION_COOKIE = "tf_session";
 const STATE_COOKIE = "tf_oauth_state";
+const DRIVE_STATE_COOKIE = "tf_drive_state";
 const SESSION_DAYS = 30;
 
 export interface User {
@@ -137,4 +139,58 @@ export async function logout(cookies: AstroCookies): Promise<void> {
   const token = cookies.get(SESSION_COOKIE)?.value;
   if (token) await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256(token)).run();
   cookies.delete(SESSION_COOKIE, { path: "/" });
+}
+
+// ---------- Connect the Google Drive account that is watched every night ----------
+
+/** Consent URL for read-only Drive access with an offline refresh token. The same /auth/callback receives it. */
+export function driveConnectUrl(origin: string, cookies: AstroCookies): string {
+  const state = randomToken(24);
+  cookies.set(DRIVE_STATE_COOKIE, state, { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 600 });
+  const params = new URLSearchParams({
+    client_id: String(env.GOOGLE_CLIENT_ID),
+    redirect_uri: redirectUri(origin),
+    response_type: "code",
+    scope: `openid email ${DRIVE_READONLY_SCOPE}`,
+    state,
+    access_type: "offline",
+    prompt: "consent select_account",
+  });
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+}
+
+/** True when this callback belongs to a Drive connect (not a normal sign-in). */
+export function isDriveCallback(url: URL, cookies: AstroCookies): boolean {
+  const saved = cookies.get(DRIVE_STATE_COOKIE)?.value;
+  return Boolean(saved && saved === url.searchParams.get("state"));
+}
+
+export async function completeDriveConnect(url: URL, cookies: AstroCookies): Promise<void> {
+  cookies.delete(DRIVE_STATE_COOKIE, { path: "/" });
+  const user = await currentUser(cookies);
+  if (!user) throw new Error("Please sign in first, then press Connect Drive again.");
+  if (url.searchParams.get("error")) throw new Error(`Drive connect was cancelled (${url.searchParams.get("error")}).`);
+  const code = url.searchParams.get("code");
+  if (!code) throw new Error("Drive connect expired. Please try again.");
+  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code,
+      client_id: String(env.GOOGLE_CLIENT_ID),
+      client_secret: String(env.GOOGLE_CLIENT_SECRET),
+      redirect_uri: redirectUri(url.origin),
+      grant_type: "authorization_code",
+    }),
+  });
+  const tokens: any = await tokenResponse.json().catch(() => ({}));
+  if (!tokenResponse.ok || !tokens.access_token) {
+    throw new Error(`Drive connect failed: ${tokens.error_description || tokens.error || tokenResponse.status}`);
+  }
+  if (!tokens.refresh_token) throw new Error("Google did not give a long-lived access. Remove this app at myaccount.google.com/permissions and connect again.");
+  if (!String(tokens.scope || "").includes(DRIVE_READONLY_SCOPE)) throw new Error("Drive access was not granted. Tick the Drive permission on the Google screen.");
+  const profile: any = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+    headers: { authorization: `Bearer ${tokens.access_token}` },
+  }).then((r) => r.json()).catch(() => ({}));
+  await saveConnection({ userId: user.id, email: String(profile.email || "unknown"), refreshToken: tokens.refresh_token, appUrl: url.origin });
 }
