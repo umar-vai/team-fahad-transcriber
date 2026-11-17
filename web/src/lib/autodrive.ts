@@ -53,6 +53,8 @@ export interface DriveConnection {
   mode: BatchMode;
   language: string;
   enabled: number;
+  /** 1 = also write to Notion (off by default; Sheets is always used). */
+  notion_enabled: number;
   connected_at: number;
 }
 
@@ -281,6 +283,7 @@ async function startJob(connection: DriveConnection, job: JobRow): Promise<void>
     total: files.length,
     computerId: job.computer_id,
     authDrive: true,
+    notion: Boolean(connection.notion_enabled),
   };
   await env.DB.prepare(
     `INSERT INTO batches (id, user_id, folder_id, folder_name, folder_url, mode, language, total, status, created_at)

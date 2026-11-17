@@ -55,11 +55,13 @@ one tab per computer, with a Date column. A new computer folder gets its own pag
   It asks for read-only Drive access and stores an offline refresh token. No new redirect URI is needed (the same
   `/auth/callback` is used). The Drive API must be enabled in the same Google Cloud project, and the OAuth consent
   screen must be **published**: in "Testing" mode Google expires the refresh token after 7 days.
+- **Notion is off by default** (Notion's free plan runs out of blocks quickly); everything goes to Google Sheets. Turn on
+  "Also save to Notion" on the Auto page to add Notion pages for videos transcribed from then on.
 - Press **Check computers in Drive** to see which folders were found. Drive's API has no "Computers" listing, so
   computers are detected as folders owned by the account with no parent. If none show up, set the variable
   `DRIVE_COMPUTER_FOLDER_IDS` (comma separated folder ids).
 - Press **Run the nightly scan now** to test without waiting for 23:50.
-- Apply the new D1 migration before deploying: `npx wrangler d1 migrations apply team-fahad-transcriber --remote`.
+- D1 migrations are applied by the deploy workflow on every push to `main`.
 
 ## One-time setup
 

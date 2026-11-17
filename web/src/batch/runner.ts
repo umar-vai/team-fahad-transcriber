@@ -41,6 +41,8 @@ export interface BatchConfig {
   computerId?: string;
   /** The files are private: download them with the connected Drive account's token. */
   authDrive?: boolean;
+  /** Nightly auto jobs: false skips the Notion export (Sheets only). Manual folder batches always use Notion. */
+  notion?: boolean;
 }
 
 type ItemStatus = "queued" | "preparing" | "ready" | "transcribing" | "saving" | "done" | "failed";
@@ -557,9 +559,10 @@ export class BatchRunner extends DurableObject<Env> {
           .bind(config.computerId)
           .first<{ notion_json: string | null; sheet_json: string | null }>()
       : null;
-    if (!state.notion && computer?.notion_json) state.notion = JSON.parse(computer.notion_json);
+    const useNotion = config.notion !== false;
+    if (!state.notion && useNotion && computer?.notion_json) state.notion = JSON.parse(computer.notion_json);
     if (!state.sheet && computer?.sheet_json) state.sheet = JSON.parse(computer.sheet_json);
-    if (!state.notion && notionConfigured()) {
+    if (!state.notion && useNotion && notionConfigured()) {
       try {
         state.notion = await createNotionFolder({
           folderName: config.folderName,
