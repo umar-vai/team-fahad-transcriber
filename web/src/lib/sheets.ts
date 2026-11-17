@@ -12,12 +12,16 @@ const API = "https://sheets.googleapis.com/v4/spreadsheets";
 const CELL_LIMIT = 45_000;
 
 export const SHEET_HEADER = ["No.", "Title", "Duration", "Style", "Status", "Words", "Drive file", "Notion page", "Transcript"];
+/** Per-computer tabs have a Date column in front. */
+export const SHEET_HEADER_DATED = ["Date", ...SHEET_HEADER];
 
 export interface SheetTab {
   spreadsheetId: string;
   sheetId: number;
   title: string;
   url: string;
+  /** Number of extra columns in front of "No." (1 when the tab has a Date column). */
+  lead?: number;
 }
 
 export function spreadsheetId(raw: string | undefined): string | null {
@@ -39,7 +43,7 @@ export function safeTabTitle(name: string, taken: Set<string>): string {
   return title;
 }
 
-export async function createSheetTab(folderName: string): Promise<SheetTab> {
+export async function createSheetTab(folderName: string, dated = false): Promise<SheetTab> {
   const id = spreadsheetId(env.SHEETS_SPREADSHEET_ID)!;
   const base = env.SHEETS_API_BASE || API;
   const meta = await googleApi(`${base}/${id}?fields=sheets.properties(sheetId,title)`);
@@ -49,7 +53,8 @@ export async function createSheetTab(folderName: string): Promise<SheetTab> {
     body: { requests: [{ addSheet: { properties: { title, gridProperties: { frozenRowCount: 1 } } } }] },
   });
   const sheetId = Number(added.replies?.[0]?.addSheet?.properties?.sheetId);
-  const widths = [50, 280, 80, 130, 80, 70, 220, 220, 600];
+  const header = dated ? SHEET_HEADER_DATED : SHEET_HEADER;
+  const widths = dated ? [95, 50, 280, 80, 130, 80, 70, 220, 220, 600] : [50, 280, 80, 130, 80, 70, 220, 220, 600];
   await googleApi(`${base}/${id}:batchUpdate`, {
     body: {
       requests: [
@@ -58,7 +63,7 @@ export async function createSheetTab(folderName: string): Promise<SheetTab> {
             start: { sheetId, rowIndex: 0, columnIndex: 0 },
             fields: "userEnteredValue,userEnteredFormat",
             rows: [{
-              values: SHEET_HEADER.map((text) => ({
+              values: header.map((text) => ({
                 userEnteredValue: { stringValue: text },
                 userEnteredFormat: { textFormat: { bold: true }, backgroundColor: { red: 0.9, green: 0.93, blue: 0.98 } },
               })),
@@ -82,7 +87,7 @@ export async function createSheetTab(folderName: string): Promise<SheetTab> {
       ],
     },
   });
-  return { spreadsheetId: id, sheetId, title, url: `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${sheetId}` };
+  return { spreadsheetId: id, sheetId, title, url: `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${sheetId}`, lead: dated ? 1 : 0 };
 }
 
 export function sheetRow(item: {
@@ -95,8 +100,10 @@ export function sheetRow(item: {
   driveUrl: string;
   notionUrl: string;
   transcript: string;
+  /** YYYY-MM-DD; adds the leading Date column of per-computer tabs. */
+  date?: string;
 }): (string | number)[] {
-  const row: (string | number)[] = [item.index, item.title, item.duration, item.style, item.status, item.words, item.driveUrl, item.notionUrl];
+  const row: (string | number)[] = [...(item.date ? [item.date] : []), item.index, item.title, item.duration, item.style, item.status, item.words, item.driveUrl, item.notionUrl];
   const text = item.transcript || "";
   if (!text) row.push("");
   for (let i = 0; i < text.length; i += CELL_LIMIT) row.push(text.slice(i, i + CELL_LIMIT));
@@ -111,14 +118,15 @@ function cells(row: (string | number)[]) {
  * Overwrite the "Failed" row of a video that has now been transcribed.
  * Returns false when that row is not found (then the caller appends).
  */
-export async function replaceFailedRow(tab: SheetTab, index: number, row: (string | number)[]): Promise<boolean> {
+export async function replaceFailedRow(tab: SheetTab, index: number, row: (string | number)[], date?: string): Promise<boolean> {
   const base = env.SHEETS_API_BASE || API;
   const meta = await googleApi(`${base}/${tab.spreadsheetId}?fields=sheets.properties(sheetId,title)`);
   const title = (meta.sheets || []).find((s: any) => Number(s.properties?.sheetId) === tab.sheetId)?.properties?.title;
   if (!title) return false;
-  const range = encodeURIComponent(`'${String(title).replace(/'/g, "''")}'!A1:E`);
+  const lead = tab.lead || 0;
+  const range = encodeURIComponent(`'${String(title).replace(/'/g, "''")}'!A1:F`);
   const values = (await googleApi(`${base}/${tab.spreadsheetId}/values/${range}`)).values || [];
-  const rowIndex = values.findIndex((r: any[]) => String(r?.[0]) === String(index) && r?.[4] === "Failed");
+  const rowIndex = values.findIndex((r: any[]) => String(r?.[lead]) === String(index) && r?.[lead + 4] === "Failed" && (!lead || !date || r?.[0] === date));
   if (rowIndex < 1) return false;
   await googleApi(`${base}/${tab.spreadsheetId}:batchUpdate`, {
     body: { requests: [{ updateCells: { start: { sheetId: tab.sheetId, rowIndex, columnIndex: 0 }, rows: [{ values: cells(row) }], fields: "userEnteredValue" } }] },

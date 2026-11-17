@@ -53,7 +53,7 @@ export function driveFolderUrl(id: string): string {
   return `https://drive.google.com/drive/folders/${id}`;
 }
 
-function isMedia(name: string, mimeType?: string): boolean {
+export function isMedia(name: string, mimeType?: string): boolean {
   if (mimeType && /^(video|audio)\//.test(mimeType)) return true;
   return MEDIA_EXT.test(name);
 }

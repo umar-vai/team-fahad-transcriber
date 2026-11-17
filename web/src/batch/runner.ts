@@ -16,6 +16,7 @@ import { clock, mergePieces, speakerTranscript, type PieceResult, type Segment }
 import { driveFileUrl } from "../lib/drive";
 import { addNotionTranscript, archiveNotionPage, createNotionFolder, finishNotionFolder, notionConfigured, transcriptBlocks, type NotionFolder } from "../lib/notion";
 import { appendSheetRow, createSheetTab, replaceFailedRow, sheetRow, sheetsConfigured, type SheetTab } from "../lib/sheets";
+import { driveAccessToken } from "../lib/autodrive";
 
 export type BatchMode = "smart" | "detailed";
 
@@ -36,6 +37,10 @@ export interface BatchConfig {
   appUrl: string;
   createdAt: number;
   total: number;
+  /** Nightly auto jobs: the computer folder. Its Notion page and Sheets tab are reused every day. */
+  computerId?: string;
+  /** The files are private: download them with the connected Drive account's token. */
+  authDrive?: boolean;
 }
 
 type ItemStatus = "queued" | "preparing" | "ready" | "transcribing" | "saving" | "done" | "failed";
@@ -51,6 +56,8 @@ export interface BatchItem {
   fileId: string;
   name: string;
   title: string;
+  /** YYYY-MM-DD the video belongs to (nightly auto jobs). */
+  date?: string;
   status: ItemStatus;
   detail?: string;
   error?: string;
@@ -139,7 +146,7 @@ export class BatchRunner extends DurableObject<Env> {
 
   // ---------- Public RPC methods (called by the API routes) ----------
 
-  async start(config: BatchConfig, files: { id: string; path: string; name: string }[]): Promise<void> {
+  async start(config: BatchConfig, files: { id: string; path: string; name: string; date?: string }[]): Promise<void> {
     if (await this.config()) return;
     const puts: Record<string, unknown> = { config, state: { status: "running", exportsReady: false } satisfies BatchState };
     files.forEach((file, i) => {
@@ -148,6 +155,7 @@ export class BatchRunner extends DurableObject<Env> {
         fileId: file.id,
         name: file.path,
         title: file.path.replace(/\.[^./\\]+$/, ""),
+        date: file.date,
         status: "queued",
         prepAttempts: 0,
         partErrors: 0,
@@ -331,11 +339,20 @@ export class BatchRunner extends DurableObject<Env> {
 
   private async prepare(item: BatchItem): Promise<number> {
     if (item.status === "queued") {
-      const job = `${(await this.config())!.id}-${item.index}-${item.prepAttempts}`;
+      const config = (await this.config())!;
+      const job = `${config.id}-${item.index}-${item.prepAttempts}`;
+      let driveToken: string | undefined;
+      if (config.authDrive) {
+        try {
+          driveToken = await driveAccessToken();
+        } catch (error) {
+          return this.prepFailed(item, message(error));
+        }
+      }
       const response = await this.media(`${job}/link`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: driveFileUrl(item.fileId) }),
+        body: JSON.stringify({ url: driveFileUrl(item.fileId), ...(driveToken ? { drive_token: driveToken } : {}) }),
       });
       if (response.status === 503) {
         item.detail = "Waiting for a free media processor";
@@ -534,6 +551,14 @@ export class BatchRunner extends DurableObject<Env> {
 
   private async setupExports(config: BatchConfig, state: BatchState): Promise<void> {
     const modeLabel = BATCH_MODES[config.mode];
+    // Nightly jobs reuse the computer's own Notion page and Sheets tab; a new computer gets new ones once.
+    const computer = config.computerId
+      ? await this.env.DB.prepare("SELECT notion_json, sheet_json FROM drive_computers WHERE folder_id = ?")
+          .bind(config.computerId)
+          .first<{ notion_json: string | null; sheet_json: string | null }>()
+      : null;
+    if (!state.notion && computer?.notion_json) state.notion = JSON.parse(computer.notion_json);
+    if (!state.sheet && computer?.sheet_json) state.sheet = JSON.parse(computer.sheet_json);
     if (!state.notion && notionConfigured()) {
       try {
         state.notion = await createNotionFolder({
@@ -542,16 +567,23 @@ export class BatchRunner extends DurableObject<Env> {
           fileCount: config.total,
           modeLabel,
           appUrl: `${config.appUrl}/batches/${config.id}`,
+          ongoing: Boolean(config.computerId),
         });
         state.notionError = undefined;
+        if (config.computerId) {
+          await this.env.DB.prepare("UPDATE drive_computers SET notion_json = ? WHERE folder_id = ?").bind(JSON.stringify(state.notion), config.computerId).run();
+        }
       } catch (error) {
         state.notionError = message(error);
       }
     }
     if (!state.sheet && sheetsConfigured()) {
       try {
-        state.sheet = await createSheetTab(config.folderName);
+        state.sheet = await createSheetTab(config.folderName, Boolean(config.computerId));
         state.sheetError = undefined;
+        if (config.computerId) {
+          await this.env.DB.prepare("UPDATE drive_computers SET sheet_json = ? WHERE folder_id = ?").bind(JSON.stringify(state.sheet), config.computerId).run();
+        }
       } catch (error) {
         state.sheetError = message(error);
       }
@@ -598,6 +630,7 @@ export class BatchRunner extends DurableObject<Env> {
           driveUrl: driveFileUrl(item.fileId),
           words: item.words || 0,
           blocks: transcriptBlocks(content.transcript, content.segments, timed),
+          date: item.date,
         });
         item.notionUrl = page.url;
         item.notionPageId = page.id;
@@ -622,8 +655,9 @@ export class BatchRunner extends DurableObject<Env> {
           driveUrl: driveFileUrl(item.fileId),
           notionUrl: item.notionUrl || "",
           transcript: timed && content.segments.length ? speakerTranscript(content.segments) : content.transcript,
+          date: item.date,
         });
-        const replaced = item.replaceFailed?.sheetRow ? await replaceFailedRow(state.sheet, item.index, row).catch(() => false) : false;
+        const replaced = item.replaceFailed?.sheetRow ? await replaceFailedRow(state.sheet, item.index, row, item.date).catch(() => false) : false;
         if (!replaced) await appendSheetRow(state.sheet, row);
         item.sheetDone = true;
         item.replaceFailed = undefined;
@@ -649,6 +683,7 @@ export class BatchRunner extends DurableObject<Env> {
               index: item.index, title: item.title, duration: item.duration ?? null, styleLabel: BATCH_MODES[config.mode],
               status: "Failed", driveUrl: driveFileUrl(item.fileId), words: 0,
               blocks: transcriptBlocks(`Could not transcribe: ${item.error || "unknown error"}`, [], false),
+              date: item.date,
             });
             item.notionUrl = page.url;
             item.notionPageId = page.id;
@@ -661,6 +696,7 @@ export class BatchRunner extends DurableObject<Env> {
             await appendSheetRow(state.sheet, sheetRow({
               index: item.index, title: item.title, duration: item.duration ? clock(item.duration) : "", style: BATCH_MODES[config.mode],
               status: "Failed", words: 0, driveUrl: driveFileUrl(item.fileId), notionUrl: item.notionUrl || "", transcript: item.error || "",
+              date: item.date,
             }));
             item.sheetDone = true;
           }
@@ -669,7 +705,7 @@ export class BatchRunner extends DurableObject<Env> {
         }
         await this.saveItem(item);
       }
-      if (state.notion) {
+      if (state.notion && !config.computerId) {
         const summary = `Finished ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC: ${done} of ${items.length} videos transcribed` +
           (failed.length ? `, ${failed.length} failed.` : ".");
         await finishNotionFolder(state.notion, summary).catch((error) => console.warn("Notion summary:", error));

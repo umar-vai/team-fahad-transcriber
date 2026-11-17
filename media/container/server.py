@@ -86,13 +86,17 @@ def prepare_parts(source: Path, title: str) -> None:
     set_state(status="ready", title=title, duration=round(offset, 3), parts=parts)
 
 
-def run_link_job(url: str) -> None:
+def run_link_job(url: str, drive_token: str = "") -> None:
     try:
         set_state(status="downloading")
         folder = WORK / "download"
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir(parents=True)
-        media = link_tools.download_media_from_link(url, folder)
+        if drive_token:
+            # Private Drive file of the connected account: download with its access token.
+            media = link_tools.download_private_drive_media(url, drive_token, folder)
+        else:
+            media = link_tools.download_media_from_link(url, folder)
         title = Path(str(getattr(media, "name", "") or "linked_media")).stem
         prepare_parts(Path(media.path), title)
     except Exception as exc:
@@ -164,7 +168,8 @@ class Handler(BaseHTTPRequestHandler):
             if not url:
                 return self.send_json({"error": "Missing url"}, 400)
             WORK.mkdir(parents=True, exist_ok=True)
-            threading.Thread(target=run_link_job, args=(url,), daemon=True).start()
+            drive_token = str(payload.get("drive_token") or "").strip()
+            threading.Thread(target=run_link_job, args=(url, drive_token), daemon=True).start()
             return self.send_json({"status": "downloading"})
         if parsed.path == "/upload":
             # Large uploads arrive in pieces; append them in order.

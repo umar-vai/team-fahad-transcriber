@@ -1,0 +1,112 @@
+---
+import Base from "../layouts/Base.astro";
+import { LANGUAGES } from "../lib/gemini";
+import { BATCH_MODES } from "../batch/runner";
+
+const user = Astro.locals.user;
+if (!user) return Astro.redirect("/login?next=/auto");
+const notice = Astro.url.searchParams.get("connected") ? "Google Drive connected." : "";
+const problem = Astro.url.searchParams.get("error") || "";
+---
+<Base title="Auto · Team Fahad Transcriber">
+  <div class="page-head">
+    <div>
+      <h1>Nightly Drive automation</h1>
+      <p class="muted" style="margin:0">Every night at 11:50 PM (Bangladesh time) the new files of every computer under Drive "Computers" are transcribed and added to Notion and Google Sheets, one page and one tab per computer, by date.</p>
+    </div>
+  </div>
+  {notice ? <div class="card" style="border-color:var(--good)">{notice}</div> : null}
+  {problem ? <div class="card" style="border-color:var(--bad,#c33)">{problem}</div> : null}
+
+  <div class="card" id="connection">
+    <p class="muted" style="margin:0">Loading…</p>
+  </div>
+
+  <div class="card" id="settings" hidden>
+    <h2 style="margin-top:0">Settings</h2>
+    <label><input type="checkbox" id="enabled" /> Automatic nightly transcription is on</label>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
+      <label>Output style
+        <select id="mode">
+          {Object.entries(BATCH_MODES).map(([value, label]) => <option value={value}>{label}</option>)}
+        </select>
+      </label>
+      <label>Language
+        <select id="language">
+          {Object.keys(LANGUAGES).map((name) => <option value={name}>{name}</option>)}
+        </select>
+      </label>
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
+      <button class="btn" id="check" type="button">Check computers in Drive</button>
+      <button class="btn" id="run" type="button">Run the nightly scan now</button>
+    </div>
+    <p class="muted" id="result" style="margin-bottom:0"></p>
+  </div>
+
+  <div class="card" id="jobs" hidden>
+    <h2 style="margin-top:0">Recent jobs</h2>
+    <div id="jobList"></div>
+  </div>
+</Base>
+<script>
+  const $ = (id: string) => document.getElementById(id) as HTMLElement;
+  const esc = (v: unknown) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+  async function api(method: string, query = "", body?: unknown) {
+    const response = await fetch(`/api/auto${query}`, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const data: any = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Something went wrong.");
+    return data;
+  }
+  function render(data: any) {
+    $("connection").innerHTML = data.connected
+      ? `<strong>Connected:</strong> ${esc(data.email)} <a class="btn" style="margin-left:12px" href="/auth/drive">Reconnect</a>`
+      : `<p style="margin-top:0">Connect the Google account whose Drive holds the Computers folders. It only gets read-only access.</p><a class="btn" href="/auth/drive">Connect Drive</a>`;
+    $("settings").hidden = $("jobs").hidden = !data.connected;
+    ($("enabled") as HTMLInputElement).checked = data.enabled;
+    ($("mode") as unknown as HTMLSelectElement).value = data.mode;
+    ($("language") as unknown as HTMLSelectElement).value = data.language;
+    $("jobList").innerHTML = data.jobs.length
+      ? data.jobs.map((j: any) => `<div style="padding:8px 0;border-top:1px solid var(--line,#ddd)">
+          <strong>${esc(j.computer_name)}</strong> · ${esc(j.day)} ·
+          ${j.status === "queued" ? "waiting for a free slot" : j.status === "running" ? "transcribing" : "finished"}
+          · ${j.files} files${j.batch_id ? ` · ${j.done_count ?? 0} done${j.failed_count ? `, ${j.failed_count} failed` : ""}` : ""}
+          ${j.attempts ? ` · retried ${j.attempts}×` : ""}
+          ${j.batch_id ? ` · <a href="/batches/${esc(j.batch_id)}">details</a>` : ""}
+          ${j.notion_url ? ` · <a href="${esc(j.notion_url)}" target="_blank" rel="noopener">Notion</a>` : ""}
+          ${j.sheet_url ? ` · <a href="${esc(j.sheet_url)}" target="_blank" rel="noopener">Sheet</a>` : ""}
+        </div>`).join("")
+      : `<p class="muted" style="margin:0">No jobs yet.</p>`;
+  }
+  async function load(check = false) {
+    const data = await api("GET", check ? "?check=1" : "");
+    render(data);
+    if (check) {
+      $("result").textContent = data.driveError
+        ? `Drive error: ${data.driveError}`
+        : data.computers?.length
+          ? `Found ${data.computers.length} computers: ${data.computers.map((c: any) => c.name).join(", ")}`
+          : "No computer folders were found. Set DRIVE_COMPUTER_FOLDER_IDS as a fallback.";
+    }
+  }
+  const save = (patch: object) => api("PATCH", "", patch).catch((e) => ($("result").textContent = e.message));
+  $("enabled").addEventListener("change", (e) => save({ enabled: (e.target as HTMLInputElement).checked }));
+  $("mode").addEventListener("change", (e) => save({ mode: (e.target as HTMLSelectElement).value }));
+  $("language").addEventListener("change", (e) => save({ language: (e.target as HTMLSelectElement).value }));
+  $("check").addEventListener("click", () => load(true).catch((e) => ($("result").textContent = e.message)));
+  $("run").addEventListener("click", async () => {
+    $("result").textContent = "Scanning Drive…";
+    try {
+      const result = await api("POST");
+      $("result").textContent = result.computers.map((c: any) => `${c.name}: ${c.newFiles < 0 ? "could not read" : `${c.newFiles} new`}`).join(" · ") || "No computers found.";
+      await load();
+    } catch (error) {
+      $("result").textContent = (error as Error).message;
+    }
+  });
+  load().catch((e) => ($("connection").textContent = e.message));
+</script>
