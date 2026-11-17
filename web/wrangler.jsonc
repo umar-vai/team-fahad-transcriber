@@ -25,8 +25,8 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BatchRunner"] }],
   // Cron times are UTC. 17:50 UTC is 23:50 in Bangladesh (UTC+6): queue the day's Drive files.
-  // Every 30 minutes: start queued jobs and retry failed videos.
-  "triggers": { "crons": ["50 17 * * *", "*/30 * * * *"] },
+  // Every 5 minutes: start queued jobs when a slot is free and retry failed videos (one cheap D1 read when idle).
+  "triggers": { "crons": ["50 17 * * *", "*/5 * * * *"] },
   "vars": {
     "APP_NAME": "Team Fahad Transcriber",
     // Optional: comma separated emails allowed to use the app. Empty = any Google account.

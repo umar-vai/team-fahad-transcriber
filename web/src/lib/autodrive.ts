@@ -10,7 +10,7 @@
  *
  * Cron (see wrangler.jsonc, times are UTC):
  *   50 17 * * *    23:50 in Bangladesh: look for the day's files and queue the jobs
- *   every 30 minutes: start queued jobs, retry failed videos (cron expression: slash 30 in the minute field)
+ *   every 5 minutes: start queued jobs when a slot is free, retry failed videos (slash 5 in the minute field)
  *
  * The Drive account signs in once (Connect Drive on the Auto page) and the app keeps
  * an offline refresh token with read-only access.
