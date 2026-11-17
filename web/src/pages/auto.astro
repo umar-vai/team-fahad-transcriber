@@ -25,6 +25,8 @@ const problem = Astro.url.searchParams.get("error") || "";
   <div class="card" id="settings" hidden>
     <h2 style="margin-top:0">Settings</h2>
     <label><input type="checkbox" id="enabled" /> Automatic nightly transcription is on</label>
+    <br />
+    <label><input type="checkbox" id="notion" /> Also save to Notion (off: Google Sheets only)</label>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
       <label>Output style
         <select id="mode">
@@ -68,6 +70,7 @@ const problem = Astro.url.searchParams.get("error") || "";
       : `<p style="margin-top:0">Connect the Google account whose Drive holds the Computers folders. It only gets read-only access.</p><a class="btn" href="/auth/drive">Connect Drive</a>`;
     $("settings").hidden = $("jobs").hidden = !data.connected;
     ($("enabled") as HTMLInputElement).checked = data.enabled;
+    ($("notion") as HTMLInputElement).checked = data.notion;
     ($("mode") as unknown as HTMLSelectElement).value = data.mode;
     ($("language") as unknown as HTMLSelectElement).value = data.language;
     $("jobList").innerHTML = data.jobs.length
@@ -95,6 +98,7 @@ const problem = Astro.url.searchParams.get("error") || "";
   }
   const save = (patch: object) => api("PATCH", "", patch).catch((e) => ($("result").textContent = e.message));
   $("enabled").addEventListener("change", (e) => save({ enabled: (e.target as HTMLInputElement).checked }));
+  $("notion").addEventListener("change", (e) => save({ notion: (e.target as HTMLInputElement).checked }));
   $("mode").addEventListener("change", (e) => save({ mode: (e.target as HTMLSelectElement).value }));
   $("language").addEventListener("change", (e) => save({ language: (e.target as HTMLSelectElement).value }));
   $("check").addEventListener("click", () => load(true).catch((e) => ($("result").textContent = e.message)));

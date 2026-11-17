@@ -10,7 +10,7 @@
  *
  * Cron (see wrangler.jsonc, times are UTC):
  *   50 17 * * *    23:50 in Bangladesh: look for the day's files and queue the jobs
- *   every 30 minutes: start queued jobs, retry failed videos (cron expression: slash 30 in the minute field)
+ *   every 5 minutes: start queued jobs when a slot is free, retry failed videos (slash 5 in the minute field)
  *
  * The Drive account signs in once (Connect Drive on the Auto page) and the app keeps
  * an offline refresh token with read-only access.
@@ -53,6 +53,8 @@ export interface DriveConnection {
   mode: BatchMode;
   language: string;
   enabled: number;
+  /** 1 = also write to Notion (off by default; Sheets is always used). */
+  notion_enabled: number;
   connected_at: number;
 }
 
@@ -281,6 +283,7 @@ async function startJob(connection: DriveConnection, job: JobRow): Promise<void>
     total: files.length,
     computerId: job.computer_id,
     authDrive: true,
+    notion: Boolean(connection.notion_enabled),
   };
   await env.DB.prepare(
     `INSERT INTO batches (id, user_id, folder_id, folder_name, folder_url, mode, language, total, status, created_at)

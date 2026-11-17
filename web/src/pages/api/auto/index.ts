@@ -26,6 +26,7 @@ export const GET: APIRoute = handler(async (context) => {
     connected: Boolean(connection),
     email: connection?.google_email || null,
     enabled: connection ? Boolean(connection.enabled) : false,
+    notion: connection ? Boolean(connection.notion_enabled) : false,
     mode: connection?.mode || "smart",
     language: connection?.language || "Bangla (Bangladesh)",
     computers,
@@ -41,12 +42,13 @@ export const POST: APIRoute = handler(async (context) => {
   return json(await nightlyRun());
 });
 
-/** Change settings: on/off, output style, language. */
+/** Change settings: on/off, Notion export on/off, output style, language. */
 export const PATCH: APIRoute = handler(async (context) => {
   requireUser(context);
   if (!(await getConnection())) throw new HttpError(400, "Connect Google Drive first.");
   const body: any = await context.request.json().catch(() => ({}));
   if (body.enabled !== undefined) await env.DB.prepare("UPDATE drive_connection SET enabled = ? WHERE id = 1").bind(body.enabled ? 1 : 0).run();
+  if (body.notion !== undefined) await env.DB.prepare("UPDATE drive_connection SET notion_enabled = ? WHERE id = 1").bind(body.notion ? 1 : 0).run();
   if (body.mode !== undefined) {
     if (!(String(body.mode) in BATCH_MODES)) throw new HttpError(400, "Choose Smart clean or Subtitles (timed).");
     await env.DB.prepare("UPDATE drive_connection SET mode = ? WHERE id = 1").bind(String(body.mode) as BatchMode).run();

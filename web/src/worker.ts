@@ -10,7 +10,7 @@ export { BatchRunner } from "./batch/runner";
 export default {
   fetch: handle,
   async scheduled(controller, _env, ctx) {
-    // 23:50 Bangladesh time: find the day's new files and queue them. Every 30 minutes: keep the queue moving.
+    // 23:50 Bangladesh time: find the day's new files and queue them. Every 5 minutes: keep the queue moving.
     const work = controller.cron === NIGHTLY_CRON ? nightlyRun() : pumpJobs();
     ctx.waitUntil(work.catch((error) => console.error(`Scheduled run (${controller.cron}) failed:`, error)));
   },

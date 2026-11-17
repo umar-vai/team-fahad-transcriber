@@ -47,19 +47,21 @@ For teams whose PCs sync recordings to Google Drive with Drive for desktop. Ever
 the new media files of every computer folder are transcribed and added to Notion and Google Sheets, one page and
 one tab per computer, with a Date column. A new computer folder gets its own page and tab by itself.
 
-- **Cron** (UTC, in `wrangler.jsonc`): `50 17 * * *` queues the day's files; `*/30 * * * *` starts queued jobs
-  (3 computers at a time) and retries failed videos up to 3 times.
+- **Cron** (UTC, in `wrangler.jsonc`): `50 17 * * *` queues the day's files; `*/5 * * * *` starts queued jobs
+  (3 computers at a time, so a free slot is used within 5 minutes) and retries failed videos up to 3 times.
 - Files modified since the start of yesterday are checked, so a file that finished syncing after 23:50 is caught the
   next night. A file is never transcribed twice (`drive_files` table).
 - **Connect once:** open the **Auto** page and press **Connect Drive** with the Google account that owns the Drive.
   It asks for read-only Drive access and stores an offline refresh token. No new redirect URI is needed (the same
   `/auth/callback` is used). The Drive API must be enabled in the same Google Cloud project, and the OAuth consent
   screen must be **published**: in "Testing" mode Google expires the refresh token after 7 days.
+- **Notion is off by default** (Notion's free plan runs out of blocks quickly); everything goes to Google Sheets. Turn on
+  "Also save to Notion" on the Auto page to add Notion pages for videos transcribed from then on.
 - Press **Check computers in Drive** to see which folders were found. Drive's API has no "Computers" listing, so
   computers are detected as folders owned by the account with no parent. If none show up, set the variable
   `DRIVE_COMPUTER_FOLDER_IDS` (comma separated folder ids).
 - Press **Run the nightly scan now** to test without waiting for 23:50.
-- Apply the new D1 migration before deploying: `npx wrangler d1 migrations apply team-fahad-transcriber --remote`.
+- D1 migrations are applied by the deploy workflow on every push to `main`.
 
 ## One-time setup
 
