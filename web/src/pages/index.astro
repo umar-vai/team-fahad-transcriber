@@ -46,6 +46,7 @@ const connected = apiKeys().length > 0;
       <div class="tabs" role="tablist" id="source-tabs">
         <button role="tab" aria-selected="true" data-source="upload">Upload file</button>
         <button role="tab" aria-selected="false" data-source="link">Paste link</button>
+        <button role="tab" aria-selected="false" data-source="folder">Drive folder</button>
         <button role="tab" aria-selected="false" data-source="live">Live voice</button>
       </div>
 
@@ -62,8 +63,25 @@ const connected = apiKeys().length > 0;
         <label>Media URLs (one per line)
           <textarea id="link" rows="4" placeholder="YouTube, Google Drive, Facebook, Frame.io or a direct media link. Paste many links, one on each line."></textarea>
         </label>
-        <p class="muted small-text" style="margin:0">Public links only. For Google Drive, share the single file (not a folder).</p>
+        <p class="muted small-text" style="margin:0">Public links only. For a whole Google Drive folder, use the Drive folder tab.</p>
         <button class="btn block" id="link-go" type="button">Transcribe links</button>
+      </div>
+
+      <div data-source-panel="folder" class="stack hidden">
+        <label>Google Drive folder link
+          <input type="url" id="folder-link" placeholder="https://drive.google.com/drive/folders/..." />
+        </label>
+        <fieldset class="choice">
+          <legend>Output style</legend>
+          <label><input type="radio" name="folder-mode" value="smart" checked /> <span><strong>Smart clean</strong><small class="muted">Clean paragraphs, easy to read</small></span></label>
+          <label><input type="radio" name="folder-mode" value="detailed" /> <span><strong>Subtitles (timed)</strong><small class="muted">Time stamps and speakers on every line</small></span></label>
+        </fieldset>
+        <p class="muted small-text" style="margin:0">
+          The folder must be shared as "Anyone with the link". Every video and audio file in it (and its subfolders) is
+          transcribed one by one on the server, so you can close this page. When each one finishes it is saved to History,
+          Notion (a page for the folder) and Google Sheets (a tab for the folder). Language and names above are used.
+        </p>
+        <button class="btn block" id="folder-go" type="button">Transcribe whole folder</button>
       </div>
 
       <div data-source-panel="live" class="stack hidden">

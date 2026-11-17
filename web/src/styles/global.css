@@ -58,6 +58,8 @@ h3 { font-size: 16px; margin: 0 0 8px; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; }
 .stack { display: grid; gap: 14px; }
+/* Let wide children (the tab bar) scroll instead of stretching the page on phones. */
+.stack > * { min-width: 0; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .grid-3 { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 720px) { .grid-3 { grid-template-columns: 1fr; } }
@@ -115,8 +117,9 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
   .shell { padding-top: 14px; }
   .segment { grid-template-columns: 64px 1fr; }
 }
-@media (max-width: 380px) {
+@media (max-width: 440px) {
   .brand span { display: none; }
+  .nav { gap: 2px; }
 }
 
 .queue { display: flex; flex-direction: column; gap: 10px; }
@@ -128,3 +131,21 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .q-state.done { color: var(--good); }
 .q-state.failed { color: var(--bad); }
 .q-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Drive folder batches */
+.choice { border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.choice legend { font-size: 14px; color: var(--muted); margin-bottom: 6px; padding: 0; }
+.choice label { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); background: var(--panel-2); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+.choice label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.choice input { margin-top: 4px; accent-color: var(--accent); }
+.choice span { display: flex; flex-direction: column; line-height: 1.35; }
+.choice small { font-size: 12.5px; }
+.batch-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.stat strong { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 13px; }
+.links { display: flex; gap: 8px; flex-wrap: wrap; }
+.q-num { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 6px; }
+.q-state.waiting { color: var(--warn); }
+.batch-row { display: grid; gap: 6px; color: var(--text); }
+.batch-row:hover { border-color: var(--accent); text-decoration: none; }

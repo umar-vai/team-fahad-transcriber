@@ -7,6 +7,7 @@ Video and audio transcription with the Gemini API, running fully on Cloudflare a
 
 - Upload many audio or video files, or paste many links (YouTube, Google Drive, Facebook, Frame.io and other sites)
 - Live microphone transcription
+- Google Drive folders: paste one folder link and every video in it is transcribed on the server, one by one, then saved to History, Notion (a page per folder) and Google Sheets (a tab per folder)
 - Output modes: Smart clean transcript, Subtitles + speakers (timed), Exact verbatim transcript
 - Shayari transcribe: Urdu/Hindi poetry written in Bangla letters and English letters, with a Bangla meaning
 - Summary, explanation, creator content pack and full translation
