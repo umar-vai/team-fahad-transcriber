@@ -63,6 +63,8 @@ export interface BatchItem {
   status: ItemStatus;
   detail?: string;
   error?: string;
+  /** The file itself is unusable (no audio, empty or corrupt), so retrying cannot help. */
+  permanent?: boolean;
   job?: string;
   jobStartedAt?: number;
   prepAttempts: number;
@@ -99,6 +101,8 @@ interface BatchState {
 const PARALLEL_PARTS = 4;
 const POLL_MS = 5000;
 const MAX_PREP_ATTEMPTS = 3;
+/** FFmpeg messages that mean the file itself is bad, so retrying is pointless. */
+const UNUSABLE_MEDIA = /does not contain any stream|no usable audio|moov atom not found|invalid data found when processing input|no audio stream|stream map .* matches no streams/i;
 const MAX_PART_ERRORS = 6;
 const PREP_TIMEOUT_MS = 50 * 60_000;
 const QUOTA_WAIT_LIMIT_MS = 6 * 3600_000;
@@ -229,13 +233,20 @@ export class BatchRunner extends DurableObject<Env> {
     return true;
   }
 
+  /** True if some failed video could still succeed on a retry (bad files are not retried). */
+  async hasRetryable(userId: string): Promise<boolean> {
+    const config = await this.config();
+    if (!config || config.userId !== userId) return false;
+    return (await this.items()).some((i) => i.status === "failed" && !i.permanent);
+  }
+
   /** Retry failed videos, continue a cancelled batch, or redo missing Notion/Sheets exports. */
   async resume(userId: string): Promise<boolean> {
     const config = await this.config();
     const state = await this.state();
     if (!config || !state || config.userId !== userId) return false;
     for (const item of await this.items()) {
-      if (item.status === "failed") {
+      if (item.status === "failed" && !item.permanent) {
         if (item.notionPageId || item.sheetDone) {
           item.replaceFailed = { notionPageId: item.notionPageId, sheetRow: item.sheetDone };
         }
@@ -398,6 +409,11 @@ export class BatchRunner extends DurableObject<Env> {
 
   private async prepFailed(item: BatchItem, error: string): Promise<number> {
     this.release(item);
+    if (UNUSABLE_MEDIA.test(error)) {
+      item.permanent = true;
+      await this.fail(item, "This file has no usable audio (it is empty, damaged or has no sound track), so it was skipped.");
+      return 0;
+    }
     item.prepAttempts++;
     if (item.prepAttempts >= MAX_PREP_ATTEMPTS) {
       await this.fail(item, error);
