@@ -1,9 +1,12 @@
 /**
  * BatchRunner: one Durable Object per Google Drive folder batch.
  *
- * It works through the folder's videos one after another on the server, so the
- * browser can be closed. Each alarm does one small step (start a download, check
- * it, transcribe up to 4 parts, save), stores its progress and sets the next alarm.
+ * It works through the folder's audio files (MP3 and WAV) one after another on the
+ * server, so the browser can be closed. Each alarm does one small step (read the file
+ * header, transcribe up to 4 parts, save), stores its progress and sets the next alarm.
+ *
+ * No container is used: each part is a byte range read straight from Google Drive
+ * (see lib/audiosplit.ts and lib/drivefetch.ts) and sent to Gemini.
  *
  * Usage of Cloudflare D1 is kept tiny on purpose: progress lives in this Durable
  * Object's own storage. D1 only gets one row per batch (written at start and end)
@@ -14,6 +17,8 @@ import { LANGUAGES, TranscriptionQualityError, UserFacingError, transcribe, type
 import { inferBanglaLanguage } from "../lib/transcription-quality";
 import { clock, mergePieces, speakerTranscript, type PieceResult, type Segment } from "../lib/segments";
 import { driveFileUrl } from "../lib/drive";
+import { PROBE_BYTES, MP3_SLACK, UnsupportedAudioError, buildPart, planParts, probeAudio, type AudioInfo } from "../lib/audiosplit";
+import { driveRange } from "../lib/drivefetch";
 import { addNotionTranscript, archiveNotionPage, createNotionFolder, finishNotionFolder, notionConfigured, transcriptBlocks, type NotionFolder } from "../lib/notion";
 import { appendSheetRow, createSheetTab, replaceFailedRow, sheetRow, sheetsConfigured, type SheetTab } from "../lib/sheets";
 import { driveAccessToken } from "../lib/autodrive";
@@ -51,6 +56,9 @@ interface PartInfo {
   index: number;
   offset: number;
   duration: number;
+  /** Byte range [start, end) of this part inside the Drive file. */
+  start: number;
+  end: number;
 }
 
 export interface BatchItem {
@@ -65,8 +73,8 @@ export interface BatchItem {
   error?: string;
   /** The file itself is unusable (no audio, empty or corrupt), so retrying cannot help. */
   permanent?: boolean;
-  job?: string;
-  jobStartedAt?: number;
+  /** Format details read from the file header (set when the file is ready). */
+  audio?: AudioInfo;
   prepAttempts: number;
   partErrors: number;
   quotaWaitSince?: number;
@@ -101,10 +109,7 @@ interface BatchState {
 const PARALLEL_PARTS = 4;
 const POLL_MS = 5000;
 const MAX_PREP_ATTEMPTS = 3;
-/** FFmpeg messages that mean the file itself is bad, so retrying is pointless. */
-const UNUSABLE_MEDIA = /does not contain any stream|no usable audio|moov atom not found|invalid data found when processing input|no audio stream|stream map .* matches no streams/i;
 const MAX_PART_ERRORS = 6;
-const PREP_TIMEOUT_MS = 50 * 60_000;
 const QUOTA_WAIT_LIMIT_MS = 6 * 3600_000;
 const AUTO_LANGUAGE = "Auto detect / mixed language";
 
@@ -137,17 +142,6 @@ export class BatchRunner extends DurableObject<Env> {
 
   private saveItem(item: BatchItem): Promise<void> {
     return this.ctx.storage.put(itemKey(item.index), item);
-  }
-
-  private media(path: string, init?: RequestInit): Promise<Response> {
-    return this.env.MEDIA.fetch(`https://media/job/${path}`, init);
-  }
-
-  private release(item: BatchItem): void {
-    if (!item.job) return;
-    const job = item.job;
-    item.job = undefined;
-    this.ctx.waitUntil(this.media(`${job}/release`, { method: "POST" }).catch(() => undefined) as Promise<unknown>);
   }
 
   // ---------- Public RPC methods (called by the API routes) ----------
@@ -216,11 +210,10 @@ export class BatchRunner extends DurableObject<Env> {
     if (state.status !== "running") return true;
     for (const item of await this.items()) {
       const inProgress = item.status !== "done" && item.status !== "failed" && item.status !== "queued";
-      if (!item.job && !inProgress) continue;
-      this.release(item);
-      if (inProgress) {
-        // Its finished parts are deleted below, so it starts again from the download.
-        Object.assign(item, { status: "queued", detail: undefined, parts: undefined, partsDone: 0, languageDecided: undefined, lockedLanguage: undefined });
+      if (!inProgress) continue;
+      {
+        // Its finished parts are deleted below, so it starts again from the beginning.
+        Object.assign(item, { status: "queued", detail: undefined, parts: undefined, audio: undefined, partsDone: 0, languageDecided: undefined, lockedLanguage: undefined });
       }
       await this.saveItem(item);
     }
@@ -257,10 +250,9 @@ export class BatchRunner extends DurableObject<Env> {
         item.exportAttempts = 0;
         item.exportError = undefined;
       }
-      // A step that was still running when the batch was stopped starts again from the download.
+      // A step that was still running when the batch was stopped starts again from the beginning.
       if (state.status !== "running" && !["queued", "done", "failed"].includes(item.status)) {
-        this.release(item);
-        Object.assign(item, { status: "queued", detail: undefined, parts: undefined, partsDone: 0, languageDecided: undefined, lockedLanguage: undefined });
+        Object.assign(item, { status: "queued", detail: undefined, parts: undefined, audio: undefined, partsDone: 0, languageDecided: undefined, lockedLanguage: undefined });
       }
       await this.saveItem(item);
     }
@@ -316,16 +308,6 @@ export class BatchRunner extends DurableObject<Env> {
 
     const delay = await this.advance(config, current);
 
-    // While a video is being transcribed, download the next one in the background.
-    if (current.status === "transcribing" || current.status === "saving") {
-      const next = items.find((i) => i.index > current.index && i.status !== "done" && i.status !== "failed");
-      if (next && (next.status === "queued" || next.status === "preparing")) {
-        await this.prepare(next).catch((error) => console.warn("Prefetch failed:", error));
-      } else if (next?.status === "ready" && next.job) {
-        // Containers sleep after 5 idle minutes and would lose the prepared audio.
-        await this.media(`${next.job}/ping`).catch(() => undefined);
-      }
-    }
     return delay;
   }
 
@@ -348,72 +330,42 @@ export class BatchRunner extends DurableObject<Env> {
     return 0;
   }
 
-  // ---------- Step 1: download and split in the media container ----------
+  // ---------- Step 1: read the file header and plan the parts ----------
 
   private async prepare(item: BatchItem): Promise<number> {
-    if (item.status === "queued") {
-      const config = (await this.config())!;
-      const job = `${config.id}-${item.index}-${item.prepAttempts}`;
-      let driveToken: string | undefined;
-      if (config.authDrive) {
-        try {
-          driveToken = await driveAccessToken();
-        } catch (error) {
-          return this.prepFailed(item, message(error));
-        }
+    const config = (await this.config())!;
+    let token: string | undefined;
+    if (config.authDrive) {
+      try {
+        token = await driveAccessToken();
+      } catch (error) {
+        return this.prepFailed(item, message(error));
       }
-      const response = await this.media(`${job}/link`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: driveFileUrl(item.fileId), ...(driveToken ? { drive_token: driveToken } : {}) }),
-      });
-      if (response.status === 503) {
-        item.detail = "Waiting for a free media processor";
-        await this.saveItem(item);
-        return 20_000;
-      }
-      if (!response.ok) {
-        const detail: any = await response.json().catch(() => ({}));
-        return this.prepFailed(item, String(detail?.error || "The media helper could not start."));
-      }
-      item.job = job;
-      item.jobStartedAt = Date.now();
-      item.status = "preparing";
-      item.detail = "Downloading from Google Drive";
-      await this.saveItem(item);
-      return POLL_MS;
     }
-
-    // preparing: check the container
-    const response = await this.media(`${item.job}/status`).catch(() => null);
-    const state: any = response ? await response.json().catch(() => ({})) : {};
-    if (state.status === "ready") {
-      item.parts = (state.parts || []).map((p: any) => ({ index: Number(p.index), offset: Number(p.offset), duration: Number(p.duration) }));
-      item.duration = Number(state.duration) || null;
+    try {
+      const head = await driveRange(item.fileId, 0, PROBE_BYTES, token);
+      if (!head.bytes.length) throw new UnsupportedAudioError("This file is empty.");
+      const total = head.total ?? head.bytes.length;
+      const audio = probeAudio(head.bytes, total);
+      item.audio = audio;
+      item.parts = planParts(audio).map((p) => ({ index: p.index, offset: p.offset, duration: p.duration, start: p.start, end: p.end }));
+      item.duration = Math.round(audio.duration);
       item.partsDone = 0;
       item.status = "ready";
       item.detail = "Ready to transcribe";
       await this.saveItem(item);
       return 0;
+    } catch (error) {
+      if (error instanceof UnsupportedAudioError) {
+        item.permanent = true;
+        await this.fail(item, `${error.message} Only MP3 and WAV files are supported, so it was skipped.`);
+        return 0;
+      }
+      return this.prepFailed(item, message(error));
     }
-    if (state.status === "error") return this.prepFailed(item, String(state.error || "Could not prepare this video."));
-    const elapsed = Date.now() - (item.jobStartedAt || Date.now());
-    // "idle" means the container restarted and lost the job.
-    if (state.status === "idle" && elapsed > 60_000) return this.prepFailed(item, "The media helper restarted.");
-    if (elapsed > PREP_TIMEOUT_MS) return this.prepFailed(item, "Downloading this video took too long.");
-    const labels: Record<string, string> = { downloading: "Downloading from Google Drive", converting: "Extracting audio" };
-    item.detail = labels[state.status] || "Starting media helper";
-    await this.saveItem(item);
-    return POLL_MS;
   }
 
   private async prepFailed(item: BatchItem, error: string): Promise<number> {
-    this.release(item);
-    if (UNUSABLE_MEDIA.test(error)) {
-      item.permanent = true;
-      await this.fail(item, "This file has no usable audio (it is empty, damaged or has no sound track), so it was skipped.");
-      return 0;
-    }
     item.prepAttempts++;
     if (item.prepAttempts >= MAX_PREP_ATTEMPTS) {
       await this.fail(item, error);
@@ -448,7 +400,6 @@ export class BatchRunner extends DurableObject<Env> {
     await this.saveItem(item);
 
     const outcomes = await Promise.allSettled(batch.map((part) => this.transcribePart(config, item, part, codes)));
-    let lostAudio = false;
     let quota = false;
     let quality: string | null = null;
     let other: string | null = null;
@@ -466,23 +417,12 @@ export class BatchRunner extends DurableObject<Env> {
       }
       const reason = outcome.reason;
       const text = message(reason);
-      if (reason instanceof LostAudioError) lostAudio = true;
-      else if (reason instanceof UserFacingError && /rate limit|quota/i.test(text)) quota = true;
+      if (reason instanceof UserFacingError && /rate limit|quota/i.test(text)) quota = true;
       else if (reason instanceof TranscriptionQualityError) quality = text;
       else other = text;
     }
     item.partsDone = doneIndexes.size;
 
-    if (lostAudio) {
-      // The container was reclaimed; download again (finished parts are kept).
-      this.release(item);
-      item.status = "queued";
-      item.detail = "Downloading again";
-      item.prepAttempts++;
-      if (item.prepAttempts >= MAX_PREP_ATTEMPTS) await this.fail(item, "The downloaded audio was lost several times.");
-      else await this.saveItem(item);
-      return 0;
-    }
     if (quota) {
       item.quotaWaitSince ||= Date.now();
       if (Date.now() - item.quotaWaitSince > QUOTA_WAIT_LIMIT_MS) {
@@ -509,10 +449,16 @@ export class BatchRunner extends DurableObject<Env> {
   }
 
   private async transcribePart(config: BatchConfig, item: BatchItem, part: PartInfo, codes: string[]): Promise<PieceResult> {
-    const audio = await this.media(`${item.job}/part/${part.index}`);
-    if (audio.status === 404 || !audio.ok) throw new LostAudioError();
-    const data = await audio.arrayBuffer();
-    const result = await transcribe({ kind: "inline", mimeType: "audio/mpeg", data }, config.mode as Mode, codes, config.vocab, part.duration);
+    const audio = item.audio!;
+    const isLast = part.end >= audio.dataEnd;
+    const token = config.authDrive ? await driveAccessToken() : undefined;
+    // MP3 pieces are read a little past their end so the cut can move to the next frame.
+    const wanted = audio.kind === "mp3" && !isLast ? part.end + MP3_SLACK : part.end;
+    const fetched = await driveRange(item.fileId, part.start, Math.min(wanted, audio.dataEnd), token);
+    if (!fetched.bytes.length) throw new Error("Google Drive returned no data for this part.");
+    const piece = buildPart(audio, { index: part.index, offset: part.offset, duration: part.duration, start: part.start, end: part.end }, fetched.bytes, isLast);
+    const data = piece.data.buffer.slice(piece.data.byteOffset, piece.data.byteOffset + piece.data.byteLength) as ArrayBuffer;
+    const result = await transcribe({ kind: "inline", mimeType: piece.mimeType, data }, config.mode as Mode, codes, config.vocab, part.duration);
     return { offset: part.offset, duration: part.duration, transcript: result.transcript, segments: result.segments };
   }
 
@@ -521,7 +467,6 @@ export class BatchRunner extends DurableObject<Env> {
   private async save(config: BatchConfig, item: BatchItem): Promise<void> {
     const stored = await this.ctx.storage.list<PieceResult>({ prefix: `part:${String(item.index).padStart(4, "0")}:` });
     const merged = mergePieces([...stored.values()], config.mode === "detailed");
-    this.release(item);
     if (!merged.transcript.trim()) {
       await this.ctx.storage.delete([...stored.keys()]);
       await this.fail(item, "No speech was found in this video.");
@@ -559,7 +504,6 @@ export class BatchRunner extends DurableObject<Env> {
   }
 
   private async fail(item: BatchItem, error: string): Promise<void> {
-    this.release(item);
     item.status = "failed";
     item.error = error.slice(0, 500);
     item.detail = undefined;
@@ -753,11 +697,5 @@ export class BatchRunner extends DurableObject<Env> {
       )
       .run()
       .catch((error) => console.error("Batch summary write failed:", error));
-  }
-}
-
-class LostAudioError extends Error {
-  constructor() {
-    super("The prepared audio is no longer available.");
   }
 }

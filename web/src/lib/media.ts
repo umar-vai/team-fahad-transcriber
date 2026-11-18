@@ -1,5 +1,8 @@
-/** Talks to the media container Worker through the service binding. */
-import { env } from "cloudflare:workers";
+/**
+ * The paid media container was removed to stop its cost, so link downloads and large
+ * uploads are off. Google Drive folders of MP3/WAV files are handled by the batch runner
+ * without any container. These helpers stay so the old API routes answer with a clear message.
+ */
 import { HttpError } from "./http";
 
 const JOB_ID = /^[A-Za-z0-9-]{16,64}$/;
@@ -9,9 +12,8 @@ export function checkJobId(job: string | null): string {
   return job;
 }
 
-export function mediaFetch(job: string, path: string, init?: RequestInit): Promise<Response> {
-  if (!env.MEDIA) throw new HttpError(503, "The media helper is not configured.");
-  return env.MEDIA.fetch(`https://media/job/${job}${path}`, init);
+export function mediaFetch(_job: string, _path: string, _init?: RequestInit): Promise<Response> {
+  throw new HttpError(503, "Link downloads and very large uploads are turned off to avoid hosting costs. Use a Google Drive folder with MP3 or WAV files, or upload short audio pieces.");
 }
 
 export function youtubeId(raw: string): string | null {

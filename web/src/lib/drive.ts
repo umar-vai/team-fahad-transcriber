@@ -1,5 +1,5 @@
 /**
- * Lists the video and audio files inside a public Google Drive folder (and its subfolders).
+ * Lists the MP3 and WAV audio files inside a public Google Drive folder (and its subfolders).
  *
  * Order of methods:
  *  1. Drive API with the team service account (GOOGLE_SERVICE_ACCOUNT_JSON), no file limit
@@ -26,7 +26,8 @@ export interface DriveFolder {
   method: "service-account" | "api-key" | "public-page";
 }
 
-const MEDIA_EXT = /\.(mp4|m4v|mov|mkv|webm|avi|wmv|flv|3gp|mpg|mpeg|ts|mts|m2ts|mp3|m4a|aac|wav|flac|ogg|oga|opus|wma|amr)$/i;
+/** Only MP3 and WAV: they can be cut by bytes, so no container is needed to prepare them. */
+const MEDIA_EXT = /\.(mp3|wav)$/i;
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const MAX_FILES = 300;
 const MAX_DEPTH = 4;
@@ -54,8 +55,8 @@ export function driveFolderUrl(id: string): string {
 }
 
 export function isMedia(name: string, mimeType?: string): boolean {
-  if (mimeType && /^(video|audio)\//.test(mimeType)) return true;
-  return MEDIA_EXT.test(name);
+  if (MEDIA_EXT.test(name)) return true;
+  return Boolean(mimeType && /^audio\/(mpeg|mp3|wav|x-wav|wave|vnd\.wave)$/i.test(mimeType));
 }
 
 function naturalSort(files: DriveFile[]): DriveFile[] {

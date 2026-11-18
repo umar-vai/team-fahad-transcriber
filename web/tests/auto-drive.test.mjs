@@ -48,21 +48,23 @@ test("computers are the owned folders that have no parent", async () => {
 test("lists every media file, even ones with an old modified time, through subfolders, tagged with their day", async () => {
   env.DRIVE_API_BASE = "https://drive.test/v3";
   fakeDrive([
-    { id: "f1", name: "call 1.mp4", mimeType: "video/mp4", parents: ["pc1"], modifiedTime: "2026-11-17T10:00:00Z" },
+    { id: "f1", name: "call 1.wav", mimeType: "audio/wav", parents: ["pc1"], modifiedTime: "2026-11-17T10:00:00Z" },
+    // Video files are skipped: only MP3 and WAV audio is transcribed.
+    { id: "vid", name: "screen.mp4", mimeType: "video/mp4", parents: ["pc1"], modifiedTime: "2026-11-17T10:00:00Z" },
     { id: "f2", name: "notes.txt", mimeType: "text/plain", parents: ["pc1"], modifiedTime: "2026-11-17T10:00:00Z" },
     // Uploaded late but still carries its original time from the computer.
-    { id: "old", name: "old.mp4", mimeType: "video/mp4", parents: ["pc1"], modifiedTime: "2026-11-01T10:00:00Z" },
+    { id: "old", name: "old.mp3", mimeType: "audio/mpeg", parents: ["pc1"], modifiedTime: "2026-11-01T10:00:00Z" },
     { id: "d1", name: "2026-11-17", mimeType: FOLDER, parents: ["pc1"] },
     // 18:30 UTC on the 17th is 00:30 on the 18th in Bangladesh.
     { id: "f3", name: "late.mp3", mimeType: "audio/mpeg", parents: ["d1"], modifiedTime: "2026-11-17T18:30:00Z" },
     // The recording date in the name wins over the modified time.
-    { id: "f4", name: "2026-11-11 14-56-03.mp4", mimeType: "video/mp4", parents: ["d1"], modifiedTime: "2026-11-18T05:00:00Z" },
+    { id: "f4", name: "2026-11-11 14-56-03.mp3", mimeType: "audio/wav", parents: ["d1"], modifiedTime: "2026-11-18T05:00:00Z" },
   ]);
   const files = await listNewFiles("token", "pc1");
   assert.deepEqual(files.map((f) => [f.id, f.path, f.day]), [
-    ["old", "old.mp4", "2026-11-01"],
-    ["f4", "2026-11-17 / 2026-11-11 14-56-03.mp4", "2026-11-11"],
-    ["f1", "call 1.mp4", "2026-11-17"],
+    ["old", "old.mp3", "2026-11-01"],
+    ["f4", "2026-11-17 / 2026-11-11 14-56-03.mp3", "2026-11-11"],
+    ["f1", "call 1.wav", "2026-11-17"],
     ["f3", "2026-11-17 / late.mp3", "2026-11-18"],
   ].sort((a, b) => a[2].localeCompare(b[2])));
 });

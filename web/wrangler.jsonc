@@ -19,7 +19,6 @@
       "migrations_dir": "migrations"
     }
   ],
-  "services": [{ "binding": "MEDIA", "service": "team-fahad-transcriber-media" }],
   "durable_objects": {
     "bindings": [{ "name": "BATCH_RUNNER", "class_name": "BatchRunner" }]
   },

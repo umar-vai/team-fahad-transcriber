@@ -9,7 +9,6 @@ declare namespace App {
 declare namespace Cloudflare {
   interface Env {
     DB: D1Database;
-    MEDIA: Fetcher;
     BATCH_RUNNER: DurableObjectNamespace<import("./batch/runner").BatchRunner>;
     APP_NAME: string;
     ALLOWED_EMAILS?: string;
