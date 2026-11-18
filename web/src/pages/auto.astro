@@ -56,8 +56,12 @@ const problem = Astro.url.searchParams.get("error") || "";
   </div>
 
   <div class="card" id="jobs" hidden style="margin-top:16px">
-    <h2 style="margin-top:0">Recent jobs</h2>
-    <div id="jobList"></div>
+    <div class="section-head" style="margin-top:0">
+      <h2>Jobs</h2>
+      <select id="jobPc" aria-label="Filter by computer" style="width:auto"></select>
+    </div>
+    <div class="tabs" id="jobTabs" role="tablist"></div>
+    <div id="jobList" class="job-list"></div>
   </div>
 </Base>
 <script>
@@ -129,18 +133,67 @@ const problem = Astro.url.searchParams.get("error") || "";
     ($("notion") as HTMLInputElement).checked = data.notion;
     ($("mode") as unknown as HTMLSelectElement).value = data.mode;
     ($("language") as unknown as HTMLSelectElement).value = data.language;
-    $("jobList").innerHTML = data.jobs.length
-      ? data.jobs.map((j: any) => `<div style="padding:8px 0;border-top:1px solid var(--line,#ddd)">
-          <strong>${esc(j.computer_name)}</strong> · ${esc(j.day)} ·
-          ${j.status === "queued" ? "waiting for a free slot" : j.status === "running" ? "transcribing" : "finished"}
-          · ${j.files} files${j.batch_id ? ` · ${j.done_count ?? 0} done${j.failed_count ? `, ${j.failed_count} failed` : ""}` : ""}
-          ${j.attempts ? ` · retried ${j.attempts}×` : ""}
-          ${j.batch_id ? ` · <a href="/batches/${esc(j.batch_id)}">details</a>` : ""}
-          ${j.notion_url ? ` · <a href="${esc(j.notion_url)}" target="_blank" rel="noopener">Notion</a>` : ""}
-          ${j.sheet_url ? ` · <a href="${esc(j.sheet_url)}" target="_blank" rel="noopener">Sheet</a>` : ""}
-        </div>`).join("")
-      : `<p class="muted" style="margin:0">No jobs yet.</p>`;
+    allJobs = data.jobs || [];
+    renderJobs();
   }
+  type Tab = "all" | "progress" | "finished" | "failed";
+  let allJobs: any[] = [];
+  let tab: Tab = "all";
+  let pc = "";
+  const phase = (j: any): Exclude<Tab, "all"> => (j.status === "queued" || j.status === "running" ? "progress" : Number(j.failed_count || 0) > 0 ? "failed" : "finished");
+  const inTab = (j: any, t: Tab) => t === "all" || (t === "failed" ? Number(j.failed_count || 0) > 0 : phase(j) === t);
+  function renderJobs() {
+    const scoped = allJobs.filter((j) => !pc || j.computer_name === pc);
+    const tabs: [Tab, string][] = [["all", "All"], ["progress", "In progress"], ["finished", "Finished"], ["failed", "Failed"]];
+    $("jobTabs").innerHTML = tabs
+      .map(([key, label]) => `<button type="button" role="tab" data-tab="${key}" aria-selected="${tab === key}">${label} <span class="count">${scoped.filter((j) => inTab(j, key)).length}</span></button>`)
+      .join("");
+    const names = [...new Set(allJobs.map((j) => String(j.computer_name)))].sort((x, y) => x.localeCompare(y));
+    $("jobPc").innerHTML = `<option value="">All computers</option>` + names.map((n) => `<option value="${esc(n)}"${n === pc ? " selected" : ""}>${esc(n)}</option>`).join("");
+    const shown = scoped.filter((j) => inTab(j, tab));
+    $("jobList").innerHTML = shown.length
+      ? shown.map((j) => {
+          const total = Number(j.files || 0);
+          const ok = Number(j.done_count || 0);
+          const bad = Number(j.failed_count || 0);
+          const p = phase(j);
+          const pill = j.status === "queued" ? `<span class="pill warn">Waiting for a slot</span>`
+            : j.status === "running" ? `<span class="pill work">Transcribing</span>`
+            : bad ? `<span class="pill bad">Finished with ${bad} failed</span>`
+            : `<span class="pill good">Finished</span>`;
+          const pct = total ? Math.round(((ok) / total) * 100) : 0;
+          return `<div class="job ${bad ? "has-bad" : p === "finished" ? "is-done" : ""}">
+            <div class="job-top">
+              <div><strong>${esc(j.computer_name)}</strong> <span class="muted small-text">${esc(j.day)}</span></div>
+              ${pill}
+            </div>
+            <div class="progress"><div style="width:${pct}%"></div></div>
+            <div class="job-nums muted small-text">
+              <span><b>${num(total)}</b> files</span>
+              <span><b>${num(ok)}</b> done</span>
+              ${bad ? `<span class="bad-text"><b>${num(bad)}</b> failed</span>` : ""}
+              ${j.attempts ? `<span>retried ${j.attempts}×</span>` : ""}
+            </div>
+            <div class="links">
+              ${j.batch_id ? `<a class="btn ghost small" href="/batches/${esc(j.batch_id)}">Details</a>` : ""}
+              ${j.sheet_url ? `<a class="btn ghost small" href="${esc(j.sheet_url)}" target="_blank" rel="noopener">Sheet</a>` : ""}
+              ${j.notion_url ? `<a class="btn ghost small" href="${esc(j.notion_url)}" target="_blank" rel="noopener">Notion</a>` : ""}
+            </div>
+          </div>`;
+        }).join("")
+      : `<p class="muted" style="margin:0">Nothing here.</p>`;
+  }
+  $("jobTabs").addEventListener("click", (e) => {
+    const key = (e.target as HTMLElement).closest("button")?.dataset.tab as Tab | undefined;
+    if (key) {
+      tab = key;
+      renderJobs();
+    }
+  });
+  $("jobPc").addEventListener("change", (e) => {
+    pc = (e.target as HTMLSelectElement).value;
+    renderJobs();
+  });
   async function load(check = false) {
     const data = await api("GET", check ? "?check=1" : "");
     render(data);

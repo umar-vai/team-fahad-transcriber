@@ -20,7 +20,7 @@ export const GET: APIRoute = handler(async (context) => {
   }
   const jobs = await env.DB.prepare(
     `SELECT j.id, j.computer_name, j.day, j.status, j.attempts, j.batch_id, j.files_json, b.done_count, b.failed_count, b.total, b.status AS batch_status, b.notion_url, b.sheet_url
-       FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id ORDER BY j.created_at DESC LIMIT 40`,
+       FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id ORDER BY j.created_at DESC LIMIT 150`,
   ).all<any>();
   const today = dayOf(Date.now());
   const stats = await env.DB.prepare(
