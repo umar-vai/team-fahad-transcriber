@@ -3,6 +3,8 @@ import { env } from "cloudflare:workers";
 import { LANGUAGES } from "../../../lib/gemini";
 import { handler, HttpError, json, requireUser } from "../../../lib/http";
 import { dayOf, dayStart, discoverComputers, driveAccessToken, getConnection, nightlyRun } from "../../../lib/autodrive";
+import { refreshSheetDashboard } from "../../../lib/sheetdash";
+import { spreadsheetId } from "../../../lib/sheets";
 import { BATCH_MODES, type BatchMode } from "../../../batch/runner";
 
 /** Connection state, the computers found in Drive, and the latest nightly jobs. */
@@ -20,7 +22,7 @@ export const GET: APIRoute = handler(async (context) => {
   }
   const jobs = await env.DB.prepare(
     `SELECT j.id, j.computer_name, j.day, j.status, j.attempts, j.batch_id, j.files_json, b.done_count, b.failed_count, b.total, b.status AS batch_status, b.notion_url, b.sheet_url
-       FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id ORDER BY j.created_at DESC LIMIT 40`,
+       FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id ORDER BY j.created_at DESC LIMIT 150`,
   ).all<any>();
   const today = dayOf(Date.now());
   const stats = await env.DB.prepare(
@@ -37,6 +39,7 @@ export const GET: APIRoute = handler(async (context) => {
     .all<any>();
   return json({
     today,
+    sheetUrl: spreadsheetId(env.SHEETS_SPREADSHEET_ID) ? `https://docs.google.com/spreadsheets/d/${spreadsheetId(env.SHEETS_SPREADSHEET_ID)}/edit` : null,
     stats: stats.results,
     connected: Boolean(connection),
     email: connection?.google_email || null,
@@ -54,6 +57,11 @@ export const GET: APIRoute = handler(async (context) => {
 export const POST: APIRoute = handler(async (context) => {
   requireUser(context);
   if (!(await getConnection())) throw new HttpError(400, "Connect Google Drive first.");
+  if (context.url.searchParams.get("dashboard") === "1") {
+    const url = await refreshSheetDashboard();
+    if (!url) throw new HttpError(400, "Google Sheets is not set up (SHEETS_SPREADSHEET_ID and the service account).");
+    return json({ ok: true, url });
+  }
   return json(await nightlyRun());
 });
 
