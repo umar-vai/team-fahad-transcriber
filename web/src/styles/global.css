@@ -149,3 +149,16 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .q-state.waiting { color: var(--warn); }
 .batch-row { display: grid; gap: 6px; color: var(--text); }
 .batch-row:hover { border-color: var(--accent); text-decoration: none; }
+
+/* Auto page dashboard */
+.section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin: 22px 0 12px; }
+.pc-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.pc-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: grid; gap: 10px; align-content: start; }
+.pc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pc-big b { font-size: 28px; font-variant-numeric: tabular-nums; }
+.pc-big span { color: var(--muted); font-size: 13px; }
+.pc-nums { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; font-size: 12px; color: var(--muted); }
+.pc-nums b { display: block; font-size: 16px; color: var(--text); font-variant-numeric: tabular-nums; }
+.pc-nums .bad b, .bad-text { color: var(--bad); }
+.pill { font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
+.pill.good { color: var(--good); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); } .pill.work { color: var(--accent-2); }

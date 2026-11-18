@@ -22,7 +22,16 @@ const problem = Astro.url.searchParams.get("error") || "";
     <p class="muted" style="margin:0">Loading…</p>
   </div>
 
-  <div class="card" id="settings" hidden>
+  <section id="dash" hidden>
+    <div class="batch-stats" id="totals"></div>
+    <div class="section-head">
+      <h2>Team progress</h2>
+      <span class="muted small-text" id="todayLabel"></span>
+    </div>
+    <div class="pc-grid" id="computers"></div>
+  </section>
+
+  <div class="card" id="settings" hidden style="margin-top:16px">
     <h2 style="margin-top:0">Settings</h2>
     <label><input type="checkbox" id="enabled" /> Automatic nightly transcription is on</label>
     <br />
@@ -46,7 +55,7 @@ const problem = Astro.url.searchParams.get("error") || "";
     <p class="muted" id="result" style="margin-bottom:0"></p>
   </div>
 
-  <div class="card" id="jobs" hidden>
+  <div class="card" id="jobs" hidden style="margin-top:16px">
     <h2 style="margin-top:0">Recent jobs</h2>
     <div id="jobList"></div>
   </div>
@@ -64,7 +73,54 @@ const problem = Astro.url.searchParams.get("error") || "";
     if (!response.ok) throw new Error(data.error || "Something went wrong.");
     return data;
   }
+  const num = (n: unknown) => Number(n || 0).toLocaleString();
+  function renderDashboard(data: any) {
+    const rows: any[] = data.stats || [];
+    const sum = (key: string) => rows.reduce((total, row) => total + Number(row[key] || 0), 0);
+    const recorded = sum("total_files");
+    const done = sum("done");
+    const failed = sum("failed");
+    const waiting = Math.max(0, recorded - done - failed);
+    $("totals").innerHTML = [
+      ["Computers", rows.length],
+      ["Recordings in Drive", recorded],
+      ["Transcribed", done],
+      ["Waiting", waiting],
+      ["Failed", failed],
+      ["Transcribed today", sum("done_today")],
+    ].map(([label, value]) => `<div class="stat"><strong>${num(value)}</strong><span>${label}</span></div>`).join("");
+    $("todayLabel").textContent = data.today ? `Today: ${data.today}` : "";
+    $("computers").innerHTML = rows.length
+      ? rows.map((row) => {
+          const total = Number(row.total_files || 0);
+          const ok = Number(row.done || 0);
+          const bad = Number(row.failed || 0);
+          const left = Math.max(0, total - ok - bad);
+          const pct = total ? Math.round((ok / total) * 100) : 0;
+          const state = row.scan_error ? `<span class="pill bad">Could not read Drive</span>`
+            : row.open_jobs ? `<span class="pill work">Transcribing</span>`
+            : left ? `<span class="pill warn">${left} waiting</span>`
+            : `<span class="pill good">All done</span>`;
+          return `<div class="pc-card">
+            <div class="pc-head"><strong>${esc(row.name)}</strong>${state}</div>
+            <div class="pc-big"><b>${num(ok)}</b><span> of ${num(total)} transcribed</span></div>
+            <div class="progress"><div style="width:${pct}%"></div></div>
+            <div class="pc-nums">
+              <span><b>${num(total)}</b>recorded</span>
+              <span><b>${num(ok)}</b>done</span>
+              <span><b>${num(left)}</b>waiting</span>
+              <span class="${bad ? "bad" : ""}"><b>${num(bad)}</b>failed</span>
+            </div>
+            <div class="muted small-text">Today: ${num(row.recorded_today)} recorded, ${num(row.done_today)} transcribed</div>
+            ${row.scan_error ? `<div class="small-text bad-text">${esc(row.scan_error)}</div>` : ""}
+            ${row.last_scan_at ? `<div class="muted small-text">Last scan: ${esc(new Date(row.last_scan_at).toLocaleString())}</div>` : ""}
+          </div>`;
+        }).join("")
+      : `<p class="muted">No scan has run yet. Press "Run the nightly scan now" below.</p>`;
+  }
   function render(data: any) {
+    $("dash").hidden = !data.connected;
+    if (data.connected) renderDashboard(data);
     $("connection").innerHTML = data.connected
       ? `<strong>Connected:</strong> ${esc(data.email)} <a class="btn" style="margin-left:12px" href="/auth/drive">Reconnect</a>`
       : `<p style="margin-top:0">Connect the Google account whose Drive holds the Computers folders. It only gets read-only access.</p><a class="btn" href="/auth/drive">Connect Drive</a>`;
@@ -106,7 +162,7 @@ const problem = Astro.url.searchParams.get("error") || "";
     $("result").textContent = "Scanning Drive…";
     try {
       const result = await api("POST");
-      $("result").textContent = result.computers.map((c: any) => `${c.name}: ${c.newFiles < 0 ? "could not read" : `${c.newFiles} new`}`).join(" · ") || "No computers found.";
+      $("result").textContent = result.computers.map((c: any) => `${c.name}: ${c.newFiles < 0 ? `could not read (${c.error || "error"})` : `${c.newFiles} new of ${c.totalFiles}`}`).join(" · ") || "No computers found.";
       await load();
     } catch (error) {
       $("result").textContent = (error as Error).message;

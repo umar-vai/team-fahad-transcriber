@@ -23,11 +23,13 @@ import type { BatchConfig, BatchMode } from "../batch/runner";
 /** Bangladesh has no daylight saving time: always UTC+6. */
 export const DAY_OFFSET_MS = 6 * 3600_000;
 export const NIGHTLY_CRON = "50 17 * * *";
-const DAY_MS = 86_400_000;
 const MAX_CONCURRENT = 3;
 const MAX_ATTEMPTS = 3;
-const MAX_FILES_PER_COMPUTER = 400;
-const MAX_DEPTH = 6;
+/** Every media file of a computer is listed (already handled ones are skipped by id), so this is only a safety net. */
+const MAX_FILES_PER_COMPUTER = 5000;
+/** A job becomes one batch; big backlogs are split so each batch stays small. */
+const MAX_FILES_PER_JOB = 60;
+const MAX_DEPTH = 10;
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 export const DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 
@@ -158,26 +160,51 @@ export interface FoundFile {
   day: string;
 }
 
-/** Media files in a computer folder (and its subfolders) modified since the given time. */
-export async function listNewFiles(token: string, folderId: string, sinceMs: number): Promise<FoundFile[]> {
+/** The recording date in a file name such as "2026-11-17 14-56-03.mp4", if it has one. */
+export function dayFromName(name: string): string | null {
+  const match = name.match(/(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})/);
+  if (!match) return null;
+  const day = `${match[1]}-${match[2]}-${match[3]}`;
+  const date = new Date(`${day}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== day ? null : day;
+}
+
+/**
+ * Every media file in a computer folder and its subfolders.
+ *
+ * There is deliberately no "modified since" filter: Drive for desktop keeps the file's original time on
+ * this computer as its modified time, so a recording uploaded today can look weeks old and a time filter
+ * would hide it. Files that were already handled are skipped later by their id.
+ */
+export async function listNewFiles(token: string, folderId: string): Promise<FoundFile[]> {
   const files: FoundFile[] = [];
-  const since = new Date(sinceMs).toISOString();
+  const seenFolders = new Set<string>();
   const walk = async (id: string, prefix: string, depth: number) => {
+    if (seenFolders.has(id)) return;
+    seenFolders.add(id);
     let pageToken = "";
     do {
       const page = await driveGet(token, "files", {
-        q: `'${id}' in parents and trashed = false and (mimeType = '${FOLDER_MIME}' or modifiedTime > '${since}')`,
-        fields: "nextPageToken,files(id,name,mimeType,modifiedTime)",
+        q: `'${id}' in parents and trashed = false`,
+        fields: "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,shortcutDetails)",
         pageSize: "1000",
+        supportsAllDrives: "true",
+        includeItemsFromAllDrives: "true",
         ...(pageToken ? { pageToken } : {}),
       });
       for (const item of page.files || []) {
         const name = String(item.name || "");
-        if (item.mimeType === FOLDER_MIME) {
-          if (depth < MAX_DEPTH) await walk(String(item.id), `${prefix}${name} / `, depth + 1);
-        } else if (isMedia(name, item.mimeType) && files.length < MAX_FILES_PER_COMPUTER) {
-          const modified = Date.parse(item.modifiedTime) || Date.now();
-          files.push({ id: String(item.id), name, path: prefix + name, day: dayOf(modified) });
+        let fileId = String(item.id);
+        let mimeType = String(item.mimeType || "");
+        if (mimeType === "application/vnd.google-apps.shortcut" && item.shortcutDetails?.targetId) {
+          fileId = String(item.shortcutDetails.targetId);
+          mimeType = String(item.shortcutDetails.targetMimeType || "");
+        }
+        if (mimeType === FOLDER_MIME) {
+          if (depth < MAX_DEPTH) await walk(fileId, `${prefix}${name} / `, depth + 1);
+        } else if (isMedia(name, mimeType) && files.length < MAX_FILES_PER_COMPUTER) {
+          const modified = Date.parse(item.modifiedTime) || Date.parse(item.createdTime) || Date.now();
+          files.push({ id: fileId, name, path: prefix + name, day: dayFromName(name) || dayOf(modified) });
         }
       }
       pageToken = page.nextPageToken || "";
@@ -192,7 +219,7 @@ export async function listNewFiles(token: string, folderId: string, sinceMs: num
 
 export interface QueueResult {
   day: string;
-  computers: { name: string; newFiles: number }[];
+  computers: { name: string; newFiles: number; totalFiles: number; error?: string }[];
 }
 
 async function filterUnseen(files: FoundFile[]): Promise<FoundFile[]> {
@@ -207,9 +234,24 @@ async function filterUnseen(files: FoundFile[]): Promise<FoundFile[]> {
   return files.filter((f) => !seen.has(f.id));
 }
 
+/** List a computer's files, trying again if Drive hiccups, so one bad moment does not hide a whole computer. */
+async function listWithRetry(token: string, folderId: string): Promise<FoundFile[]> {
+  let last: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await listNewFiles(token, folderId);
+    } catch (error) {
+      last = error;
+      await new Promise((resolve) => setTimeout(resolve, 2000 * (attempt + 1)));
+    }
+  }
+  throw last;
+}
+
 /**
- * Find the new files of every computer and queue one job each. Looks back to the start of yesterday, so
- * a file that finished syncing after 23:50 is picked up the next night. Safe to run more than once.
+ * Find the new files of every computer and queue jobs for them (at most MAX_FILES_PER_JOB files each).
+ * Every file Drive holds is considered and the ones already handled are skipped, so nothing is missed
+ * and nothing is done twice. Safe to run more than once.
  */
 export async function queueNight(now = Date.now()): Promise<QueueResult> {
   const connection = await getConnection();
@@ -217,7 +259,6 @@ export async function queueNight(now = Date.now()): Promise<QueueResult> {
   if (!connection.enabled) return { day: dayOf(now), computers: [] };
   const token = await driveAccessToken(connection);
   const today = dayOf(now);
-  const since = dayStart(today) - DAY_MS;
   const result: QueueResult = { day: today, computers: [] };
 
   for (const computer of await discoverComputers(token)) {
@@ -227,27 +268,34 @@ export async function queueNight(now = Date.now()): Promise<QueueResult> {
     )
       .bind(computer.id, computer.name, now)
       .run();
+    let all: FoundFile[];
     let fresh: FoundFile[];
     try {
-      fresh = await filterUnseen(await listNewFiles(token, computer.id, since));
+      all = await listWithRetry(token, computer.id);
+      fresh = await filterUnseen(all);
     } catch (error) {
       // One unreadable computer must not stop the others.
+      const message = error instanceof Error ? error.message : String(error);
       console.error(`Listing ${computer.name} failed:`, error);
-      result.computers.push({ name: computer.name, newFiles: -1 });
+      await env.DB.prepare("UPDATE drive_computers SET last_scan_at = ?, scan_error = ? WHERE folder_id = ?").bind(now, message.slice(0, 300), computer.id).run();
+      result.computers.push({ name: computer.name, newFiles: -1, totalFiles: 0, error: message });
       continue;
     }
-    result.computers.push({ name: computer.name, newFiles: fresh.length });
-    if (!fresh.length) continue;
-    const jobId = crypto.randomUUID();
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO drive_jobs (id, computer_id, computer_name, day, status, files_json, created_at) VALUES (?, ?, ?, ?, 'queued', ?, ?)`,
-      ).bind(jobId, computer.id, computer.name.slice(0, 200), today, JSON.stringify(fresh), now),
-      ...fresh.map((f) =>
-        env.DB.prepare(`INSERT OR IGNORE INTO drive_files (file_id, computer_id, name, file_day, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-          .bind(f.id, computer.id, f.path.slice(0, 300), f.day, jobId, now),
-      ),
-    ]);
+    await env.DB.prepare("UPDATE drive_computers SET total_files = ?, last_scan_at = ?, scan_error = NULL WHERE folder_id = ?").bind(all.length, now, computer.id).run();
+    result.computers.push({ name: computer.name, newFiles: fresh.length, totalFiles: all.length });
+    for (let i = 0; i < fresh.length; i += MAX_FILES_PER_JOB) {
+      const chunk = fresh.slice(i, i + MAX_FILES_PER_JOB);
+      const jobId = crypto.randomUUID();
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO drive_jobs (id, computer_id, computer_name, day, status, files_json, created_at) VALUES (?, ?, ?, ?, 'queued', ?, ?)`,
+        ).bind(jobId, computer.id, computer.name.slice(0, 200), today, JSON.stringify(chunk), now + i),
+        ...chunk.map((f) =>
+          env.DB.prepare(`INSERT OR IGNORE INTO drive_files (file_id, computer_id, name, file_day, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+            .bind(f.id, computer.id, f.path.slice(0, 300), f.day, jobId, now),
+        ),
+      ]);
+    }
   }
   return result;
 }
