@@ -51,6 +51,8 @@ const problem = Astro.url.searchParams.get("error") || "";
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
       <button class="btn" id="check" type="button">Check computers in Drive</button>
       <button class="btn" id="run" type="button">Run the nightly scan now</button>
+      <button class="btn ghost" id="sheetDash" type="button">Update sheet dashboard</button>
+      <a class="btn ghost hidden" id="sheetLink" target="_blank" rel="noopener">Open the sheet</a>
     </div>
     <p class="muted" id="result" style="margin-bottom:0"></p>
   </div>
@@ -123,6 +125,9 @@ const problem = Astro.url.searchParams.get("error") || "";
       : `<p class="muted">No scan has run yet. Press "Run the nightly scan now" below.</p>`;
   }
   function render(data: any) {
+    const link = $("sheetLink") as unknown as HTMLAnchorElement;
+    link.classList.toggle("hidden", !data.sheetUrl);
+    if (data.sheetUrl) link.href = data.sheetUrl;
     $("dash").hidden = !data.connected;
     if (data.connected) renderDashboard(data);
     $("connection").innerHTML = data.connected
@@ -210,6 +215,15 @@ const problem = Astro.url.searchParams.get("error") || "";
   $("notion").addEventListener("change", (e) => save({ notion: (e.target as HTMLInputElement).checked }));
   $("mode").addEventListener("change", (e) => save({ mode: (e.target as HTMLSelectElement).value }));
   $("language").addEventListener("change", (e) => save({ language: (e.target as HTMLSelectElement).value }));
+  $("sheetDash").addEventListener("click", async () => {
+    $("result").textContent = "Updating the sheet dashboard…";
+    try {
+      const result = await api("POST", "?dashboard=1");
+      $("result").innerHTML = `Sheet dashboard updated. <a href="${esc(result.url)}" target="_blank" rel="noopener">Open it</a>`;
+    } catch (error) {
+      $("result").textContent = (error as Error).message;
+    }
+  });
   $("check").addEventListener("click", () => load(true).catch((e) => ($("result").textContent = e.message)));
   $("run").addEventListener("click", async () => {
     $("result").textContent = "Scanning Drive…";

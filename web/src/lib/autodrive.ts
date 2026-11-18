@@ -18,6 +18,7 @@
 import { env } from "cloudflare:workers";
 import { HttpError } from "./http";
 import { isMedia } from "./drive";
+import { refreshSheetDashboardSafe } from "./sheetdash";
 import type { BatchConfig, BatchMode } from "../batch/runner";
 
 /** Bangladesh has no daylight saving time: always UTC+6. */
@@ -388,6 +389,7 @@ export async function pumpJobs(): Promise<{ started: number; retried: number; fi
       }
     }
   }
+  if (summary.started || summary.finished || summary.retried) await refreshSheetDashboardSafe();
   return summary;
 }
 
