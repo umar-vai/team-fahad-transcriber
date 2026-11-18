@@ -361,7 +361,9 @@ export async function pumpJobs(): Promise<{ started: number; retried: number; fi
     }
     const failed = Number(job.failed_count || 0);
     if (job.batch_id && failed > 0 && job.attempts < MAX_ATTEMPTS) {
-      const ok = await env.BATCH_RUNNER.getByName(job.batch_id).resume(connection.user_id).catch(() => false);
+      const runner = env.BATCH_RUNNER.getByName(job.batch_id);
+      const retryable = await runner.hasRetryable(connection.user_id).catch(() => true);
+      const ok = retryable && (await runner.resume(connection.user_id).catch(() => false));
       if (ok) {
         await env.DB.prepare("UPDATE drive_jobs SET attempts = attempts + 1 WHERE id = ?").bind(job.id).run();
         summary.retried++;
