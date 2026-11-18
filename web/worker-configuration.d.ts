@@ -5,7 +5,6 @@ interface __BaseEnv_Env {
 	DB: D1Database;
 	APP_NAME: "Team Fahad Transcriber";
 	ALLOWED_EMAILS: "";
-	MEDIA: Fetcher /* team-fahad-transcriber-media */;
 }
 declare namespace Cloudflare {
 	interface Env extends __BaseEnv_Env {}

@@ -9,29 +9,26 @@ Everything runs on Cloudflare:
 | `web/` | Worker `team-fahad-transcriber` (Astro) | Pages, Google sign-in, Gemini calls, history API |
 | D1 `team-fahad-transcriber` | Cloudflare D1 | Users, login sessions, transcription history, one summary row per Drive folder |
 | Durable Object `BatchRunner` | inside the web Worker | Runs Google Drive folder batches in the background and keeps their live progress |
-| `media/` | Worker `team-fahad-transcriber-media` + Container | Downloads links (Drive, Facebook, Frame.io, other sites) and large files, converts with FFmpeg, splits into 5 minute parts |
 
-The link download code lives in `media/container/link_tools.py`.
+There is **no container** any more. It cost too much (Memory billing), so it was removed. Link downloads (Facebook, Frame.io, other sites) and very large uploads no longer work; use the Colab notebook for those.
 
 ## How transcription works
 
 - **Batch:** pick or drop many files and paste many links (one per line). They join a queue and run one after another, each with its own progress, retry and remove buttons. Finished items can be opened one by one or downloaded together as one ZIP.
 - **Files:** the browser decodes the audio, splits it into ~5 minute parts at
   quiet points, and sends up to 4 parts to Gemini at the same time. Only small
-  16 kHz audio is uploaded, not the whole video. Files the browser cannot read
-  (or over 300 MB) go to the media container instead.
-- **YouTube:** Gemini reads public YouTube videos directly, in parallel 5 minute
-  clips. If that fails, the container downloads the video.
-- **Other links:** the container downloads and splits the media, then the parts
-  are transcribed in parallel.
+  16 kHz audio is uploaded, not the whole file.
+- **YouTube:** Gemini reads public YouTube videos directly, in parallel 5 minute clips.
 - **Google Drive folder:** paste a public folder link and pick Smart clean or
-  Subtitles (timed). The server lists every video and audio file (subfolders
+  Subtitles (timed). The server lists every **MP3 and WAV** file (subfolders
   too, sorted by name so "2" comes before "10") and works through them one by
-  one in a `BatchRunner` Durable Object, so the browser can be closed. While a
-  video is transcribed, the next one is already downloading. Each finished video
-  is saved to History, gets a row in the folder's Notion table (open the row to
-  read the transcript) and a row in the folder's Google Sheets tab. Failed videos
-  are listed as "Failed"; "Retry failed" replaces those rows when they succeed.
+  one in a `BatchRunner` Durable Object, so the browser can be closed. Each file
+  is cut into pieces of about 5 minutes (or at most 10 MB) by reading byte ranges
+  straight from Drive (`src/lib/drivefetch.ts`, `src/lib/audiosplit.ts`), with no
+  FFmpeg and no container, and every piece is sent to Gemini. Each finished file
+  is saved to History, gets a row in the folder's Notion table and a row in the
+  folder's Google Sheets tab. Failed files are listed as "Failed"; "Retry failed"
+  replaces those rows when they succeed. Other formats (mp4, m4a ...) are skipped.
   Progress is shown on the **Folders** page.
 - **Low Cloudflare usage:** live progress is stored in the Durable Object, not in
   D1. D1 gets one row per folder (written at start and end) and one history row
@@ -130,31 +127,19 @@ account also lists Drive folders through the Drive API, which has no file limit.
 Without it, folders are read from Drive's public folder page.
 `GOOGLE_DRIVE_API_KEY` (an API key with the Drive API enabled) is an optional extra way.
 
-### 6. Optional cookies for difficult links
-
-For Facebook or YouTube links that need a signed-in session, set these secrets on
-the **media** Worker (Netscape cookie file text):
-
-```bash
-cd media
-npx wrangler secret put FACEBOOK_COOKIES
-npx wrangler secret put YTDLP_COOKIES
-```
-
 ## Deploying updates
 
 Pushing to `main` runs `.github/workflows/deploy-cloudflare.yml`. Add these
 GitHub repository secrets first:
 
 - `CLOUDFLARE_API_TOKEN`: a token with Workers Scripts edit, D1 edit,
-  Containers edit and Workers Routes edit permissions
+  and Workers Routes edit permissions
 - `CLOUDFLARE_ACCOUNT_ID`: `1fdb3252722874771d6dc733d7cd6cb4`
 
-Manual deploy from a computer with Node 22 and Docker:
+Manual deploy from a computer with Node 22:
 
 ```bash
-cd media && npm ci && npx wrangler deploy
-cd ../web && npm ci && npx wrangler d1 migrations apply team-fahad-transcriber --remote && npm run deploy
+cd web && npm ci && npx wrangler d1 migrations apply team-fahad-transcriber --remote && npm run deploy
 ```
 
 `scripts/inline-assets.mjs` is only a fallback for networks where the static

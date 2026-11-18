@@ -5,7 +5,6 @@ on:
     branches: [main]
     paths:
       - "web/**"
-      - "media/**"
       - ".github/workflows/deploy-cloudflare.yml"
   workflow_dispatch:
 
@@ -18,40 +17,7 @@ env:
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      media: ${{ steps.filter.outputs.media }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-      - id: filter
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || git diff --name-only HEAD~1 HEAD | grep -qE '^media/'; then
-            echo "media=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "media=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  media:
-    needs: changes
-    if: needs.changes.outputs.media == 'true'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: media
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm ci
-      - run: npx wrangler deploy
-
   web:
-    needs: [changes, media]
-    if: always() && needs.changes.result == 'success' && (needs.media.result == 'success' || needs.media.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:

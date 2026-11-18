@@ -5,9 +5,9 @@ Video and audio transcription with the Gemini API, running fully on Cloudflare a
 
 ## Features
 
-- Upload many audio or video files, or paste many links (YouTube, Google Drive, Facebook, Frame.io and other sites)
+- Upload audio files, or paste a public YouTube link
 - Live microphone transcription
-- Google Drive folders: paste one folder link and every video in it is transcribed on the server, one by one, then saved to History, Notion (a page per folder) and Google Sheets (a tab per folder)
+- Google Drive folders: paste one folder link and every MP3 and WAV file in it is transcribed on the server (no container, no extra cost), one by one, then saved to History, Notion (a page per folder) and Google Sheets (a tab per folder)
 - Output modes: Smart clean transcript, Subtitles + speakers (timed), Exact verbatim transcript
 - Shayari transcribe: Urdu/Hindi poetry written in Bangla letters and English letters, with a Bangla meaning
 - Summary, explanation, creator content pack and full translation
@@ -18,7 +18,6 @@ Video and audio transcription with the Gemini API, running fully on Cloudflare a
 | Folder | What it is |
 | --- | --- |
 | `web/` | The website (Astro on Cloudflare Workers): pages, sign-in, Gemini calls, history |
-| `media/` | Media helper Worker + Container: downloads links and large files, converts and splits audio |
 
 Setup and deployment are described in [`web/README.md`](web/README.md).
 Pushing to `main` deploys automatically through `.github/workflows/deploy-cloudflare.yml`.
