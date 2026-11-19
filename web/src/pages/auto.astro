@@ -51,6 +51,7 @@ const problem = Astro.url.searchParams.get("error") || "";
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
       <button class="btn" id="check" type="button">Check computers in Drive</button>
       <button class="btn" id="run" type="button">Run the nightly scan now</button>
+      <button class="btn" id="retryFailed" type="button">Retry all failed files</button>
       <button class="btn ghost" id="sheetDash" type="button">Update sheet dashboard</button>
       <a class="btn ghost hidden" id="sheetLink" target="_blank" rel="noopener">Open the sheet</a>
     </div>
@@ -220,6 +221,18 @@ const problem = Astro.url.searchParams.get("error") || "";
     try {
       const result = await api("POST", "?dashboard=1");
       $("result").innerHTML = `Sheet dashboard updated. <a href="${esc(result.url)}" target="_blank" rel="noopener">Open it</a>`;
+    } catch (error) {
+      $("result").textContent = (error as Error).message;
+    }
+  });
+  $("retryFailed").addEventListener("click", async () => {
+    $("result").textContent = "Restarting failed files…";
+    try {
+      const result = await api("POST", "?retry=1");
+      $("result").textContent = result.jobs
+        ? `${result.started} job(s) restarted now. The other ${Math.max(0, result.jobs - result.started)} follow automatically as slots free up. Files with no audio or a corrupt file are skipped.`
+        : "No job has failed files.";
+      await load();
     } catch (error) {
       $("result").textContent = (error as Error).message;
     }

@@ -108,9 +108,12 @@ interface BatchState {
 
 const PARALLEL_PARTS = 4;
 const POLL_MS = 5000;
-const MAX_PREP_ATTEMPTS = 3;
+const MAX_PREP_ATTEMPTS = 8;
 const MAX_PART_ERRORS = 6;
+/** How long a video keeps waiting on Gemini (quota, busy servers, timeouts) before it is marked failed. */
 const QUOTA_WAIT_LIMIT_MS = 6 * 3600_000;
+/** Temporary Gemini or network trouble: the same audio part works again later, so it is never counted as a real failure. */
+const TRANSIENT_RE = /rate limit|quota|busy|overload|unavailable|timed out|timeout|deadline|try again|temporar|\b(429|500|502|503|504|524)\b|fetch failed|network|connection/i;
 const AUTO_LANGUAGE = "Auto detect / mixed language";
 
 const itemKey = (index: number) => `item:${String(index).padStart(4, "0")}`;
@@ -374,7 +377,7 @@ export class BatchRunner extends DurableObject<Env> {
     item.status = "queued";
     item.detail = `Retrying download (${error.slice(0, 120)})`;
     await this.saveItem(item);
-    return 10_000;
+    return Math.min(10_000 * 2 ** (item.prepAttempts - 1), 120_000);
   }
 
   // ---------- Step 2: transcribe the parts with Gemini ----------
@@ -417,8 +420,8 @@ export class BatchRunner extends DurableObject<Env> {
       }
       const reason = outcome.reason;
       const text = message(reason);
-      if (reason instanceof UserFacingError && /rate limit|quota/i.test(text)) quota = true;
-      else if (reason instanceof TranscriptionQualityError) quality = text;
+      if (reason instanceof TranscriptionQualityError) quality = text;
+      else if (TRANSIENT_RE.test(text) || !(reason instanceof UserFacingError)) quota = true;
       else other = text;
     }
     item.partsDone = doneIndexes.size;
@@ -426,10 +429,10 @@ export class BatchRunner extends DurableObject<Env> {
     if (quota) {
       item.quotaWaitSince ||= Date.now();
       if (Date.now() - item.quotaWaitSince > QUOTA_WAIT_LIMIT_MS) {
-        await this.fail(item, "Gemini quota stayed exhausted for hours. Add another API key, then press Retry.");
+        await this.fail(item, "Gemini stayed busy or out of quota for hours. It is retried automatically; add another API key to speed it up.");
         return 0;
       }
-      item.detail = "Waiting for Gemini quota (all keys busy), retrying in a minute";
+      item.detail = "Gemini is busy or out of quota, retrying in a minute";
       await this.saveItem(item);
       return 60_000;
     }
@@ -469,6 +472,7 @@ export class BatchRunner extends DurableObject<Env> {
     const merged = mergePieces([...stored.values()], config.mode === "detailed");
     if (!merged.transcript.trim()) {
       await this.ctx.storage.delete([...stored.keys()]);
+      item.permanent = true;
       await this.fail(item, "No speech was found in this video.");
       return;
     }

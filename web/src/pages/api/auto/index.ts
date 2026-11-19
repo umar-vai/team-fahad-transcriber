@@ -2,7 +2,7 @@ import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { LANGUAGES } from "../../../lib/gemini";
 import { handler, HttpError, json, requireUser } from "../../../lib/http";
-import { dayOf, dayStart, discoverComputers, driveAccessToken, getConnection, nightlyRun } from "../../../lib/autodrive";
+import { dayOf, dayStart, discoverComputers, driveAccessToken, getConnection, nightlyRun, retryAllFailed } from "../../../lib/autodrive";
 import { refreshSheetDashboard } from "../../../lib/sheetdash";
 import { spreadsheetId } from "../../../lib/sheets";
 import { BATCH_MODES, type BatchMode } from "../../../batch/runner";
@@ -62,6 +62,7 @@ export const POST: APIRoute = handler(async (context) => {
     if (!url) throw new HttpError(400, "Google Sheets is not set up (SHEETS_SPREADSHEET_ID and the service account).");
     return json({ ok: true, url });
   }
+  if (context.url.searchParams.get("retry") === "1") return json(await retryAllFailed());
   return json(await nightlyRun());
 });
 

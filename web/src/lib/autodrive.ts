@@ -25,7 +25,9 @@ import type { BatchConfig, BatchMode } from "../batch/runner";
 export const DAY_OFFSET_MS = 6 * 3600_000;
 export const NIGHTLY_CRON = "50 17 * * *";
 const MAX_CONCURRENT = 3;
-const MAX_ATTEMPTS = 3;
+/** Automatic retry rounds per job (about 5 minutes apart at first, then up to 30 minutes). Press "Retry all failed" for more. */
+const MAX_ATTEMPTS = 30;
+const RETRY_COOLDOWN_MS = 5 * 60_000;
 /** Every media file of a computer is listed (already handled ones are skipped by id), so this is only a safety net. */
 const MAX_FILES_PER_COMPUTER = 5000;
 /** A job becomes one batch; big backlogs are split so each batch stays small. */
@@ -344,33 +346,25 @@ async function startJob(connection: DriveConnection, job: JobRow): Promise<void>
   await env.DB.prepare("UPDATE drive_jobs SET status = 'running', batch_id = ? WHERE id = ?").bind(batchId, job.id).run();
 }
 
-/** Start queued jobs while a slot is free, and retry the failed videos of finished jobs. */
-export async function pumpJobs(): Promise<{ started: number; retried: number; finished: number }> {
+/**
+ * Start queued jobs while a slot is free, then retry the failed videos of finished jobs.
+ * A finished job is retried again and again (with a growing pause) until nothing retryable is left,
+ * so a busy Gemini or a bad moment never leaves files failed. Broken files are never retried.
+ * force: ignore the pause (used by the "Retry all failed" button).
+ */
+export async function pumpJobs(force = false): Promise<{ started: number; retried: number; finished: number }> {
   const summary = { started: 0, retried: 0, finished: 0 };
   const connection = await getConnection();
   if (!connection?.enabled) return summary;
 
   const running = await env.DB.prepare(
-    `SELECT j.*, b.status AS batch_status, b.failed_count AS failed_count
-       FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id WHERE j.status = 'running'`,
-  ).all<JobRow & { batch_status: string | null; failed_count: number | null }>();
+    `SELECT j.id, b.status AS batch_status FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id WHERE j.status = 'running'`,
+  ).all<{ id: string; batch_status: string | null }>();
   let active = 0;
   for (const job of running.results) {
     if (job.batch_status === "running") {
       active++;
       continue;
-    }
-    const failed = Number(job.failed_count || 0);
-    if (job.batch_id && failed > 0 && job.attempts < MAX_ATTEMPTS) {
-      const runner = env.BATCH_RUNNER.getByName(job.batch_id);
-      const retryable = await runner.hasRetryable(connection.user_id).catch(() => true);
-      const ok = retryable && (await runner.resume(connection.user_id).catch(() => false));
-      if (ok) {
-        await env.DB.prepare("UPDATE drive_jobs SET attempts = attempts + 1 WHERE id = ?").bind(job.id).run();
-        summary.retried++;
-        active++;
-        continue;
-      }
     }
     await env.DB.prepare("UPDATE drive_jobs SET status = 'done' WHERE id = ?").bind(job.id).run();
     summary.finished++;
@@ -384,13 +378,54 @@ export async function pumpJobs(): Promise<{ started: number; retried: number; fi
       try {
         await startJob(connection, job);
         summary.started++;
+        active++;
       } catch (error) {
         console.error(`Could not start the job for ${job.computer_name}:`, error);
       }
     }
   }
+
+  if (active < MAX_CONCURRENT) {
+    const now = Date.now();
+    // The pause before the next try grows with every try: 5, 10, 15 ... 30 minutes.
+    const candidates = await env.DB.prepare(
+      `SELECT j.id, j.batch_id, j.attempts, b.finished_at
+         FROM drive_jobs j JOIN batches b ON b.id = j.batch_id
+        WHERE j.status = 'done' AND b.status = 'done' AND b.failed_count > 0 AND j.attempts < ?
+        ORDER BY j.attempts, b.finished_at LIMIT 40`,
+    )
+      .bind(MAX_ATTEMPTS)
+      .all<{ id: string; batch_id: string; attempts: number; finished_at: number | null }>();
+    for (const job of candidates.results) {
+      if (active >= MAX_CONCURRENT) break;
+      const wait = Math.min(job.attempts + 1, 6) * RETRY_COOLDOWN_MS;
+      if (!force && job.finished_at && now - job.finished_at < wait) continue;
+      const runner = env.BATCH_RUNNER.getByName(job.batch_id);
+      const retryable = await runner.hasRetryable(connection.user_id).catch(() => true);
+      if (!retryable) {
+        // Only broken files are left (no audio, empty, corrupt): nothing more to try.
+        await env.DB.prepare("UPDATE drive_jobs SET attempts = ? WHERE id = ?").bind(MAX_ATTEMPTS, job.id).run();
+        continue;
+      }
+      if (await runner.resume(connection.user_id).catch(() => false)) {
+        await env.DB.prepare("UPDATE drive_jobs SET status = 'running', attempts = attempts + 1 WHERE id = ?").bind(job.id).run();
+        summary.retried++;
+        active++;
+      }
+    }
+  }
   if (summary.started || summary.finished || summary.retried) await refreshSheetDashboardSafe();
   return summary;
+}
+
+/** The "Retry all failed" button: give every finished job with failed videos fresh retry rounds and start them now. */
+export async function retryAllFailed(): Promise<{ jobs: number; started: number }> {
+  const reset = await env.DB.prepare(
+    `UPDATE drive_jobs SET attempts = 0
+      WHERE status = 'done' AND batch_id IN (SELECT id FROM batches WHERE failed_count > 0 AND status = 'done')`,
+  ).run();
+  const summary = await pumpJobs(true);
+  return { jobs: Number(reset.meta?.changes || 0), started: summary.retried };
 }
 
 /** What the cron does at 23:50, and what the "Run now" button does. */
