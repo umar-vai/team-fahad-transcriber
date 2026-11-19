@@ -97,24 +97,54 @@ function keyId(key: string): string {
   return key.slice(-8);
 }
 
+/** Gemini refused the request because of where the server is (see lib/geminirelay.ts). */
+export function isLocationBlocked(status: number, text: string): boolean {
+  return status === 400 && /location is not supported/i.test(text);
+}
+
+// Once Gemini has refused this isolate's location, later requests go straight to the relay.
+let relayFirst = false;
+let relayCursor = 0;
+const RELAY_INSTANCES = 4;
+
+async function sendDirect(url: string, key: string, method: string, body: string | undefined, timeoutMs: number) {
+  const response = await fetch(url, {
+    method,
+    headers: { "x-goog-api-key": key, "content-type": "application/json" },
+    body,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  return { status: response.status, statusText: response.statusText, text: await response.text() };
+}
+
+function sendViaRelay(url: string, key: string, method: string, body: string | undefined, timeoutMs: number) {
+  const name = `enam-${relayCursor++ % RELAY_INSTANCES}`;
+  return env.GEMINI_RELAY!.getByName(name, { locationHint: "enam" }).send(url, key, method, body, timeoutMs);
+}
+
 async function geminiFetch(key: string, path: string, body?: unknown): Promise<any> {
   const base = env.GEMINI_API_BASE || DEFAULT_API; // Overridable for local tests only.
-  const response = await fetch(`${base}/${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: { "x-goog-api-key": key, "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    // Fail fast instead of waiting for Google's 125 second gateway timeout, so the next key is tried sooner.
-    signal: AbortSignal.timeout(body === undefined ? 20_000 : 80_000),
-  });
-  const text = await response.text();
+  const url = `${base}/${path}`;
+  const method = body === undefined ? "GET" : "POST";
+  const bodyText = body === undefined ? undefined : JSON.stringify(body);
+  // Fail fast instead of waiting for Google's 125 second gateway timeout, so the next key is tried sooner.
+  const timeoutMs = body === undefined ? 20_000 : 80_000;
+  const canRelay = Boolean(env.GEMINI_RELAY);
+  let response = canRelay && relayFirst ? null : await sendDirect(url, key, method, bodyText, timeoutMs);
+  if (canRelay && (!response || isLocationBlocked(response.status, response.text))) {
+    if (response && !relayFirst) console.warn("Gemini refused this server's location; using the North America relay from now on.");
+    relayFirst = true;
+    response = await sendViaRelay(url, key, method, bodyText, timeoutMs);
+  }
+  const { status, statusText, text } = response!;
   let payload: any = {};
   try {
     payload = text ? JSON.parse(text) : {};
   } catch {
     payload = { error: { message: text.slice(0, 300) } };
   }
-  if (!response.ok) {
-    throw new GeminiError(response.status, String(payload?.error?.message || response.statusText || "Gemini error"));
+  if (status < 200 || status >= 300) {
+    throw new GeminiError(status, String(payload?.error?.message || statusText || "Gemini error"));
   }
   return payload;
 }

@@ -404,6 +404,7 @@ export class BatchRunner extends DurableObject<Env> {
 
     const outcomes = await Promise.allSettled(batch.map((part) => this.transcribePart(config, item, part, codes)));
     let quota = false;
+    let waitReason = "";
     let quality: string | null = null;
     let other: string | null = null;
     for (const [i, outcome] of outcomes.entries()) {
@@ -421,7 +422,10 @@ export class BatchRunner extends DurableObject<Env> {
       const reason = outcome.reason;
       const text = message(reason);
       if (reason instanceof TranscriptionQualityError) quality = text;
-      else if (TRANSIENT_RE.test(text) || !(reason instanceof UserFacingError)) quota = true;
+      else if (TRANSIENT_RE.test(text) || !(reason instanceof UserFacingError)) {
+        quota = true;
+        waitReason ||= text;
+      }
       else other = text;
     }
     item.partsDone = doneIndexes.size;
@@ -432,7 +436,11 @@ export class BatchRunner extends DurableObject<Env> {
         await this.fail(item, "Gemini stayed busy or out of quota for hours. It is retried automatically; add another API key to speed it up.");
         return 0;
       }
-      item.detail = "Gemini is busy, switching to another API key in a moment";
+      // The real reason goes to the Worker logs, so a long wait can always be explained.
+      console.warn(JSON.stringify({ batchWait: item.name, batch: config.id, reason: waitReason.slice(0, 300) }));
+      item.detail = /google drive|drive api|returned no data/i.test(waitReason)
+        ? "Google Drive did not send the file, trying again in a moment"
+        : "Gemini is busy, switching to another API key in a moment";
       await this.saveItem(item);
       return 20_000;
     }
