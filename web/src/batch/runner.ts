@@ -112,8 +112,8 @@ const MAX_PREP_ATTEMPTS = 8;
 const MAX_PART_ERRORS = 6;
 /** How long a video keeps waiting on Gemini (quota, busy servers, timeouts) before it is marked failed. */
 const QUOTA_WAIT_LIMIT_MS = 6 * 3600_000;
-/** Temporary Gemini or network trouble: the same audio part works again later, so it is never counted as a real failure. */
-const TRANSIENT_RE = /rate limit|quota|busy|overload|unavailable|timed out|timeout|deadline|try again|temporar|\b(429|500|502|503|504|524)\b|fetch failed|network|connection/i;
+/** Temporary Gemini or network trouble (including Gemini sometimes refusing the server's egress location): the same audio part works again later, so it is never counted as a real failure. */
+const TRANSIENT_RE = /rate limit|quota|busy|overload|unavailable|timed out|timeout|deadline|try again|temporar|\b(429|500|502|503|504|524)\b|fetch failed|network|connection|location is not supported/i;
 const AUTO_LANGUAGE = "Auto detect / mixed language";
 
 const itemKey = (index: number) => `item:${String(index).padStart(4, "0")}`;

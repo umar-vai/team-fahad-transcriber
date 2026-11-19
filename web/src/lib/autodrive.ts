@@ -342,7 +342,7 @@ async function startJob(connection: DriveConnection, job: JobRow): Promise<void>
   )
     .bind(batchId, config.userId, config.folderId, `${job.computer_name} · ${job.day}`.slice(0, 300), config.folderUrl, config.mode, config.language, config.total, config.createdAt)
     .run();
-  await env.BATCH_RUNNER.getByName(batchId).start(config, files.map((f) => ({ id: f.id, path: f.path, name: f.name, date: f.day })));
+  await env.BATCH_RUNNER.getByName(batchId, { locationHint: "enam" }).start(config, files.map((f) => ({ id: f.id, path: f.path, name: f.name, date: f.day })));
   await env.DB.prepare("UPDATE drive_jobs SET status = 'running', batch_id = ? WHERE id = ?").bind(batchId, job.id).run();
 }
 
