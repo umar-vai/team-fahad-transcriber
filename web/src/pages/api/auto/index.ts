@@ -32,7 +32,10 @@ export const GET: APIRoute = handler(async (context) => {
        (SELECT COALESCE(SUM(b.done_count), 0) FROM batches b WHERE b.folder_id = c.folder_id) AS done,
        (SELECT COALESCE(SUM(b.failed_count), 0) FROM batches b WHERE b.folder_id = c.folder_id) AS failed,
        (SELECT COALESCE(SUM(b.done_count), 0) FROM batches b WHERE b.folder_id = c.folder_id AND b.created_at >= ?2) AS done_today,
-       (SELECT COUNT(*) FROM drive_jobs j WHERE j.computer_id = c.folder_id AND j.status != 'done') AS open_jobs
+       (SELECT COUNT(*) FROM drive_jobs j WHERE j.computer_id = c.folder_id AND j.status != 'done') AS open_jobs,
+       (SELECT COALESCE(SUM(MAX(json_array_length(j.files_json) - COALESCE(b.done_count, 0) - COALESCE(b.failed_count, 0), 0)), 0)
+          FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id
+         WHERE j.computer_id = c.folder_id AND j.status != 'done') AS waiting
        FROM drive_computers c ORDER BY c.name COLLATE NOCASE`,
   )
     .bind(today, dayStart(today))
