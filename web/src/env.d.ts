@@ -10,6 +10,8 @@ declare namespace Cloudflare {
   interface Env {
     DB: D1Database;
     BATCH_RUNNER: DurableObjectNamespace<import("./batch/runner").BatchRunner>;
+    /** Forwards Gemini requests from North America when Gemini refuses the server's location. */
+    GEMINI_RELAY?: DurableObjectNamespace<import("./lib/geminirelay").GeminiRelay>;
     APP_NAME: string;
     ALLOWED_EMAILS?: string;
     GEMINI_API_KEYS?: string;
