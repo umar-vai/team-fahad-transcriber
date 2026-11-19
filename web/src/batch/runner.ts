@@ -432,9 +432,9 @@ export class BatchRunner extends DurableObject<Env> {
         await this.fail(item, "Gemini stayed busy or out of quota for hours. It is retried automatically; add another API key to speed it up.");
         return 0;
       }
-      item.detail = "Gemini is busy or out of quota, retrying in a minute";
+      item.detail = "Gemini is busy, switching to another API key in a moment";
       await this.saveItem(item);
-      return 60_000;
+      return 20_000;
     }
     item.quotaWaitSince = undefined;
     if (quality || other) {

@@ -84,13 +84,14 @@ const problem = Astro.url.searchParams.get("error") || "";
   function renderDashboard(data: any) {
     const rows: any[] = data.stats || [];
     const sum = (key: string) => rows.reduce((total, row) => total + Number(row[key] || 0), 0);
-    const recorded = sum("total_files");
+    // "Recorded" is every file the app has picked up so far (not only what is still in Drive today).
+    const recorded = sum("picked_up");
     const done = sum("done");
     const failed = sum("failed");
-    const waiting = Math.max(0, recorded - done - failed);
+    const waiting = sum("waiting");
     $("totals").innerHTML = [
       ["Computers", rows.length],
-      ["Recordings in Drive", recorded],
+      ["Recordings picked up", recorded],
       ["Transcribed", done],
       ["Waiting", waiting],
       ["Failed", failed],
@@ -99,10 +100,10 @@ const problem = Astro.url.searchParams.get("error") || "";
     $("todayLabel").textContent = data.today ? `Today: ${data.today}` : "";
     $("computers").innerHTML = rows.length
       ? rows.map((row) => {
-          const total = Number(row.total_files || 0);
+          const total = Number(row.picked_up || 0);
           const ok = Number(row.done || 0);
           const bad = Number(row.failed || 0);
-          const left = Math.max(0, total - ok - bad);
+          const left = Number(row.waiting || 0);
           const pct = total ? Math.round((ok / total) * 100) : 0;
           const state = row.scan_error ? `<span class="pill bad">Could not read Drive</span>`
             : row.open_jobs ? `<span class="pill work">Transcribing</span>`

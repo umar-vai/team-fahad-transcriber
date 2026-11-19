@@ -53,10 +53,11 @@ export type AudioInput =
 const PREFERRED_MODELS = [
   "gemini-3.5-flash",
   "gemini-3-flash-preview",
-  "gemini-flash-latest",
   "gemini-flash-lite-latest",
   "gemini-3.5-flash-lite",
   "gemini-2.5-flash",
+  // Last: it cannot keep thinking low, and its calls often ran into the 125 second timeout (Worker logs, 2026-11-19).
+  "gemini-flash-latest",
 ];
 const SKIP_WORDS = ["image", "tts", "live", "audio", "embedding", "transcribe", "thinking-exp"];
 
@@ -102,6 +103,8 @@ async function geminiFetch(key: string, path: string, body?: unknown): Promise<a
     method: body === undefined ? "GET" : "POST",
     headers: { "x-goog-api-key": key, "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
+    // Fail fast instead of waiting for Google's 125 second gateway timeout, so the next key is tried sooner.
+    signal: AbortSignal.timeout(body === undefined ? 20_000 : 80_000),
   });
   const text = await response.text();
   let payload: any = {};
@@ -171,6 +174,7 @@ async function generateWithKey(
 ): Promise<{ text: string; model: string }> {
   const failures: string[] = [];
   let rateLimited: GeminiError | null = null;
+  let timedOut = false;
 
   // Models that cannot keep thinking low are tried last, with their default (slow) thinking.
   const queue = (await candidateModels(key)).map((model) => ({ model, slow: false }));
@@ -220,7 +224,12 @@ async function generateWithKey(
         return { text, model };
       } catch (error) {
         logAttempt(error instanceof GeminiError ? error.status : "network");
-        if (!(error instanceof GeminiError)) throw error;
+        if (!(error instanceof GeminiError)) {
+          // Timeout or network trouble with this key: try the next model, then the next key.
+          failures.push(`${model}: timed out`);
+          timedOut = true;
+          break;
+        }
         const message = error.message.toLowerCase();
         if (error.status === 401 || error.status === 403 || (error.status === 400 && message.includes("api key"))) {
           throw error; // A bad key fails the same way for every model.
@@ -269,6 +278,9 @@ async function generateWithKey(
     }
   }
   if (rateLimited) throw rateLimited;
+  if (timedOut || failures.some((f) => f.includes("busy"))) {
+    throw new GeminiError(503, `Gemini is busy on this key (${failures.slice(0, 4).join("; ")})`);
+  }
   throw new UserFacingError(
     "No Gemini model could handle this request with the configured API key. " +
       "Check that the key is valid and has quota in Google AI Studio, or add a backup key." +
@@ -292,10 +304,10 @@ async function generate(
     try {
       return await generateWithKey(key, parts, options);
     } catch (error) {
-      if (error instanceof GeminiError && error.status === 429) {
+      if (error instanceof GeminiError && (error.status === 429 || error.status === 503)) {
         lastRateLimit = error;
-        const daily = /per day|daily|rpd/i.test(error.message);
-        keyCooldownUntil.set(keyId(key), Date.now() + (daily ? 12 * 3600_000 : 60_000));
+        const daily = error.status === 429 && /per day|daily|rpd/i.test(error.message);
+        keyCooldownUntil.set(keyId(key), Date.now() + (daily ? 12 * 3600_000 : error.status === 503 ? 20_000 : 60_000));
         continue;
       }
       if (error instanceof GeminiError) throw new UserFacingError(error.message);
