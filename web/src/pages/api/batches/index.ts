@@ -58,6 +58,6 @@ export const POST: APIRoute = handler(async (context) => {
   )
     .bind(id, user.id, folderId, folder.name.slice(0, 300), config.folderUrl, mode, language, config.total, config.createdAt)
     .run();
-  await env.BATCH_RUNNER.getByName(id).start(config, folder.files.map((f) => ({ id: f.id, path: f.path, name: f.name })));
+  await env.BATCH_RUNNER.getByName(id, { locationHint: "enam" }).start(config, folder.files.map((f) => ({ id: f.id, path: f.path, name: f.name })));
   return json({ id, folderName: folder.name, total: folder.files.length, listedWith: folder.method });
 });
