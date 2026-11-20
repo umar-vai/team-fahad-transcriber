@@ -9,6 +9,7 @@
     </div>
     <div class="row">
       <button class="btn ghost small" id="copy-btn" type="button">Copy text</button>
+      <button class="btn ghost small" id="copy-timed-btn" type="button">Copy with timestamps</button>
       <a class="btn ghost small hidden" id="history-link" href="/history">Saved in history</a>
     </div>
   </div>
@@ -24,6 +25,10 @@
     <div class="transcript" id="transcript-view"></div>
   </div>
   <div data-panel="subs" class="hidden">
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn ghost small" data-copy-kind="plain" type="button">Copy text</button>
+      <button class="btn ghost small" data-copy-kind="timed" type="button">Copy with timestamps</button>
+    </div>
     <div class="segments" id="segments-view"></div>
   </div>
   <div data-panel="ai" class="hidden stack">

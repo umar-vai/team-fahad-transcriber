@@ -30,6 +30,11 @@ function speakerClass(name: string | null | undefined, order: Map<string, number
   return `spk spk-${order.get(name)! % 5}`;
 }
 
+/** Transcript with a [mm:ss] stamp (and speaker) per line; falls back to plain text when there are no segments. */
+function timedText(result: Result): string {
+  return speakerTranscript(result.segments) || result.transcript;
+}
+
 function renderTranscript(query = ""): void {
   if (!current) return;
   const view = $("transcript-view");
@@ -190,10 +195,25 @@ export function initResults(): void {
   document.querySelectorAll<HTMLButtonElement>("#results [data-ai]").forEach((b) => b.addEventListener("click", () => runAi(b.dataset.ai!, b)));
   document.querySelectorAll<HTMLButtonElement>("#results [data-dl]").forEach((b) => b.addEventListener("click", () => downloadAs(b.dataset.dl!)));
   $("find").addEventListener("input", (e: Event) => renderTranscript((e.target as HTMLInputElement).value));
-  $("copy-btn").addEventListener("click", async () => {
-    if (!current) return;
-    await navigator.clipboard.writeText(current.transcript);
-    $("copy-btn").textContent = "Copied";
-    setTimeout(() => ($("copy-btn").textContent = "Copy text"), 1500);
-  });
+  const copyButtons: [HTMLElement, "plain" | "timed"][] = [
+    [$("copy-btn"), "plain"],
+    [$("copy-timed-btn"), "timed"],
+    ...Array.from(document.querySelectorAll<HTMLElement>("#results [data-copy-kind]")).map(
+      (b): [HTMLElement, "plain" | "timed"] => [b, b.dataset.copyKind as "plain" | "timed"],
+    ),
+  ];
+  for (const [button, kind] of copyButtons) {
+    const label = button.textContent;
+    button.addEventListener("click", async () => {
+      if (!current) return;
+      const text = kind === "timed" ? timedText(current) : current.transcript;
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = "Copy failed";
+      }
+      setTimeout(() => (button.textContent = label), 1500);
+    });
+  }
 }
