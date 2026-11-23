@@ -1,0 +1,12 @@
+{
+  "name": "team-fahad-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Watches a folder on a PC, transcribes new audio files through transcribe.abdullahfahad.com and adds them to the team sheet.",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=22" }
+}

@@ -1,0 +1,53 @@
+/**
+ * Team Fahad Bridge. Started once per PC (at sign-in). It restarts itself if it ever crashes.
+ *   node src/index.js          run (the first process supervises a worker process)
+ *   node src/index.js --open   also open the setup page in the browser
+ */
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { Api } from "./api.js";
+import { Bridge } from "./bridge.js";
+import { log } from "./log.js";
+import { VERSION } from "./paths.js";
+import { Store } from "./store.js";
+import { UI_PORT, startUi } from "./ui.js";
+
+const self = fileURLToPath(import.meta.url);
+
+function supervise() {
+  const start = () => {
+    const child = spawn(process.execPath, [self, "--worker", ...process.argv.slice(2).filter((a) => a !== "--worker")], { stdio: "inherit", windowsHide: true });
+    child.on("exit", (code) => {
+      if (code === 0) return process.exit(0);
+      log(`The bridge stopped (code ${code}). Starting it again in 5 seconds.`);
+      setTimeout(start, 5000);
+    });
+  };
+  start();
+}
+
+async function work() {
+  const store = new Store();
+  const api = new Api(store, VERSION);
+  const bridge = new Bridge(store, api);
+  try {
+    await startUi(bridge, store);
+  } catch (error) {
+    if (error.code === "EADDRINUSE") {
+      log("The bridge is already running on this PC.");
+      process.exit(0);
+    }
+    throw error;
+  }
+  log(`Team Fahad Bridge ${VERSION} started. Setup page: http://127.0.0.1:${UI_PORT}`);
+  if (process.argv.includes("--open") || !store.paired || !store.config.folder) {
+    const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", `http://127.0.0.1:${UI_PORT}`]] : null;
+    if (opener) spawn(opener[0], opener[1], { stdio: "ignore", windowsHide: true, detached: true }).unref();
+  }
+  process.on("uncaughtException", (error) => log(`Unexpected problem: ${error?.stack || error}`));
+  process.on("unhandledRejection", (error) => log(`Unexpected problem: ${error?.stack || error}`));
+  await bridge.loop();
+}
+
+if (process.argv.includes("--worker") || process.env.BRIDGE_NO_SUPERVISOR) await work();
+else supervise();

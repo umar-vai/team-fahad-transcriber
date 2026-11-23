@@ -11,12 +11,37 @@ const problem = Astro.url.searchParams.get("error") || "";
 <Base title="Auto · Team Fahad Transcriber">
   <div class="page-head">
     <div>
-      <h1>Nightly Drive automation</h1>
-      <p class="muted" style="margin:0">Every night at 11:50 PM (Bangladesh time) the new files of every computer under Drive "Computers" are transcribed and added to Notion and Google Sheets, one page and one tab per computer, by date.</p>
+      <h1>Automatic transcription</h1>
+      <p class="muted" style="margin:0">Bridge PCs transcribe new files live. Every night at 11:50 PM (Bangladesh time) the new files of every computer under Drive "Computers" are also transcribed and added to Notion and Google Sheets, one page and one tab per computer, by date.</p>
     </div>
   </div>
   {notice ? <div class="card" style="border-color:var(--good)">{notice}</div> : null}
   {problem ? <div class="card" style="border-color:var(--bad,#c33)">{problem}</div> : null}
+
+  <div class="card" id="bridge">
+    <div class="section-head" style="margin-top:0">
+      <h2 style="margin:0">Bridge PCs (live)</h2>
+      <span class="muted small-text">The bridge app on each PC transcribes new files as soon as they arrive.</span>
+    </div>
+    <div class="pc-grid" id="bridgePcs"><p class="muted" style="margin:0">Loading…</p></div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px;align-items:flex-end">
+      <label>New PC name
+        <input id="bridgeName" type="text" maxlength="60" placeholder="PC-03" />
+      </label>
+      <button class="btn" id="bridgeAdd" type="button">Get pairing code</button>
+      <label>Output style
+        <select id="bridgeMode">
+          {Object.entries(BATCH_MODES).map(([value, label]) => <option value={value}>{label}</option>)}
+        </select>
+      </label>
+      <label>Language
+        <select id="bridgeLanguage">
+          {Object.keys(LANGUAGES).map((name) => <option value={name}>{name}</option>)}
+        </select>
+      </label>
+    </div>
+    <p class="muted" id="bridgeResult" style="margin-bottom:0"></p>
+  </div>
 
   <div class="card" id="connection">
     <p class="muted" style="margin:0">Loading…</p>
@@ -201,6 +226,77 @@ const problem = Astro.url.searchParams.get("error") || "";
     pc = (e.target as HTMLSelectElement).value;
     renderJobs();
   });
+  // ---------- Bridge PCs ----------
+  async function bridgeApi(method: string, query = "", body?: unknown) {
+    const response = await fetch(`/api/bridge/devices${query}`, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const data: any = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Something went wrong.");
+    return data;
+  }
+  const ago = (ms: number | null) => {
+    if (!ms) return "never";
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    return s < 90 ? "just now" : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`;
+  };
+  function renderBridge(data: any) {
+    ($("bridgeMode") as unknown as HTMLSelectElement).value = data.settings.mode;
+    ($("bridgeLanguage") as unknown as HTMLSelectElement).value = data.settings.language;
+    const devices: any[] = data.devices || [];
+    $("bridgePcs").innerHTML = devices.length
+      ? devices.map((d) => {
+          const online = d.last_seen_at && Date.now() - d.last_seen_at < 150_000;
+          const state = !online ? `<span class="pill bad">Offline</span>`
+            : d.current_file ? `<span class="pill work">Transcribing</span>`
+            : d.queue_size ? `<span class="pill warn">${num(d.queue_size)} waiting</span>`
+            : `<span class="pill good">Online</span>`;
+          return `<div class="pc-card">
+            <div class="pc-head"><strong>${esc(d.name)}</strong>${state}</div>
+            <div class="pc-big"><b>${num(d.done_today)}</b><span> transcribed today</span></div>
+            <div class="pc-nums">
+              <span><b>${num(d.done)}</b>total</span>
+              <span><b>${num(d.queue_size)}</b>waiting</span>
+              <span class="${d.failed ? "bad" : ""}"><b>${num(d.failed)}</b>failed</span>
+            </div>
+            ${d.current_file ? `<div class="muted small-text">Now: ${esc(d.current_file)}</div>` : ""}
+            ${d.last_error ? `<div class="small-text bad-text">${esc(d.last_error)}</div>` : ""}
+            <div class="muted small-text">Seen ${ago(d.last_seen_at)}${d.version ? ` · v${esc(d.version)}` : ""}</div>
+            ${d.watch_folder ? `<div class="muted small-text">Folder: ${esc(d.watch_folder)}</div>` : ""}
+            <div class="links">
+              ${d.sheet_url ? `<a class="btn ghost small" href="${esc(d.sheet_url)}" target="_blank" rel="noopener">Sheet tab</a>` : ""}
+              <button class="btn ghost small" type="button" data-remove="${esc(d.id)}" data-name="${esc(d.name)}">Remove</button>
+            </div>
+          </div>`;
+        }).join("")
+      : `<p class="muted" style="margin:0">No PC is connected yet. Type a name below, press "Get pairing code", then enter the code in the bridge app on that PC.</p>`;
+  }
+  const loadBridge = () => bridgeApi("GET").then(renderBridge).catch((e) => ($("bridgeResult").textContent = e.message));
+  $("bridgeAdd").addEventListener("click", async () => {
+    const name = ($("bridgeName") as HTMLInputElement).value;
+    try {
+      const { code, expiresAt } = await bridgeApi("POST", "", { name });
+      const shown = `${code.slice(0, 4)}-${code.slice(4)}`;
+      $("bridgeResult").innerHTML = `Pairing code for <b>${esc(name)}</b>: <b style="font-size:1.4em;letter-spacing:.1em">${shown}</b>. Enter it in the bridge app within ${Math.round((expiresAt - Date.now()) / 60000)} minutes. It works once.`;
+      ($("bridgeName") as HTMLInputElement).value = "";
+    } catch (error) {
+      $("bridgeResult").textContent = (error as Error).message;
+    }
+  });
+  $("bridgeMode").addEventListener("change", (e) => bridgeApi("PATCH", "", { mode: (e.target as HTMLSelectElement).value }).catch((x) => ($("bridgeResult").textContent = x.message)));
+  $("bridgeLanguage").addEventListener("change", (e) => bridgeApi("PATCH", "", { language: (e.target as HTMLSelectElement).value }).catch((x) => ($("bridgeResult").textContent = x.message)));
+  $("bridgePcs").addEventListener("click", async (e) => {
+    const button = (e.target as HTMLElement).closest("button[data-remove]") as HTMLElement | null;
+    if (!button || !confirm(`Remove ${button.dataset.name}? The PC stops sending files until it is paired again. Its transcripts stay.`)) return;
+    await bridgeApi("DELETE", `?id=${encodeURIComponent(button.dataset.remove || "")}`).catch((x) => ($("bridgeResult").textContent = x.message));
+    await loadBridge();
+  });
+  loadBridge();
+  // Live status: only while the page is open and visible.
+  setInterval(() => { if (!document.hidden) loadBridge(); }, 20_000);
+
   async function load(check = false) {
     const data = await api("GET", check ? "?check=1" : "");
     render(data);
