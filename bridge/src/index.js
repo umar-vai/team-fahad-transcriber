@@ -1,7 +1,6 @@
 /**
  * Team Fahad Bridge. Started once per PC (at sign-in). It restarts itself if it ever crashes.
  *   node src/index.js          run (the first process supervises a worker process)
- *   node src/index.js --open   also open the setup page in the browser
  */
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -40,10 +39,6 @@ async function work() {
     throw error;
   }
   log(`Team Fahad Bridge ${VERSION} started. Setup page: http://127.0.0.1:${UI_PORT}`);
-  if (process.argv.includes("--open") || !store.paired || !store.config.folder) {
-    const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", `http://127.0.0.1:${UI_PORT}`]] : null;
-    if (opener) spawn(opener[0], opener[1], { stdio: "ignore", windowsHide: true, detached: true }).unref();
-  }
   process.on("uncaughtException", (error) => log(`Unexpected problem: ${error?.stack || error}`));
   process.on("unhandledRejection", (error) => log(`Unexpected problem: ${error?.stack || error}`));
   await bridge.loop();
