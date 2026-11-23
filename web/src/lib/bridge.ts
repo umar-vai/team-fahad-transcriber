@@ -14,6 +14,9 @@ import type { BatchMode } from "../batch/runner";
 
 export const PAIRING_MINUTES = 15;
 const MODE_LABELS: Record<string, string> = { smart: "Smart clean", detailed: "Subtitles (timed)" };
+/** Output styles a person who signed in with Google can pick for their own PC. */
+export const PERSONAL_MODES: Record<string, string> = { smart: "Smart clean transcript", detailed: "Subtitles + speakers (timed)", verbatim: "Exact verbatim transcript" };
+export const LOGIN_MINUTES = 10;
 const MAX_PIECES = 400;
 const MAX_TRANSCRIPT_CHARS = 2_000_000;
 
@@ -29,6 +32,12 @@ export interface BridgeDevice {
   queue_size: number;
   current_file: string | null;
   last_error: string | null;
+  linked_computer_id?: string | null;
+  /** team = a named PC of the team; personal = one person who signed in with Google. */
+  kind: "team" | "personal";
+  mode: string | null;
+  language: string | null;
+  sheet_enabled: number;
 }
 
 export async function sha256(value: string): Promise<string> {
@@ -55,6 +64,98 @@ export const normalizeCode = (code: string) => String(code || "").toUpperCase().
 export async function bridgeSettings(): Promise<{ mode: BatchMode; language: string }> {
   const row = await env.DB.prepare("SELECT mode, language FROM bridge_settings WHERE id = 1").first<{ mode: BatchMode; language: string }>();
   return row || { mode: "smart", language: "Bangla (Bangladesh)" };
+}
+
+/** The style and language this PC uses: the shared team setting, or the person's own choice on a personal PC. */
+export async function settingsFor(device: BridgeDevice): Promise<{ mode: string; language: string }> {
+  const shared = await bridgeSettings();
+  if (device.kind !== "personal") return shared;
+  return {
+    mode: device.mode && PERSONAL_MODES[device.mode] ? device.mode : "smart",
+    language: device.language && LANGUAGES[device.language] ? device.language : shared.language,
+  };
+}
+
+/** What the app shows in its settings: choices only exist for what this kind of PC may change. */
+export async function deviceView(device: BridgeDevice) {
+  const account = device.kind === "personal" ? await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(device.user_id).first<{ email: string }>() : null;
+  return {
+    kind: device.kind,
+    account: account?.email || null,
+    sheetEnabled: device.kind === "team" && Boolean(device.sheet_enabled),
+    settings: await settingsFor(device),
+    choices: device.kind === "personal" ? { modes: PERSONAL_MODES, languages: Object.keys(LANGUAGES) } : null,
+  };
+}
+
+/** The app changes its own settings: the sheet switch (team PC) or style and language (personal PC). */
+export async function saveDevicePrefs(device: BridgeDevice, patch: { sheet?: unknown; mode?: unknown; language?: unknown }): Promise<void> {
+  if (patch.sheet !== undefined && device.kind === "team") {
+    await env.DB.prepare("UPDATE bridge_devices SET sheet_enabled = ? WHERE id = ?").bind(patch.sheet ? 1 : 0, device.id).run();
+  }
+  if (device.kind === "personal") {
+    if (patch.mode !== undefined) {
+      if (!PERSONAL_MODES[String(patch.mode)]) throw new HttpError(400, "Choose one of the output styles in the list.");
+      await env.DB.prepare("UPDATE bridge_devices SET mode = ? WHERE id = ?").bind(String(patch.mode), device.id).run();
+    }
+    if (patch.language !== undefined) {
+      if (!LANGUAGES[String(patch.language)]) throw new HttpError(400, "Unknown language.");
+      await env.DB.prepare("UPDATE bridge_devices SET language = ? WHERE id = ?").bind(String(patch.language), device.id).run();
+    }
+  }
+}
+
+/** The app is reset: a personal PC removes itself (a team PC stays on the website so it can be linked again). */
+export async function leaveDevice(device: BridgeDevice): Promise<void> {
+  if (device.kind === "personal") await env.DB.prepare("DELETE FROM bridge_devices WHERE id = ?").bind(device.id).run();
+}
+
+// ---------- Sign in with Google from the app ----------
+
+const loginCode = () => pairingCode();
+
+/** The app asks to be approved. It keeps the secret requestId; the person sees only the short code. */
+export async function startLogin(rawName: string): Promise<{ requestId: string; userCode: string; expiresAt: number }> {
+  const name = String(rawName || "").trim().slice(0, 60) || "My PC";
+  const now = Date.now();
+  await env.DB.prepare("DELETE FROM bridge_login WHERE expires_at < ?").bind(now).run();
+  const requestId = randomToken(24);
+  const userCode = loginCode();
+  const expiresAt = now + LOGIN_MINUTES * 60_000;
+  await env.DB.prepare("INSERT INTO bridge_login (id_hash, user_code, name, expires_at) VALUES (?, ?, ?, ?)").bind(await sha256(requestId), userCode, name, expiresAt).run();
+  return { requestId, userCode, expiresAt };
+}
+
+export async function loginRequestInfo(rawCode: string): Promise<{ name: string; expiresAt: number } | null> {
+  const row = await env.DB.prepare("SELECT name, expires_at FROM bridge_login WHERE user_code = ? AND expires_at >= ?").bind(normalizeCode(rawCode), Date.now()).first<{ name: string; expires_at: number }>();
+  return row ? { name: row.name, expiresAt: row.expires_at } : null;
+}
+
+/** A signed-in person allows the computer that shows this code. */
+export async function approveLogin(userId: string, rawCode: string): Promise<{ name: string }> {
+  const code = normalizeCode(rawCode);
+  const row = await env.DB.prepare("UPDATE bridge_login SET user_id = ? WHERE user_code = ? AND expires_at >= ? AND user_id IS NULL RETURNING name").bind(userId, code, Date.now()).first<{ name: string }>();
+  if (!row) throw new HttpError(400, "This code is wrong, was already used or has expired. Press the Google button in the app again.");
+  return { name: row.name };
+}
+
+/** The app asks whether it was approved. On approval it receives its token once. */
+export async function pollLogin(requestId: string): Promise<{ pending: true } | { token: string; deviceId: string; name: string; account: string | null }> {
+  const hash = await sha256(String(requestId || ""));
+  const row = await env.DB.prepare("SELECT name, expires_at, user_id FROM bridge_login WHERE id_hash = ?").bind(hash).first<{ name: string; expires_at: number; user_id: string | null }>();
+  if (!row || row.expires_at < Date.now()) throw new HttpError(410, "The approval time ran out. Press the Google button again.");
+  if (!row.user_id) return { pending: true };
+  // Deleting first makes the token single use even if two polls race.
+  const claimed = await env.DB.prepare("DELETE FROM bridge_login WHERE id_hash = ? RETURNING user_id").bind(hash).first<{ user_id: string }>();
+  if (!claimed) throw new HttpError(410, "This request was already used. Press the Google button again.");
+  const token = randomToken(32);
+  const deviceId = crypto.randomUUID();
+  const now = Date.now();
+  await env.DB.prepare("INSERT INTO bridge_devices (id, user_id, name, token_hash, created_at, last_seen_at, kind, sheet_enabled) VALUES (?, ?, ?, ?, ?, ?, 'personal', 0)")
+    .bind(deviceId, claimed.user_id, row.name, await sha256(token), now, now)
+    .run();
+  const user = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(claimed.user_id).first<{ email: string }>();
+  return { token, deviceId, name: row.name, account: user?.email || null };
 }
 
 export async function saveBridgeSettings(patch: { mode?: string; language?: string }): Promise<void> {
@@ -148,7 +249,7 @@ export interface LinkChoice {
 /** Every computer a new PC can take over: earlier bridge PCs and Drive computers that no bridge PC has taken yet. */
 export async function linkChoices(pin: string): Promise<LinkChoice[]> {
   await checkLinkPin(pin);
-  const devices = await env.DB.prepare("SELECT id, name FROM bridge_devices").all<{ id: string; name: string }>();
+  const devices = await env.DB.prepare("SELECT id, name FROM bridge_devices WHERE kind = 'team'").all<{ id: string; name: string }>();
   const computers = await env.DB.prepare("SELECT folder_id, name FROM drive_computers WHERE folder_id NOT IN (SELECT linked_computer_id FROM bridge_devices WHERE linked_computer_id IS NOT NULL)").all<{ folder_id: string; name: string }>();
   const taken = new Set(devices.results.map((d) => d.name.toLowerCase()));
   return [
@@ -280,7 +381,8 @@ async function claimRow(device: BridgeDevice, info: FileInfo, status: "done" | "
 }
 
 async function writeSheetRow(device: BridgeDevice, info: FileInfo, file: FileRow & { replacedFailed: boolean }, row: Parameters<typeof sheetRow>[0]): Promise<void> {
-  const tab = await deviceSheet(device);
+  // Personal PCs never use the team sheet, and a team PC can switch it off in the app.
+  const tab = device.kind === "personal" || !device.sheet_enabled ? null : await deviceSheet(device);
   if (tab) {
     const cells = sheetRow(row);
     const replaced = file.replacedFailed ? await replaceFailedRow(tab, file.row_no, cells, row.date).catch(() => false) : false;
@@ -305,7 +407,7 @@ export async function completeFile(device: BridgeDevice, rawBody: any): Promise<
     segments: Array.isArray(p?.segments) ? p.segments : [],
   }));
   if (!pieces.length) throw new HttpError(400, "No transcript pieces were sent.");
-  const settings = await bridgeSettings();
+  const settings = await settingsFor(device);
   const detailed = settings.mode === "detailed";
   const merged = mergePieces(pieces, detailed);
   const day = fileDay(info);
@@ -334,7 +436,7 @@ export async function completeFile(device: BridgeDevice, rawBody: any): Promise<
     index: file.row_no,
     title: info.name,
     duration: duration ? clock(duration) : "",
-    style: MODE_LABELS[settings.mode],
+    style: (MODE_LABELS[settings.mode] || PERSONAL_MODES[settings.mode] || settings.mode),
     status: "Done",
     words,
     driveUrl: device.name,
@@ -349,14 +451,14 @@ export async function completeFile(device: BridgeDevice, rawBody: any): Promise<
 export async function failFile(device: BridgeDevice, rawBody: any, duration = 0): Promise<{ ok: true }> {
   const info = readFileInfo(rawBody);
   const error = String(rawBody?.error || "Could not transcribe this file.").slice(0, 400);
-  const settings = await bridgeSettings();
+  const settings = await settingsFor(device);
   const file = await claimRow(device, info, "failed", { error });
   if (file.sheet_done) return { ok: true };
   await writeSheetRow(device, info, file, {
     index: file.row_no,
     title: info.name,
     duration: duration ? clock(duration) : "",
-    style: MODE_LABELS[settings.mode],
+    style: (MODE_LABELS[settings.mode] || PERSONAL_MODES[settings.mode] || settings.mode),
     status: "Failed",
     words: 0,
     driveUrl: device.name,

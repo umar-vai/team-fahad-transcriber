@@ -25,6 +25,8 @@ export class Bridge {
     this.nextTry = new Map();
     this.lastBeat = 0;
     this.settings = null;
+    /** What the website says about this PC: kind (team | personal), account, sheetEnabled, settings, choices. */
+    this.remote = null;
     this.stopped = false;
     this.wake = null;
   }
@@ -71,6 +73,7 @@ export class Bridge {
     try {
       const info = await this.api.heartbeat({ folder: this.store.config.folder, queue: this.status.queue, current: this.status.current, error: this.status.lastError });
       this.settings = info.settings;
+      this.remote = { kind: info.kind, account: info.account, sheetEnabled: info.sheetEnabled, settings: info.settings, choices: info.choices };
       this.status.online = true;
       this.status.needsPairing = false;
     } catch (error) {

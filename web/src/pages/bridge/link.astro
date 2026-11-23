@@ -1,0 +1,54 @@
+---
+import Base from "../../layouts/Base.astro";
+
+const code = (Astro.url.searchParams.get("code") || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+if (!Astro.locals.user) return Astro.redirect(`/login?next=${encodeURIComponent(`/bridge/link?code=${code}`)}`);
+const email = Astro.locals.user.email;
+const shown = code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : "";
+---
+<Base title="Allow a computer · Team Fahad Transcriber">
+  <div class="card stack" style="max-width:520px;margin:24px auto" id="box" data-code={code}>
+    <h1 style="margin:0">Allow this computer?</h1>
+    {shown ? (
+      <>
+        <p class="muted" style="margin:0">The Team Fahad Bridge app on a computer is asking to send its transcripts to <b>{email}</b>. Check that the code below is the same as in the app window.</p>
+        <p style="font-size:2rem;letter-spacing:.15em;font-weight:700;margin:0" id="shown">{shown}</p>
+        <p class="muted" id="who" style="margin:0">Looking up the computer…</p>
+        <button class="btn" id="allow" type="button" disabled>Allow this computer</button>
+      </>
+    ) : (
+      <p class="notice error">This link has no code. Press "Connect with Google" in the app again.</p>
+    )}
+    <p class="muted" id="result" style="margin:0"></p>
+  </div>
+</Base>
+<script>
+  const box = document.getElementById("box") as HTMLElement;
+  const code = box.dataset.code || "";
+  const who = document.getElementById("who");
+  const allow = document.getElementById("allow") as HTMLButtonElement | null;
+  const result = document.getElementById("result") as HTMLElement;
+  async function call(body: unknown) {
+    const response = await fetch("/api/bridge/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const data: any = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Something went wrong.");
+    return data;
+  }
+  if (code && who && allow) {
+    call({ action: "info", code }).then(({ request }) => {
+      if (!request) { who.textContent = "This code is wrong or has expired. Press the Google button in the app again."; return; }
+      who.textContent = `Computer: ${request.name}`;
+      allow.disabled = false;
+    }).catch((e) => (who.textContent = e.message));
+    allow.addEventListener("click", async () => {
+      allow.disabled = true;
+      try {
+        await call({ action: "approve", code });
+        result.textContent = "Done. You can close this page. The app is now connected to your account.";
+      } catch (e) {
+        result.textContent = (e as Error).message;
+        allow.disabled = false;
+      }
+    });
+  }
+</script>

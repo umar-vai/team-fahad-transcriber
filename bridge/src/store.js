@@ -27,6 +27,9 @@ export class Store {
       server: "https://transcribe.abdullahfahad.com",
       token: "",
       deviceName: "",
+      /** team = a named PC of the team, personal = one person signed in with Google. */
+      deviceKind: "",
+      account: "",
       folder: "",
       /** Only files that arrived after this time are transcribed (0 = also the files already in the folder). */
       watchSince: 0,

@@ -14,7 +14,7 @@ export const GET: APIRoute = handler(async (context) => {
        (SELECT COUNT(*) FROM bridge_files f WHERE f.device_id = d.id AND f.status = 'failed') AS failed,
        (SELECT COUNT(*) FROM bridge_files f WHERE f.device_id = d.id AND f.status = 'done' AND f.file_day = ?1) AS done_today,
        d.sheet_json
-       FROM bridge_devices d ORDER BY d.name COLLATE NOCASE`,
+       FROM bridge_devices d WHERE d.kind = 'team' ORDER BY d.name COLLATE NOCASE`,
   )
     .bind(today)
     .all<any>();

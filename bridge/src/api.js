@@ -59,6 +59,25 @@ export class Api {
     return this.call("/api/bridge/link", { auth: false, headers: { "content-type": "application/json" }, body: JSON.stringify({ pin, key }) });
   }
 
+  /** "Sign in with Google": ask for an approval request, then wait until the person allows it on the website. */
+  loginStart(name) {
+    return this.call("/api/bridge/login", { auth: false, headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "start", name }) });
+  }
+
+  loginPoll(requestId) {
+    return this.call("/api/bridge/login", { auth: false, headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "poll", requestId }), timeoutMs: 20_000 });
+  }
+
+  /** Change this PC's own settings on the website (sheet switch, or style and language of a personal PC). */
+  prefs(patch) {
+    return this.call("/api/bridge/prefs", { headers: { "content-type": "application/json" }, body: JSON.stringify(patch), timeoutMs: 20_000 });
+  }
+
+  /** This app is reset: a personal PC removes itself from the website. */
+  leave() {
+    return this.call("/api/bridge/prefs", { method: "DELETE", timeoutMs: 15_000 });
+  }
+
   heartbeat(info) {
     return this.call("/api/bridge/heartbeat", { headers: { "content-type": "application/json" }, body: JSON.stringify({ version: this.version, ...info }), timeoutMs: 30_000 });
   }

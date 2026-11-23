@@ -92,6 +92,17 @@ function fakeSite({ down = false } = {}) {
       if (pin !== "team-pin") return reply(403, { error: "The PIN is wrong." });
       return key ? reply(200, { token: "a".repeat(64), deviceId: "d9", name: "Hasan" }) : reply(200, { computers: [{ key: "computer:f1", name: "Hasan" }] });
     }
+    if (req.url === "/api/bridge/login") {
+      const b = JSON.parse(body.toString());
+      if (b.action === "start") return reply(200, { requestId: "r".repeat(48), userCode: "ABCD2345", expiresAt: Date.now() + 600000 });
+      state.polls = (state.polls || 0) + 1;
+      return state.polls < 2 ? reply(200, { pending: true }) : reply(200, { token: "a".repeat(64), deviceId: "p1", name: "OFFICE", account: "me@example.com" });
+    }
+    if (req.url === "/api/bridge/prefs") {
+      if (req.method === "DELETE") return reply(200, { ok: true });
+      const patch = JSON.parse(body.toString());
+      return reply(200, { ok: true, kind: "personal", account: "me@example.com", sheetEnabled: false, settings: { mode: patch.mode || "smart", language: "Bangla (Bangladesh)" }, choices: { modes: { smart: "Smart" }, languages: ["Hindi"] } });
+    }
     if (state.reject401 && req.url !== "/api/bridge/pair") return reply(401, { error: "This PC was removed." });
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/api/bridge/pair") {
@@ -323,5 +334,46 @@ test("the app sees a newer version, downloads it, checks it and runs the install
     assert.deepEqual(fs.readFileSync(launched[0]), installer);
   } finally {
     server.close();
+  }
+});
+
+test("Google sign-in from the app, own settings, then reset keeps the folder and finished files", async () => {
+  const site = await fakeSite();
+  const dir = tmp();
+  const store = new Store(path.join(dir, "data"));
+  store.saveConfig({ server: site.url, folder: dir });
+  store.ledger["x.mp3"] = { state: "done" };
+  const api = new Api(store, "test");
+  const bridge = new Bridge(store, api, { processor: new Processor(api), watcher: new Watcher(store, { stableMs: 0 }) });
+  const port = 47900 + Math.floor(Math.random() * 90);
+  const opened = [];
+  const ui = await startUi(bridge, store, { port, openUrl: (u) => opened.push(u) });
+  const post = async (route, body) => (await fetch(`http://127.0.0.1:${port}${route}`, { method: "POST", headers: { "content-type": "application/json", "x-bridge": "1" }, body: JSON.stringify(body || {}) })).json();
+  try {
+    const started = await post("/api/login-start");
+    assert.equal(started.userCode, "ABCD-2345");
+    assert.deepEqual(opened, [`${site.url}/bridge/link?code=ABCD2345`]);
+    assert.equal((await post("/api/login-poll")).state, "pending");
+    assert.equal(store.paired, false);
+    assert.equal((await post("/api/login-poll")).state, "done");
+    assert.equal(store.paired, true);
+    assert.equal(store.config.deviceKind, "personal");
+    assert.equal(store.config.account, "me@example.com");
+
+    await post("/api/prefs", { mode: "detailed" });
+    const status = await (await fetch(`http://127.0.0.1:${port}/api/status`)).json();
+    assert.equal(status.kind, "personal");
+    assert.equal(status.settings.mode, "detailed");
+    assert.equal(status.sheetEnabled, false);
+
+    if (process.platform !== "win32") assert.match((await post("/api/browse")).error, /Windows only/);
+    await post("/api/reset");
+    assert.equal(store.paired, false);
+    assert.equal(store.config.folder, dir, "the folder stays");
+    assert.deepEqual(Object.keys(store.ledger), ["x.mp3"], "finished files stay");
+    assert.equal((await post("/api/login-poll")).state, "none");
+  } finally {
+    ui.close();
+    site.server.close();
   }
 });

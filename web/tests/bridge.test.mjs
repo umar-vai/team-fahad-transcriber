@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { env } from "./stubs/cloudflare-workers.mjs";
-import { authDevice, completeFile, createPairingCode, failFile, knownFingerprints, linkChoices, linkDevice, normalizeCode, redeemPairingCode, setLinkPin } from "../src/lib/bridge.ts";
+import { approveLogin, authDevice, completeFile, deviceView, leaveDevice, loginRequestInfo, pollLogin, saveDevicePrefs, settingsFor, startLogin, createPairingCode, failFile, knownFingerprints, linkChoices, linkDevice, normalizeCode, redeemPairingCode, setLinkPin } from "../src/lib/bridge.ts";
 
 /** A tiny D1 look-alike on node:sqlite. */
 function fakeD1() {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys = ON");
-  for (const file of ["0001_init", "0003_auto_drive", "0006_bridge", "0007_bridge_link"]) db.exec(readFileSync(new URL(`../migrations/${file}.sql`, import.meta.url), "utf8"));
+  for (const file of ["0001_init", "0003_auto_drive", "0006_bridge", "0007_bridge_link", "0008_bridge_personal"]) db.exec(readFileSync(new URL(`../migrations/${file}.sql`, import.meta.url), "utf8"));
   const wrap = (sql, args = []) => ({
     bind: (...values) => wrap(sql, values),
     run: async () => ({ meta: { changes: Number(db.prepare(sql).run(...args).changes) } }),
@@ -195,4 +195,61 @@ test("too many wrong PINs lock the list for a while", async () => {
   await assert.rejects(() => linkChoices("team-pin"), /Too many/);
   d1.db.prepare("UPDATE bridge_settings SET link_locked_until = 1").run();
   assert.deepEqual(await linkChoices("team-pin"), []);
+});
+
+test("a person signs in with Google from the app: approval on the website, own account, own settings, no team sheet", async () => {
+  const d1 = setup();
+  await setLinkPin("u1", "team-pin");
+  const { requestId, userCode } = await startLogin("Office laptop");
+  assert.deepEqual(await pollLogin(requestId), { pending: true });
+  assert.equal((await loginRequestInfo(userCode)).name, "Office laptop");
+
+  await approveLogin("u1", `${userCode.slice(0, 4)}-${userCode.slice(4).toLowerCase()}`);
+  await assert.rejects(() => approveLogin("u1", userCode), /already used/);
+  const done = await pollLogin(requestId);
+  assert.equal(done.account, "a@b.c");
+  await assert.rejects(() => pollLogin(requestId), /ran out|already used/);
+
+  const device = await authDevice(new Request("https://x", { headers: { authorization: `Bearer ${done.token}` } }));
+  assert.equal(device.kind, "personal");
+  assert.equal(device.user_id, "u1");
+  // Personal PCs are not on the list of team computers.
+  assert.deepEqual(await linkChoices("team-pin"), []);
+
+  // Own style and language, from a fixed list.
+  assert.deepEqual(await settingsFor(device), { mode: "smart", language: "Bangla (Bangladesh)" });
+  await assert.rejects(() => saveDevicePrefs(device, { mode: "shayari" }), /Choose one/);
+  await saveDevicePrefs(device, { mode: "verbatim", language: "English (US)" });
+  const fresh = await authDevice(new Request("https://x", { headers: { authorization: `Bearer ${done.token}` } }));
+  const view = await deviceView(fresh);
+  assert.deepEqual(view.settings, { mode: "verbatim", language: "English (US)" });
+  assert.equal(view.sheetEnabled, false);
+  assert.ok(view.choices.languages.includes("Hindi"));
+
+  // The transcript goes to the person's History and never to the team sheet.
+  await completeFile(fresh, { ...info(1), pieces: pieces("hello there friend") });
+  const history = d1.db.prepare("SELECT user_id, mode, language FROM transcriptions").get();
+  assert.deepEqual({ ...history }, { user_id: "u1", mode: "verbatim", language: "English (US)" });
+  assert.equal(d1.db.prepare("SELECT sheet_done FROM bridge_files").get().sheet_done, 1);
+  assert.equal(d1.db.prepare("SELECT sheet_json FROM bridge_devices WHERE id = ?").get(fresh.id).sheet_json, null);
+
+  await leaveDevice(fresh);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) AS n FROM bridge_devices").get().n, 0);
+  await assert.rejects(() => startLogin("x").then((r) => pollLogin("wrong")), /ran out/);
+});
+
+test("a team PC can switch the Google Sheet off and keeps its shared style and language", async () => {
+  const d1 = setup();
+  env.SHEETS_SPREADSHEET_ID = undefined;
+  const paired = await pairDevice("Hasan");
+  let device = await authDevice(new Request("https://x", { headers: { authorization: `Bearer ${paired.token}` } }));
+  assert.equal((await deviceView(device)).sheetEnabled, true, "on by default");
+  await saveDevicePrefs(device, { sheet: false, mode: "verbatim" });
+  device = await authDevice(new Request("https://x", { headers: { authorization: `Bearer ${paired.token}` } }));
+  const view = await deviceView(device);
+  assert.equal(view.sheetEnabled, false);
+  assert.equal(view.choices, null, "team PCs do not choose style or language");
+  assert.equal(view.settings.mode, "smart");
+  await leaveDevice(device);
+  assert.equal(d1.db.prepare("SELECT COUNT(*) AS n FROM bridge_devices").get().n, 1, "a team PC stays on the website");
 });
