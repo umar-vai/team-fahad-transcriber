@@ -48,8 +48,9 @@ export const PAGE = String.raw`<!doctype html>
   <div class="card" id="pairCard" hidden>
     <h2>ধাপ ১: এই পিসি যুক্ত করুন</h2>
     <div class="row" style="margin-top:0">
-      <button id="tabLink">আগের পিসির সাথে যুক্ত করুন</button>
+      <button id="tabLink">আগের পিসির সাথে</button>
       <button class="ghost" id="tabNew">নতুন পিসি</button>
+      <button class="ghost" id="tabGoogle">Google লগইন</button>
     </div>
 
     <div id="linkBox">
@@ -62,11 +63,33 @@ export const PAGE = String.raw`<!doctype html>
       <div class="err" id="linkErr"></div>
     </div>
 
+    <div id="googleBox" hidden>
+      <p class="muted">নিজের Google অ্যাকাউন্ট দিয়ে যুক্ত করলে ট্রান্সক্রাইবগুলো ওয়েবসাইটে <b>আপনার নিজের অ্যাকাউন্টের History-তে</b> জমা হবে, টিমের শিটে নয়। ব্রাউজারে ওয়েবসাইট খুলবে, সেখানে সাইন ইন করে "Allow this computer" চাপুন।</p>
+      <div class="row"><button id="googleBtn">Google দিয়ে যুক্ত করুন</button></div>
+      <div id="googleWait" class="muted" style="margin-top:10px" hidden>ব্রাউজারে এই কোডটি মিলিয়ে অনুমতি দিন: <b id="googleCode" style="font-size:20px;letter-spacing:.1em"></b><br>ব্রাউজার না খুললে এই ঠিকানা খুলুন: <span id="googleLink"></span></div>
+      <div class="err" id="googleErr"></div>
+    </div>
+
     <div id="newBox" hidden>
       <p class="muted">ওয়েবসাইটের <b>Auto</b> পেজে পিসির নাম লিখে <b>Get pairing code</b> চাপুন। যে কোডটি আসবে সেটি এখানে লিখুন।</p>
       <div class="row"><input type="text" id="code" placeholder="ABCD-EFGH" maxlength="12" autocomplete="off"><button id="pairBtn">যুক্ত করুন</button></div>
       <div class="err" id="pairErr"></div>
     </div>
+  </div>
+
+  <div class="card" id="prefsCard" hidden>
+    <h2>সেটিংস</h2>
+    <div id="teamPrefs" hidden>
+      <label class="row" style="gap:8px;margin-top:0"><input type="checkbox" id="sheetOn"> ট্রান্সক্রাইব টিমের Google স্প্রেডশিটেও যোগ করুন</label>
+      <div class="muted">বন্ধ করলে ট্রান্সক্রাইব শুধু History-তে যাবে। আগের ফাইল শিটে পরে যোগ হয় না।</div>
+    </div>
+    <div id="personalPrefs" hidden>
+      <div class="muted">অ্যাকাউন্ট: <b id="acct"></b> (ট্রান্সক্রাইব এই অ্যাকাউন্টের History-তে যাচ্ছে)</div>
+      <div class="row"><select id="modeSel"></select><select id="langSel"></select></div>
+    </div>
+    <div class="row"><button class="ghost" id="resetBtn">এই পিসি আলাদা করুন (রিসেট)</button></div>
+    <div class="muted">রিসেট করলে এই পিসি আবার "যুক্ত করুন" পর্দায় ফিরবে, তখন অন্য পিসি বা অন্য অ্যাকাউন্টে যুক্ত করা যাবে। ফোল্ডার ও শেষ হওয়া ফাইলের তালিকা থাকবে।</div>
+    <div class="err" id="prefsErr"></div>
   </div>
 
   <div class="card" id="folderCard" hidden>
@@ -114,6 +137,34 @@ export const PAGE = String.raw`<!doctype html>
     "needs-setup": ["যুক্ত করা দরকার", "bad"],
     "needs-folder": ["ফোল্ডার বেছে নিন", "warn"],
   };
+  let editing = false;
+  function renderPrefs(s) {
+    $("prefsCard").hidden = !s.paired || s.needsPairing;
+    $("teamPrefs").hidden = s.kind === "personal";
+    $("personalPrefs").hidden = s.kind !== "personal";
+    if (editing) return;
+    $("sheetOn").checked = s.sheetEnabled;
+    if (s.kind === "personal") {
+      $("acct").textContent = s.account || "";
+      if (s.choices) {
+        $("modeSel").innerHTML = Object.entries(s.choices.modes).map(([k, v]) => "<option value='" + esc(k) + "'>" + esc(v) + "</option>").join("");
+        $("langSel").innerHTML = s.choices.languages.map((l) => "<option>" + esc(l) + "</option>").join("");
+        if (s.settings) { $("modeSel").value = s.settings.mode; $("langSel").value = s.settings.language; }
+      }
+    }
+  }
+  async function savePrefs(patch) {
+    $("prefsErr").textContent = "";
+    try { await post("/api/prefs", patch); } catch (e) { $("prefsErr").textContent = e.message; }
+    editing = false; refresh();
+  }
+  $("sheetOn").onchange = () => { editing = true; savePrefs({ sheet: $("sheetOn").checked }); };
+  $("modeSel").onchange = () => { editing = true; savePrefs({ mode: $("modeSel").value }); };
+  $("langSel").onchange = () => { editing = true; savePrefs({ language: $("langSel").value }); };
+  $("resetBtn").onclick = async () => {
+    if (!confirm("এই পিসি আলাদা করবেন? ফোল্ডার ও শেষ হওয়া ফাইলের তালিকা থাকবে, কিন্তু আবার যুক্ত না করা পর্যন্ত ট্রান্সক্রাইব বন্ধ থাকবে।")) return;
+    try { await post("/api/reset"); filled = false; await refresh(); } catch (e) { $("prefsErr").textContent = e.message; }
+  };
   let filled = false;
   let loadedVersion = null;
   let wasInstalling = false;
@@ -143,7 +194,8 @@ export const PAGE = String.raw`<!doctype html>
     if (loadedVersion && s.version !== loadedVersion) { location.reload(); return; }
     loadedVersion = s.version;
     renderUpdate(s);
-    $("sub").innerHTML = s.paired ? "পিসি: <b>" + esc(s.deviceName) + "</b> · সংস্করণ " + esc(s.version) + "" : "সংস্করণ " + esc(s.version);
+    $("sub").innerHTML = s.paired ? (s.kind === "personal" ? "অ্যাকাউন্ট: <b>" + esc(s.account || "") + "</b> · " : "") + "পিসি: <b>" + esc(s.deviceName) + "</b> · সংস্করণ " + esc(s.version) : "সংস্করণ " + esc(s.version);
+    renderPrefs(s);
     const CONN = {
       connected: ["good", "ওয়েবসাইটের সাথে সংযুক্ত", s.serverHost + (s.contactAgo == null ? "" : " · শেষ যোগাযোগ " + (s.contactAgo < 90 ? s.contactAgo + " সেকেন্ড" : Math.round(s.contactAgo / 60) + " মিনিট") + " আগে")],
       offline: ["bad", "ওয়েবসাইটে পৌঁছানো যাচ্ছে না", "ফাইল এই পিসিতে জমছে, ইন্টারনেট এলে নিজে থেকেই পাঠাবে।"],
@@ -167,13 +219,30 @@ export const PAGE = String.raw`<!doctype html>
     $("failedList").innerHTML = s.failed.map((f) => "<div>" + esc(f.file.split(/[\\/]/).pop()) + " <span class=bad>" + esc(f.error || "") + "</span></div>").join("");
     $("log").textContent = s.log.join("\n");
   }
-  function showTab(link) {
-    $("linkBox").hidden = !link; $("newBox").hidden = link;
-    $("tabLink").className = link ? "" : "ghost"; $("tabNew").className = link ? "ghost" : "";
+  function showTab(name) {
+    $("linkBox").hidden = name !== "link"; $("newBox").hidden = name !== "new"; $("googleBox").hidden = name !== "google";
+    $("tabLink").className = name === "link" ? "" : "ghost"; $("tabNew").className = name === "new" ? "" : "ghost"; $("tabGoogle").className = name === "google" ? "" : "ghost";
   }
-  $("tabLink").onclick = () => showTab(true);
-  $("tabNew").onclick = () => showTab(false);
-  showTab(true);
+  $("tabLink").onclick = () => showTab("link");
+  $("tabNew").onclick = () => showTab("new");
+  $("tabGoogle").onclick = () => showTab("google");
+  showTab("link");
+  let loginTimer = null;
+  $("googleBtn").onclick = async () => {
+    $("googleErr").textContent = "";
+    clearInterval(loginTimer);
+    try {
+      const d = await post("/api/login-start");
+      $("googleCode").textContent = d.userCode; $("googleLink").textContent = d.link; $("googleWait").hidden = false;
+      loginTimer = setInterval(async () => {
+        try {
+          const r = await post("/api/login-poll");
+          if (r.state === "done") { clearInterval(loginTimer); $("googleWait").hidden = true; await refresh(); }
+          if (r.state === "none") { clearInterval(loginTimer); $("googleWait").hidden = true; }
+        } catch (e) { clearInterval(loginTimer); $("googleWait").hidden = true; $("googleErr").textContent = e.message; }
+      }, 2000);
+    } catch (e) { $("googleErr").textContent = e.message; }
+  };
   $("listBtn").onclick = async () => {
     $("linkErr").textContent = "";
     try {
@@ -192,7 +261,7 @@ export const PAGE = String.raw`<!doctype html>
     try { await post("/api/pair", { code: $("code").value }); $("code").value = ""; await refresh(); } catch (e) { $("pairErr").textContent = e.message; }
   };
   $("browseBtn").onclick = async () => {
-    try { const d = await post("/api/browse"); if (d.folder) $("folder").value = d.folder; } catch (e) { $("folderErr").textContent = e.message; }
+    try { const d = await post("/api/browse"); if (d.folder) $("folder").value = d.folder; if (d.error) $("folderErr").textContent = d.error; } catch (e) { $("folderErr").textContent = e.message; }
   };
   $("folderBtn").onclick = async () => {
     $("folderErr").textContent = "";

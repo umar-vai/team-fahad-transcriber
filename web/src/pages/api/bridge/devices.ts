@@ -4,9 +4,37 @@ import { handler, HttpError, json, requireUser } from "../../../lib/http";
 import { bridgeSettings, createPairingCode, linkPinIsSet, saveBridgeSettings, setLinkPin } from "../../../lib/bridge";
 import { dayOf } from "../../../lib/autodrive";
 
-/** The PCs, their live state and today's numbers (Auto page). */
+/** One PC in detail: live state, totals, numbers per day and its latest files (Auto page, click on a PC). */
+async function pcDetail(id: string) {
+  const device = await env.DB.prepare(
+    `SELECT id, name, created_at, last_seen_at, version, watch_folder, queue_size, current_file, last_error, sheet_json, sheet_enabled
+       FROM bridge_devices WHERE id = ? AND kind = 'team'`,
+  ).bind(id).first<any>();
+  if (!device) throw new HttpError(404, "This PC was removed.");
+  const totals = await env.DB.prepare(
+    `SELECT COALESCE(SUM(status = 'done'), 0) AS done, COALESCE(SUM(status = 'failed'), 0) AS failed, COALESCE(SUM(CASE WHEN status = 'done' THEN words ELSE 0 END), 0) AS words
+       FROM bridge_files WHERE device_id = ?`,
+  ).bind(id).first<any>();
+  const days = await env.DB.prepare(
+    `SELECT file_day AS day, COALESCE(SUM(status = 'done'), 0) AS done, COALESCE(SUM(status = 'failed'), 0) AS failed, COALESCE(SUM(CASE WHEN status = 'done' THEN words ELSE 0 END), 0) AS words
+       FROM bridge_files WHERE device_id = ? GROUP BY file_day ORDER BY file_day DESC LIMIT 30`,
+  ).bind(id).all<any>();
+  const files = await env.DB.prepare(
+    `SELECT name, file_day, status, words, error, created_at, row_no, history_id FROM bridge_files WHERE device_id = ? ORDER BY created_at DESC LIMIT 300`,
+  ).bind(id).all<any>();
+  return {
+    device: { ...device, sheet_url: device.sheet_json ? JSON.parse(device.sheet_json).url : null, sheet_json: undefined, sheet_enabled: Boolean(device.sheet_enabled) },
+    totals,
+    days: days.results,
+    files: files.results,
+  };
+}
+
+/** The PCs, their live state and today's numbers (Auto page). With ?id= one PC in detail. */
 export const GET: APIRoute = handler(async (context) => {
   requireUser(context);
+  const wanted = context.url.searchParams.get("id");
+  if (wanted) return json(await pcDetail(wanted));
   const today = dayOf(Date.now());
   const devices = await env.DB.prepare(
     `SELECT d.id, d.name, d.created_at, d.last_seen_at, d.version, d.watch_folder, d.queue_size, d.current_file, d.last_error,
@@ -14,7 +42,7 @@ export const GET: APIRoute = handler(async (context) => {
        (SELECT COUNT(*) FROM bridge_files f WHERE f.device_id = d.id AND f.status = 'failed') AS failed,
        (SELECT COUNT(*) FROM bridge_files f WHERE f.device_id = d.id AND f.status = 'done' AND f.file_day = ?1) AS done_today,
        d.sheet_json
-       FROM bridge_devices d ORDER BY d.name COLLATE NOCASE`,
+       FROM bridge_devices d WHERE d.kind = 'team' ORDER BY d.name COLLATE NOCASE`,
   )
     .bind(today)
     .all<any>();

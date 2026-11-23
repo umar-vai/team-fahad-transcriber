@@ -26,7 +26,9 @@ For each PC, double-click **TeamFahadBridge-Setup.exe**, press Next, Install, Fi
 - **Link to an earlier PC** (for a computer that is already on the website, for example Mahbub or Hasan): type the team PIN, press *Show list*, pick the computer, press *Link*. This PC takes that computer's place: same name, same Google Sheets tab, same History. Both the earlier bridge PCs and the Drive "Computers" are in the list. **Only one PC stays linked to a name:** the computer that was linked before stops working at once (it shows "disconnected").
 - **New PC:** on the website open **Auto**, type the PC's name (for example `PC-03`), press **Get pairing code**, and type the code in the window.
 
-Then choose the folder and press *Save*. Wrong PINs are counted: 8 wrong tries lock the list for 10 minutes.
+- **Google sign-in:** press *Connect with Google*. The website opens in the browser; sign in and press *Allow this computer*. The transcripts then go to **your own account's History** on the website (not to the team sheet), and you choose the output style and language in the app.
+
+Then choose the folder and press *Save*. In *Settings* a team PC can switch the Google Sheet off (on by default), and *Reset this PC* returns to the connect screen (the folder and the list of finished files are kept). Wrong PINs are counted: 8 wrong tries lock the list for 10 minutes.
 
 Windows may show **"Windows protected your PC"** the first time, because the file is not code-signed (signing certificates cost money). Press **More info**, then **Run anyway**. Telegram may also say the file is unknown: that is the same reason.
 

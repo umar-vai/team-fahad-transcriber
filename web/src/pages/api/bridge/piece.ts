@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { LANGUAGES, transcribe, type Mode } from "../../../lib/gemini";
 import { handler, HttpError, json } from "../../../lib/http";
-import { authDevice, bridgeSettings } from "../../../lib/bridge";
+import { authDevice, settingsFor } from "../../../lib/bridge";
 import { inferBanglaLanguage } from "../../../lib/transcription-quality";
 
 const MAX_BYTES = 14 * 1024 * 1024; // Base64 must stay under Gemini's 20 MB request limit.
@@ -19,7 +19,7 @@ export const POST: APIRoute = handler(async (context) => {
   if (!data.byteLength) throw new HttpError(400, "Empty audio.");
   if (data.byteLength > MAX_BYTES) throw new HttpError(413, "This audio piece is too large. Use pieces of 5 minutes or less.");
 
-  const settings = await bridgeSettings();
+  const settings = await settingsFor(device);
   const asked = url.searchParams.get("language") || "";
   const language = LANGUAGES[asked] ? asked : settings.language;
   const duration = Number(url.searchParams.get("duration")) || undefined;

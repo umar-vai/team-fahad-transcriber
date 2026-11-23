@@ -172,3 +172,12 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .job-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .job-nums { display: flex; gap: 14px; flex-wrap: wrap; }
 .job-nums b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.pc-card.clickable { cursor: pointer; }
+.pc-card.clickable:hover, .pc-card.selected { border-color: var(--accent-2); }
+.pc-detail { margin-top: 16px; display: grid; gap: 14px; }
+.pc-detail .stats { display: flex; gap: 22px; flex-wrap: wrap; }
+.pc-detail .stats b { display: block; font-size: 1.5rem; }
+.pc-detail table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.pc-detail th, .pc-detail td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.pc-detail .scroll { max-height: 380px; overflow: auto; }
