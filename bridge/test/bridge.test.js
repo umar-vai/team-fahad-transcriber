@@ -10,6 +10,7 @@ import { Api } from "../src/api.js";
 import { NoAudioError, PIECE_SECONDS, decodeToRaw, planPieces } from "../src/audio.js";
 import { Bridge } from "../src/bridge.js";
 import { Processor } from "../src/processor.js";
+import { ApiError } from "../src/api.js";
 import { Store } from "../src/store.js";
 import { startUi } from "../src/ui.js";
 import { Updater, isNewer } from "../src/updater.js";
@@ -376,4 +377,28 @@ test("Google sign-in from the app, own settings, then reset keeps the folder and
     ui.close();
     site.server.close();
   }
+});
+
+test("newest files go first, and a piece that keeps failing steps aside instead of blocking the queue", { skip: !hasFfmpeg }, async () => {
+  // Newest first: a fresh recording does not wait behind old files.
+  const dir = tmp();
+  const store = new Store(path.join(dir, "data"));
+  const folder = path.join(dir, "watch");
+  fs.mkdirSync(folder);
+  fs.writeFileSync(path.join(folder, "old.mp3"), "x".repeat(100));
+  fs.writeFileSync(path.join(folder, "new.mp3"), "y".repeat(100));
+  fs.utimesSync(path.join(folder, "old.mp3"), new Date("2026-11-01"), new Date("2026-11-01"));
+  store.saveConfig({ folder, watchSince: 0 });
+  const watcher = new Watcher(store, { stableMs: 0 });
+  watcher.ready(); // first sight
+  assert.deepEqual(watcher.ready().ready.map((f) => f.name), ["new.mp3", "old.mp3"]);
+
+  // A busy website: after the patience time the piece gives up (the file is tried again later) instead of waiting for hours.
+  const busy = { piece: async () => { throw new ApiError("Gemini is busy", 503, true); } };
+  const raw = path.join(dir, "raw.pcm");
+  fs.writeFileSync(raw, Buffer.alloc(16000 * 2 * 3));
+  const processor = new Processor(busy, { sleepFn: () => new Promise((r) => setTimeout(r, 5)), patienceMs: 60 });
+  const waits = [];
+  await assert.rejects(() => processor.sendPiece(raw, { start: 0, end: 16000 * 3, offset: 0, duration: 3, index: 0 }, {}, (why) => waits.push(why)), /busy/);
+  assert.ok(waits.length >= 1);
 });
