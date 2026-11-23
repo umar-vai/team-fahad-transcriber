@@ -15,9 +15,15 @@ on:
 permissions:
   contents: write
 
+# A new push replaces the run for the same branch.
+concurrency:
+  group: bridge-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: bridge
@@ -32,6 +38,7 @@ jobs:
   package:
     needs: test
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -73,7 +80,10 @@ jobs:
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "TeamFahadBridge"
           $env:BRIDGE_DATA_DIR = ""
-          Start-Process dist/TeamFahadBridge-Setup.exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$dir" -Wait
+          # Wait for the installer process only. "Start-Process -Wait" would also wait for the bridge it starts, which never ends.
+          $setup = Start-Process dist/TeamFahadBridge-Setup.exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$dir" -PassThru
+          if (-not $setup.WaitForExit(300000)) { throw "The installer did not finish within 5 minutes." }
+          if ($setup.ExitCode -ne 0) { throw "The installer failed with exit code $($setup.ExitCode)." }
           foreach ($f in "node.exe", "src\index.js", "ffmpeg\ffmpeg.exe", "open-window.vbs", "start-bridge.vbs", "unins000.exe") {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "Not installed: $f" }
           }
@@ -85,7 +95,8 @@ jobs:
           $status | ConvertTo-Json -Compress
           $page = Invoke-WebRequest http://127.0.0.1:47821/ -UseBasicParsing
           if ($page.StatusCode -ne 200 -or $page.Content -notmatch "Team Fahad Bridge") { throw "Setup page did not load." }
-          & (Join-Path $dir "unins000.exe") /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+          $remove = Start-Process (Join-Path $dir "unins000.exe") -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -PassThru
+          if (-not $remove.WaitForExit(120000)) { throw "The uninstaller did not finish within 2 minutes." }
           Start-Sleep -Seconds 4
           if (Test-Path (Join-Path $dir "node.exe")) { throw "Uninstall left node.exe behind." }
           Write-Host "Install and uninstall work."
