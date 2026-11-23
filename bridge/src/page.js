@@ -24,6 +24,11 @@ export const PAGE = String.raw`<!doctype html>
   .row > input { flex:1 1 240px; width:auto; }
   .big { font-size:30px; font-weight:700; }
   pre { margin:0; font:12px/1.5 ui-monospace,Consolas,monospace; white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto; color:var(--muted); }
+  .conn { display:flex; gap:12px; align-items:center; padding:12px 16px; }
+  .dot { width:14px; height:14px; border-radius:50%; background:var(--muted); flex:none; }
+  .dot.good { background:var(--good); box-shadow:0 0 0 4px color-mix(in srgb, var(--good) 25%, transparent); }
+  .dot.bad { background:var(--bad); }
+  .dot.warn { background:var(--warn); }
   .err { color:var(--bad); margin-top:8px; font-size:14px; }
 </style>
 </head>
@@ -31,6 +36,7 @@ export const PAGE = String.raw`<!doctype html>
 <main>
   <h1>Team Fahad Bridge</h1>
   <div class="muted" id="sub">লোড হচ্ছে…</div>
+  <div class="card conn" id="conn" hidden><span class="dot" id="dot"></span><div><b id="connTitle"></b><div class="muted" id="connSub"></div></div></div>
 
   <div class="card" id="pairCard" hidden>
     <h2>ধাপ ১: এই পিসি যুক্ত করুন</h2>
@@ -88,7 +94,16 @@ export const PAGE = String.raw`<!doctype html>
   async function refresh() {
     let s;
     try { s = await (await fetch("/api/status")).json(); } catch { $("sub").textContent = "ব্রিজ চালু নেই।"; return; }
-    $("sub").innerHTML = s.paired ? "পিসি: <b>" + esc(s.deviceName) + "</b> · সংস্করণ " + esc(s.version) + (s.online ? "" : " · <span class=bad>ইন্টারনেট নেই, ফাইল জমে থাকবে</span>") : "সংস্করণ " + esc(s.version);
+    $("sub").innerHTML = s.paired ? "পিসি: <b>" + esc(s.deviceName) + "</b> · সংস্করণ " + esc(s.version) + "" : "সংস্করণ " + esc(s.version);
+    const CONN = {
+      connected: ["good", "ওয়েবসাইটের সাথে সংযুক্ত", s.serverHost + (s.contactAgo == null ? "" : " · শেষ যোগাযোগ " + (s.contactAgo < 90 ? s.contactAgo + " সেকেন্ড" : Math.round(s.contactAgo / 60) + " মিনিট") + " আগে")],
+      offline: ["bad", "ওয়েবসাইটে পৌঁছানো যাচ্ছে না", "ফাইল এই পিসিতে জমছে, ইন্টারনেট এলে নিজে থেকেই পাঠাবে।"],
+      removed: ["bad", "সংযোগ বিচ্ছিন্ন", "এই পিসি ওয়েবসাইট থেকে সরানো হয়েছে। নতুন কোড নিয়ে আবার যুক্ত করুন।"],
+      checking: ["warn", "ওয়েবসাইটের সাথে সংযোগ দেখা হচ্ছে…", s.serverHost],
+    };
+    const c = CONN[s.connection];
+    $("conn").hidden = !c;
+    if (c) { $("dot").className = "dot " + c[0]; $("connTitle").textContent = c[1]; $("connSub").textContent = c[2]; }
     $("pairCard").hidden = s.paired && !s.needsPairing;
     $("folderCard").hidden = !s.paired || s.needsPairing;
     $("statusCard").hidden = !s.paired || !s.folder;

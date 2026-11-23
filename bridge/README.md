@@ -16,15 +16,23 @@ Security: each PC has its own secret token (shown once while pairing, stored on 
 
 ## Install on a PC (about 2 minutes)
 
+One file: **`TeamFahadBridge-Setup.exe`** (about 70 MB, Node and ffmpeg are inside, nothing else to install).
+Download it from the [bridge-latest release](https://github.com/umar-vai/team-fahad-transcriber/releases/tag/bridge-latest) and send it to whoever sets up the office PCs (Telegram, USB, anything). Do not use GitHub's *Download ZIP* of the source code.
+
+For each PC:
+
 1. On the website open **Auto**, type the PC's name (for example `PC-03`) and press **Get pairing code**.
-2. Copy the zip (`TeamFahadBridge-windows.zip` from the [bridge-latest release](https://github.com/umar-vai/team-fahad-transcriber/releases/tag/bridge-latest); do not use GitHub's *Download ZIP* of the source code, it has no Node or ffmpeg) to the PC, extract it, double-click **install.bat**.
-3. A browser page opens (`http://127.0.0.1:47821`): enter the pairing code, choose the folder, press save.
+2. On that PC double-click **TeamFahadBridge-Setup.exe**, press Next, Install, Finish. No administrator password is needed.
+3. The **Team Fahad Bridge** window opens: type the code, press *Connect*, choose the folder, press *Save*.
 
-By default only files that arrive **after** setup are transcribed. Tick "also transcribe the files already in the folder" to include the old ones.
+Windows may show **"Windows protected your PC"** the first time, because the file is not code-signed (signing certificates cost money). Press **More info**, then **Run anyway**. Telegram may also say the file is unknown: that is the same reason.
 
-It starts by itself at every Windows sign-in and restarts itself if it crashes. The desktop shortcut **Team Fahad Bridge** opens the status page. To update, extract the new zip and run **install.bat** again (settings are kept). To remove, run **uninstall.bat**.
+What you get: a **Team Fahad Bridge** icon on the desktop and in the Start menu (opens the status window), and the bridge starts by itself, hidden, every time Windows signs in. Closing the window does not stop it. By default only files that arrive **after** setup are transcribed; tick "also transcribe the files already in the folder" to include the old ones.
 
-Files: program in `%LOCALAPPDATA%\TeamFahadBridge`, settings, list of finished files and log in `%APPDATA%\TeamFahadBridge`.
+- **Silent install for many PCs:** `TeamFahadBridge-Setup.exe /SILENT` (add `/DIR="D:\Bridge"` to choose the folder).
+- **Update:** run the newer Setup.exe over the old one. Settings are kept.
+- **Remove:** Windows Settings, Apps, *Team Fahad Bridge*, Uninstall.
+- Files: program in `%LOCALAPPDATA%\Programs\TeamFahadBridge`; settings, list of finished files and log in `%APPDATA%\TeamFahadBridge`.
 
 ## Development
 
@@ -34,6 +42,6 @@ npm test        # needs ffmpeg on PATH; uses a fake website, no network
 ```
 
 No npm dependencies: only Node 22 built-ins. `FFMPEG_PATH`, `BRIDGE_DATA_DIR` and `BRIDGE_PORT` can override the defaults.
-The zip is built by `.github/workflows/bridge-windows.yml` (Node and ffmpeg are bundled, nothing to install on the PC).
+The installer is built by `.github/workflows/bridge-windows.yml` with Inno Setup (`bridge/windows/TeamFahadBridge.iss`). The workflow also installs it silently on a Windows runner, checks that the app answers and uninstalls it, so a broken installer fails the build.
 
 Server side: `web/src/lib/bridge.ts`, `web/src/pages/api/bridge/*`, migration `web/migrations/0006_bridge.sql`.

@@ -10,6 +10,8 @@ import { log } from "./log.js";
 
 const SCAN_MS = 5000;
 const HEARTBEAT_MS = 60_000;
+/** Heartbeats go out every minute, so a contact older than this means something is wrong. */
+const CONNECTED_WITHIN_MS = 150_000;
 const MAX_ATTEMPTS = 8;
 
 export class Bridge {
@@ -29,7 +31,21 @@ export class Bridge {
 
   stop() {
     this.stopped = true;
+    clearInterval(this.timer);
     this.wake?.();
+  }
+
+  /**
+   * One word for the status window: unpaired, removed (the website forgot this PC), connected,
+   * offline (the website cannot be reached) or checking (just started).
+   */
+  connectionState(now = Date.now()) {
+    if (!this.store.paired) return { state: "unpaired", lastContactAt: 0 };
+    if (this.status.needsPairing) return { state: "removed", lastContactAt: this.api.lastOkAt };
+    const { lastOkAt, lastFailAt } = this.api;
+    if (lastFailAt > lastOkAt) return { state: "offline", lastContactAt: lastOkAt };
+    if (lastOkAt && now - lastOkAt < CONNECTED_WITHIN_MS) return { state: "connected", lastContactAt: lastOkAt };
+    return { state: lastOkAt ? "offline" : "checking", lastContactAt: lastOkAt };
   }
 
   /** Wait, but wake up early when asked (for example after pairing or choosing a folder). */
@@ -179,6 +195,9 @@ export class Bridge {
 
   async loop() {
     cleanTemp();
+    // The heartbeat must not wait for a long file: it runs on its own timer (beat() limits it to once a minute).
+    this.timer = setInterval(() => this.beat().catch(() => {}), 20_000);
+    this.timer.unref?.();
     while (!this.stopped) {
       let busy = false;
       try {

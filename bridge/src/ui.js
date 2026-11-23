@@ -58,6 +58,10 @@ export function startUi(bridge, store, { port = UI_PORT } = {}) {
         folder: store.config.folder,
         includeExisting: !store.config.watchSince,
         ...bridge.status,
+        connection: bridge.connectionState().state,
+        // Seconds, not a clock time, so a wrong PC clock cannot make it look stale.
+        contactAgo: bridge.connectionState().lastContactAt ? Math.round((Date.now() - bridge.connectionState().lastContactAt) / 1000) : null,
+        serverHost: new URL(store.config.server).host,
         failed: Object.entries(store.ledger).filter(([, v]) => v.state === "failed").map(([file, v]) => ({ file, error: v.error })).slice(-20),
         doneCount: Object.values(store.ledger).filter((v) => v.state === "done").length,
         log: recentLog().slice(-25),
