@@ -60,6 +60,20 @@ one tab per computer, with a Date column. A new computer folder gets its own pag
 - Press **Run the nightly scan now** to test without waiting for 23:50.
 - D1 migrations are applied by the deploy workflow on every push to `main`.
 
+## Bridge PCs (live, per PC)
+
+A Windows app (`bridge/`) on each PC watches a folder and sends every new audio file as small MP3 pieces to
+`/api/bridge/piece` (Gemini runs on the server, so the key never leaves it and nothing is stored). When all pieces
+are back, `/api/bridge/complete` merges them, saves the transcript to History and appends a row to the PC's own
+Google Sheets tab (Date column in front, same columns as the nightly automation).
+
+- **Pair a PC:** on the **Auto** page type a name, press *Get pairing code*, enter the code in the bridge app (valid 15 minutes, works once). The PC gets its own token; only its SHA-256 hash is stored. *Remove* on the Auto page revokes it at once.
+- **Auto page** shows each PC live (online, transcribing, waiting, failed, today's count); output style and language for all PCs are set there too.
+- **Never twice:** `bridge_files` keeps a fingerprint per file per PC. A repeated *complete* call (after a network error) is safe: the same History row and the same sheet row are used. Failed files get a *Failed* row that is replaced when the file later works.
+- **No Notion** for bridge PCs (Sheets and History only).
+- Needs `GOOGLE_SERVICE_ACCOUNT_JSON` and `SHEETS_SPREADSHEET_ID` for the sheet rows; without them History still works.
+- D1 migration `0006_bridge.sql` is applied by the deploy workflow.
+
 ## One-time setup
 
 ### 1. Gemini API key (required)
