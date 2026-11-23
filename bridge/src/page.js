@@ -39,6 +39,12 @@ export const PAGE = String.raw`<!doctype html>
   <div class="muted" id="sub">লোড হচ্ছে…</div>
   <div class="card conn" id="conn" hidden><span class="dot" id="dot"></span><div><b id="connTitle"></b><div class="muted" id="connSub"></div></div></div>
 
+  <div class="card" id="updateCard" hidden>
+    <b id="updTitle"></b>
+    <div class="muted" id="updSub"></div>
+    <div class="row"><button id="updBtn" hidden></button></div>
+  </div>
+
   <div class="card" id="pairCard" hidden>
     <h2>ধাপ ১: এই পিসি যুক্ত করুন</h2>
     <div class="row" style="margin-top:0">
@@ -109,9 +115,34 @@ export const PAGE = String.raw`<!doctype html>
     "needs-folder": ["ফোল্ডার বেছে নিন", "warn"],
   };
   let filled = false;
+  let loadedVersion = null;
+  let wasInstalling = false;
+  function renderUpdate(s) {
+    const u = s.update, card = $("updateCard"), btn = $("updBtn");
+    if (!u) { card.hidden = true; return; }
+    btn.hidden = true; card.hidden = false;
+    if (u.state === "available") {
+      $("updTitle").textContent = "নতুন সংস্করণ " + u.latest + " এসেছে (আপনার: " + s.version + ")";
+      $("updSub").textContent = "এক ক্লিকে ডাউনলোড ও ইনস্টল হবে। কয়েক সেকেন্ডের জন্য অ্যাপ বন্ধ হয়ে নিজে আবার চালু হবে। চলমান ফাইল পরে আবার শুরু হবে, কিছু হারাবে না।";
+      btn.textContent = "এখনই আপডেট করুন"; btn.hidden = false; btn.onclick = async () => { btn.disabled = true; await post("/api/update/install").catch(() => {}); refresh(); };
+    } else if (u.state === "downloading") {
+      $("updTitle").textContent = "নতুন সংস্করণ ডাউনলোড হচ্ছে… " + u.progress + "%"; $("updSub").textContent = "এই উইন্ডো বন্ধ করবেন না।";
+    } else if (u.state === "installing") {
+      $("updTitle").textContent = "ইনস্টল হচ্ছে…"; $("updSub").textContent = "অ্যাপ নিজে থেকে আবার চালু হবে, এই উইন্ডো আপনা-আপনি নতুন হয়ে যাবে।"; wasInstalling = true;
+    } else if (u.state === "error") {
+      $("updTitle").textContent = "আপডেট দেখা বা ইনস্টল করা যায়নি"; $("updSub").textContent = u.error || "";
+      btn.textContent = "আবার দেখুন"; btn.hidden = false; btn.disabled = false; btn.onclick = async () => { await post("/api/update/check").catch(() => {}); refresh(); };
+    } else if (u.state === "current") {
+      $("updTitle").textContent = "✓ অ্যাপ আপ টু ডেট (সংস্করণ " + s.version + ")"; $("updSub").textContent = "";
+      btn.textContent = "নতুন আপডেট আছে কি দেখুন"; btn.hidden = false; btn.disabled = false; btn.className = "ghost"; btn.onclick = async () => { await post("/api/update/check").catch(() => {}); refresh(); };
+    } else { card.hidden = true; }
+  }
   async function refresh() {
     let s;
-    try { s = await (await fetch("/api/status")).json(); } catch { $("sub").textContent = "ব্রিজ চালু নেই।"; return; }
+    try { s = await (await fetch("/api/status")).json(); } catch { $("sub").textContent = wasInstalling ? "আপডেট হচ্ছে, একটু অপেক্ষা করুন…" : "ব্রিজ চালু নেই।"; return; }
+    if (loadedVersion && s.version !== loadedVersion) { location.reload(); return; }
+    loadedVersion = s.version;
+    renderUpdate(s);
     $("sub").innerHTML = s.paired ? "পিসি: <b>" + esc(s.deviceName) + "</b> · সংস্করণ " + esc(s.version) + "" : "সংস্করণ " + esc(s.version);
     const CONN = {
       connected: ["good", "ওয়েবসাইটের সাথে সংযুক্ত", s.serverHost + (s.contactAgo == null ? "" : " · শেষ যোগাযোগ " + (s.contactAgo < 90 ? s.contactAgo + " সেকেন্ড" : Math.round(s.contactAgo / 60) + " মিনিট") + " আগে")],
