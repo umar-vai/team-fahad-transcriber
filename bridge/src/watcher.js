@@ -42,7 +42,7 @@ export class Watcher {
     return found;
   }
 
-  /** Files ready to transcribe, oldest first. */
+  /** Files ready to transcribe, newest first. */
   ready(now = Date.now()) {
     const { folder, watchSince } = this.store.config;
     if (!folder) return { ready: [], waiting: 0 };
@@ -84,7 +84,8 @@ export class Watcher {
       ready.push({ path: file, name: path.basename(file), size: stat.size, mtimeMs: stat.mtimeMs });
     }
     for (const file of this.seen.keys()) if (!present.has(file)) this.seen.delete(file);
-    ready.sort((a, b) => a.mtimeMs - b.mtimeMs || a.path.localeCompare(b.path));
+    // Newest first: a fresh recording must not wait behind a backlog of old files.
+    ready.sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
     return { ready, waiting };
   }
 }

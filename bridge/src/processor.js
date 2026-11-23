@@ -5,19 +5,31 @@ import { NoAudioError, decodeToRaw, encodePiece, planPieces } from "./audio.js";
 import { fingerprint } from "./watcher.js";
 import { log } from "./log.js";
 
-const PARALLEL = 3;
+const PARALLEL = 2;
 const AUTO_LANGUAGE = "Auto detect / mixed language";
 const TRANSIENT_RE = /rate limit|quota|busy|overload|unavailable|timed out|timeout|deadline|try again|temporar|location is not supported/i;
-/** How long one piece keeps waiting on a busy Gemini or a missing connection before the file is tried again later. */
-const PIECE_PATIENCE_MS = 6 * 3600_000;
+/**
+ * How long one piece keeps waiting on a busy Gemini or a missing connection before the file steps aside and is tried
+ * again later. Short on purpose: one stuck file must not hold up every other (newer) file behind it.
+ */
+const PIECE_PATIENCE_MS = 4 * 60_000;
 
 export class PermanentError extends Error {}
+
+let lastWaitLog = 0;
+/** One log line a minute at most, so the log explains why a file is waiting without filling up. */
+function logWait(why, name) {
+  if (Date.now() - lastWaitLog < 60_000) return;
+  lastWaitLog = Date.now();
+  log(`Waiting (${name}): ${why}`);
+}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class Processor {
-  constructor(api, { sleepFn = sleep } = {}) {
+  constructor(api, { sleepFn = sleep, patienceMs = PIECE_PATIENCE_MS } = {}) {
     this.api = api;
+    this.patienceMs = patienceMs;
     this.sleep = sleepFn;
   }
 
@@ -37,7 +49,7 @@ export class Processor {
         if (error.status === 422) {
           if (++quality >= 2) throw new PermanentError(error.message);
         } else if (error.retryable || TRANSIENT_RE.test(error.message)) {
-          if (Date.now() - started > PIECE_PATIENCE_MS) throw error;
+          if (Date.now() - started > this.patienceMs) throw error;
         } else if (++other >= 6) {
           throw new PermanentError(error.message);
         }
@@ -67,7 +79,7 @@ export class Processor {
       let finished = 0;
       const query = () => (locked ? { language: locked } : {});
       const work = async (piece) => {
-        const result = await this.sendPiece(raw, piece, query(), (why) => setDetail(`Waiting: ${why.slice(0, 80)}`));
+        const result = await this.sendPiece(raw, piece, query(), (why) => { setDetail(`Waiting: ${why.slice(0, 160)}`); logWait(why, file.name); });
         results[piece.index] = result;
         finished++;
         setDetail(`Part ${finished} of ${pieces.length}`);
