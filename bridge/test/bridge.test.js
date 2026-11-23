@@ -226,3 +226,32 @@ test("pairing with a wrong code shows the website's message", async () => {
   site.server.close();
   assert.equal(ok.name, "PC-01");
 });
+
+test("the connection indicator follows what really happened with the website", async () => {
+  const site = await fakeSite();
+  const { store, bridge } = await setup(site);
+  assert.equal(bridge.connectionState().state, "checking", "nothing tried yet");
+
+  await bridge.beat(true);
+  assert.equal(bridge.connectionState().state, "connected");
+  assert.ok(Date.now() - bridge.connectionState().lastContactAt < 5000);
+  // A contact that is too old is not trusted any more.
+  assert.equal(bridge.connectionState(Date.now() + 200_000).state, "offline");
+
+  // The website cannot be reached.
+  site.server.close();
+  store.saveConfig({ server: "http://127.0.0.1:1" });
+  await bridge.beat(true);
+  assert.equal(bridge.connectionState().state, "offline");
+
+  // The website answers but no longer knows this PC.
+  const site2 = await fakeSite();
+  site2.state.reject401 = true;
+  store.saveConfig({ server: site2.url });
+  await bridge.beat(true);
+  assert.equal(bridge.connectionState().state, "removed");
+  site2.server.close();
+
+  store.saveConfig({ token: "" });
+  assert.equal(bridge.connectionState().state, "unpaired");
+});

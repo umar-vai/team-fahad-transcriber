@@ -11,6 +11,9 @@ export class Api {
   constructor(store, version) {
     this.store = store;
     this.version = version;
+    /** When the website last answered, and when a call last failed because it could not be reached. */
+    this.lastOkAt = 0;
+    this.lastFailAt = 0;
   }
 
   async call(path, { method = "POST", body, headers = {}, timeoutMs = 60_000, auth = true } = {}) {
@@ -25,8 +28,11 @@ export class Api {
       });
     } catch (error) {
       // No internet, DNS, timeout: the file simply waits.
+      this.lastFailAt = Date.now();
       throw new ApiError(`No connection to the website (${error.cause?.code || error.name}).`, 0, true);
     }
+    // Any answer, even an error page, proves the website can be reached.
+    this.lastOkAt = Date.now();
     const text = await response.text();
     let data = {};
     try {
