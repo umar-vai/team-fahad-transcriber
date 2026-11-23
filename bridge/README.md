@@ -33,7 +33,7 @@ Windows may show **"Windows protected your PC"** the first time, because the fil
 What you get: a **Team Fahad Bridge** icon on the desktop and in the Start menu (opens the status window), and the bridge starts by itself every time Windows signs in, with **no window, only the icon in the system tray** (next to the clock; it may be under the ^ arrow). Double click the icon, or right click and *Open status window*, to see the status; right click and *Exit* stops it until the next sign-in. Closing the window does not stop it. By default only files that arrive **after** setup are transcribed; tick "also transcribe the files already in the folder" to include the old ones.
 
 - **Silent install for many PCs:** `TeamFahadBridge-Setup.exe /SILENT` (add `/DIR="D:\Bridge"` to choose the folder).
-- **Update:** run the newer Setup.exe over the old one. Settings are kept.
+- **Update:** from version 1.2.0 on the app updates itself. It checks every 6 hours (and when you press the check button); when a newer version exists the status window shows **"New version X is available"**, and one click on *Update now* downloads it, verifies it (SHA-256 from `latest.json` in the release) and installs it silently. The app restarts by itself and keeps its settings. Versions before 1.2.0 need the newer Setup.exe run once by hand (run it over the old one; settings are kept).
 - **Remove:** Windows Settings, Apps, *Team Fahad Bridge*, Uninstall.
 - Files: program in `%LOCALAPPDATA%\Programs\TeamFahadBridge`; settings, list of finished files and log in `%APPDATA%\TeamFahadBridge`.
 

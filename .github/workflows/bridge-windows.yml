@@ -116,5 +116,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # latest.json lets installed apps see that a newer version exists and verify the download.
+          $version = (Get-Content bridge/package.json | ConvertFrom-Json).version
+          $exe = Get-Item dist/TeamFahadBridge-Setup.exe
+          $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          @{ version = $version; size = $exe.Length; sha256 = $sha } | ConvertTo-Json -Compress | Set-Content -Encoding ascii dist/latest.json
+          Get-Content dist/latest.json
           gh release delete bridge-latest --cleanup-tag --yes 2>$null
-          gh release create bridge-latest dist/TeamFahadBridge-Setup.exe --target "${{ github.sha }}" --title "Team Fahad Bridge (latest)" --notes "Newest Windows installer. Download TeamFahadBridge-Setup.exe and double-click it."
+          gh release create bridge-latest dist/TeamFahadBridge-Setup.exe dist/latest.json --target "${{ github.sha }}" --title "Team Fahad Bridge (latest)" --notes "Newest Windows installer. Download TeamFahadBridge-Setup.exe and double-click it."

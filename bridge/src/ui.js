@@ -5,7 +5,7 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { Api } from "./api.js";
-import { recentLog } from "./log.js";
+import { log, recentLog } from "./log.js";
 import { VERSION } from "./paths.js";
 import { PAGE } from "./page.js";
 
@@ -23,7 +23,7 @@ function browseFolder() {
   });
 }
 
-export function startUi(bridge, store, { port = UI_PORT } = {}) {
+export function startUi(bridge, store, { port = UI_PORT, updater = null } = {}) {
   const api = new Api(store, VERSION);
   const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 
@@ -64,6 +64,7 @@ export function startUi(bridge, store, { port = UI_PORT } = {}) {
         serverHost: new URL(store.config.server).host,
         failed: Object.entries(store.ledger).filter(([, v]) => v.state === "failed").map(([file, v]) => ({ file, error: v.error })).slice(-20),
         doneCount: Object.values(store.ledger).filter((v) => v.state === "done").length,
+        update: updater ? { ...updater.state } : null,
         log: recentLog().slice(-25),
       });
     }
@@ -100,6 +101,12 @@ export function startUi(bridge, store, { port = UI_PORT } = {}) {
         // New files only, unless asked to also take the files already there.
         store.saveConfig({ folder, ...(changed || body.includeExisting !== undefined ? { watchSince: body.includeExisting ? 0 : Date.now() } : {}) });
         bridge.nudge();
+        return send(res, 200, { ok: true });
+      }
+      if (url.pathname === "/api/update/check" && updater) return send(res, 200, { ...(await updater.check()) });
+      if (url.pathname === "/api/update/install" && updater) {
+        // The download runs on; the window follows its progress through /api/status.
+        updater.install().catch((error) => log(`Update failed: ${error.message}`));
         return send(res, 200, { ok: true });
       }
       if (url.pathname === "/api/browse") return send(res, 200, { folder: await browseFolder() });

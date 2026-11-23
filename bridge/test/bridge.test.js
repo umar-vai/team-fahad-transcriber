@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ import { Bridge } from "../src/bridge.js";
 import { Processor } from "../src/processor.js";
 import { Store } from "../src/store.js";
 import { startUi } from "../src/ui.js";
+import { Updater, isNewer } from "../src/updater.js";
 import { Watcher, fingerprint } from "../src/watcher.js";
 
 process.env.BRIDGE_QUIET = "1";
@@ -284,5 +286,42 @@ test("the status window lists computers after the team PIN and links this PC to 
   } finally {
     ui.close();
     site.server.close();
+  }
+});
+
+test("the app sees a newer version, downloads it, checks it and runs the installer", async () => {
+  assert.ok(isNewer("1.10.0", "1.9.9") && isNewer("1.2.0", "1.1.0") && !isNewer("1.2.0", "1.2.0") && !isNewer("1.1.9", "1.2.0"));
+  const installer = Buffer.alloc(1_500_000, 7);
+  const info = { version: "1.3.0", size: installer.length, sha256: crypto.createHash("sha256").update(installer).digest("hex") };
+  let served = installer;
+  const server = http.createServer((req, res) => {
+    if (req.url === "/latest.json") return res.end(JSON.stringify(info));
+    if (req.url === "/TeamFahadBridge-Setup.exe") return res.end(served);
+    res.writeHead(404).end();
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const launched = [];
+    const dir = path.join(tmp(), "update");
+    const same = new Updater("1.3.0", { base, dir, launch: (f) => launched.push(f) });
+    assert.equal((await same.check()).state, "current");
+    const updater = new Updater("1.2.0", { base, dir, launch: (f) => launched.push(f) });
+    assert.equal((await updater.check()).state, "available");
+    assert.equal(updater.state.latest, "1.3.0");
+
+    served = Buffer.alloc(1_500_000, 8); // a damaged download is refused and never run
+    await assert.rejects(() => updater.install(), /damaged/);
+    assert.equal(launched.length, 0);
+    assert.equal(updater.state.state, "error");
+    assert.equal((await updater.check()).state, "available");
+
+    served = installer;
+    await updater.install();
+    assert.equal(updater.state.state, "installing");
+    assert.equal(launched.length, 1);
+    assert.deepEqual(fs.readFileSync(launched[0]), installer);
+  } finally {
+    server.close();
   }
 });

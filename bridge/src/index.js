@@ -10,6 +10,7 @@ import { log } from "./log.js";
 import { VERSION } from "./paths.js";
 import { Store } from "./store.js";
 import { startTray } from "./tray.js";
+import { Updater } from "./updater.js";
 import { UI_PORT, startUi } from "./ui.js";
 
 const self = fileURLToPath(import.meta.url);
@@ -30,8 +31,9 @@ async function work() {
   const store = new Store();
   const api = new Api(store, VERSION);
   const bridge = new Bridge(store, api);
+  const updater = new Updater(VERSION);
   try {
-    await startUi(bridge, store);
+    await startUi(bridge, store, { updater });
   } catch (error) {
     if (error.code === "EADDRINUSE") {
       log("The bridge is already running on this PC.");
@@ -43,6 +45,7 @@ async function work() {
   process.on("uncaughtException", (error) => log(`Unexpected problem: ${error?.stack || error}`));
   process.on("unhandledRejection", (error) => log(`Unexpected problem: ${error?.stack || error}`));
   // Only the tray icon is visible after sign-in. "Exit" ends this worker with code 0, so the supervisor stops too.
+  updater.start();
   startTray({ onExit: () => process.exit(0) });
   await bridge.loop();
 }
