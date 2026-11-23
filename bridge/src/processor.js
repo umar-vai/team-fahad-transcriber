@@ -53,8 +53,9 @@ export class Processor {
    */
   async process(file, { settings, setDetail }) {
     const print = fingerprint(file.path, file.size);
-    const info = await this.api.heartbeat({ check: [print], current: file.name });
-    if (info.known?.includes(print)) return { status: "skipped", fingerprint: print };
+    const info = await this.api.heartbeat({ check: [print], checkName: file.name, current: file.name });
+    // Already done on the website (same content, or same file name from this PC or its Drive backup): not again.
+    if (info.known?.includes(print) || info.knownName) return { status: "skipped", fingerprint: print };
 
     setDetail("Reading the audio");
     const { raw, samples } = await decodeToRaw(file.path);

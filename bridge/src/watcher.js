@@ -59,8 +59,10 @@ export class Watcher {
       present.add(file);
       const known = this.store.ledger[file];
       if (known && known.size === stat.size && known.mtimeMs === stat.mtimeMs && known.state !== "retry") continue;
-      // New means it arrived in the folder after the bridge was set up (copying keeps the old modified time, but not the arrival time).
-      const arrived = Math.max(stat.birthtimeMs || 0, stat.ctimeMs || 0);
+      // New means it arrived in the folder after the bridge was set up (copying keeps the old modified time, but not the
+      // creation time). The creation time only: on Windows the "changed" time moves whenever a backup or sync program
+      // touches an old file, which made old recordings look new.
+      const arrived = stat.birthtimeMs || stat.ctimeMs || 0;
       if (watchSince && arrived < watchSince) continue;
       const before = this.seen.get(file);
       if (!before || before.size !== stat.size || before.mtimeMs !== stat.mtimeMs) {

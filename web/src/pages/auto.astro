@@ -143,7 +143,7 @@ const problem = Astro.url.searchParams.get("error") || "";
             : row.open_jobs ? `<span class="pill work">Transcribing</span>`
             : left ? `<span class="pill warn">${left} waiting</span>`
             : `<span class="pill good">All done</span>`;
-          return `<div class="pc-card clickable${d.id === openPc ? " selected" : ""}" data-open="${esc(d.id)}" title="Click for details">
+          return `<div class="pc-card">
             <div class="pc-head"><strong>${esc(row.name)}</strong>${state}</div>
             <div class="pc-big"><b>${num(ok)}</b><span> of ${num(total)} transcribed</span></div>
             <div class="progress"><div style="width:${pct}%"></div></div>
@@ -263,7 +263,7 @@ const problem = Astro.url.searchParams.get("error") || "";
             : d.current_file ? `<span class="pill work">Transcribing</span>`
             : d.queue_size ? `<span class="pill warn">${num(d.queue_size)} waiting</span>`
             : `<span class="pill good">Online</span>`;
-          return `<div class="pc-card">
+          return `<div class="pc-card clickable${d.id === openPc ? " selected" : ""}" data-open="${esc(d.id)}" title="Click for details">
             <div class="pc-head"><strong>${esc(d.name)}</strong>${state}</div>
             <div class="pc-big"><b>${num(d.done_today)}</b><span> transcribed today</span></div>
             <div class="pc-nums">
