@@ -47,6 +47,7 @@ const problem = Astro.url.searchParams.get("error") || "";
       <button class="btn ghost" id="bridgePinSave" type="button">Save PIN</button>
       <span class="muted small-text" id="bridgePinState"></span>
     </div>
+    <div class="pc-detail card" id="pcDetail" hidden></div>
     <p class="muted small-text" style="margin-bottom:0">On a fresh PC the bridge app asks for this PIN, then lists the computers above and the Drive computers (for example Mahbub, Hasan), and the PC takes the chosen one's place and sheet tab. Only one PC stays linked to each name: linking a new PC switches the old one off.</p>
     <p class="muted" id="bridgeResult" style="margin-bottom:0"></p>
   </div>
@@ -142,7 +143,7 @@ const problem = Astro.url.searchParams.get("error") || "";
             : row.open_jobs ? `<span class="pill work">Transcribing</span>`
             : left ? `<span class="pill warn">${left} waiting</span>`
             : `<span class="pill good">All done</span>`;
-          return `<div class="pc-card">
+          return `<div class="pc-card clickable${d.id === openPc ? " selected" : ""}" data-open="${esc(d.id)}" title="Click for details">
             <div class="pc-head"><strong>${esc(row.name)}</strong>${state}</div>
             <div class="pc-big"><b>${num(ok)}</b><span> of ${num(total)} transcribed</span></div>
             <div class="progress"><div style="width:${pct}%"></div></div>
@@ -282,7 +283,46 @@ const problem = Astro.url.searchParams.get("error") || "";
         }).join("")
       : `<p class="muted" style="margin:0">No PC is connected yet. Type a name below, press "Get pairing code", then enter the code in the bridge app on that PC.</p>`;
   }
-  const loadBridge = () => bridgeApi("GET").then(renderBridge).catch((e) => ($("bridgeResult").textContent = e.message));
+  let openPc = "";
+  const when = (ms: number | null) => (ms ? new Date(ms).toLocaleString() : "");
+  function renderPcDetail(data: any) {
+    const d = data.device, t = data.totals;
+    const online = d.last_seen_at && Date.now() - d.last_seen_at < 150_000;
+    const stateText = !online ? "Offline" : d.current_file ? "Transcribing" : d.queue_size ? `${num(d.queue_size)} waiting` : "Online";
+    $("pcDetail").hidden = false;
+    $("pcDetail").innerHTML = `
+      <div class="pc-head"><strong style="font-size:1.2rem">${esc(d.name)}</strong><span class="pill ${online ? "good" : "bad"}">${esc(stateText)}</span>
+        <button class="btn ghost small" type="button" data-close="1" style="margin-left:auto">Close</button></div>
+      <div class="stats">
+        <span><b>${num(t.done)}</b>transcribed</span>
+        <span><b>${num(d.queue_size)}</b>waiting</span>
+        <span class="${t.failed ? "bad-text" : ""}"><b>${num(t.failed)}</b>failed</span>
+        <span><b>${num(t.words)}</b>words</span>
+      </div>
+      <div class="muted small-text">
+        Seen ${ago(d.last_seen_at)}${d.version ? ` · app v${esc(d.version)}` : ""}${d.watch_folder ? ` · Folder: ${esc(d.watch_folder)}` : ""}<br />
+        Google Sheet: ${d.sheet_enabled ? (d.sheet_url ? `<a href="${esc(d.sheet_url)}" target="_blank" rel="noopener">open the tab</a>` : "on (tab is made with the first file)") : "switched off in the app"}
+        ${d.current_file ? `<br />Now: ${esc(d.current_file)}` : ""}
+        ${d.last_error ? `<br /><span class="bad-text">${esc(d.last_error)}</span>` : ""}
+      </div>
+      <div><strong>Per day</strong>
+        <div class="scroll"><table><thead><tr><th>Day</th><th>Transcribed</th><th>Failed</th><th>Words</th></tr></thead><tbody>
+        ${data.days.length ? data.days.map((x: any) => `<tr><td>${esc(x.day)}</td><td>${num(x.done)}</td><td class="${x.failed ? "bad-text" : ""}">${num(x.failed)}</td><td>${num(x.words)}</td></tr>`).join("") : `<tr><td colspan="4" class="muted">No file yet.</td></tr>`}
+        </tbody></table></div></div>
+      <div><strong>Files</strong> <span class="muted small-text">(latest ${data.files.length})</span>
+        <div class="scroll"><table><thead><tr><th>Date</th><th>File</th><th>Status</th><th>Words</th><th>Done at</th></tr></thead><tbody>
+        ${data.files.length ? data.files.map((f: any) => `<tr><td>${esc(f.file_day)}</td><td>${esc(f.name)}${f.error ? `<div class="bad-text small-text">${esc(f.error)}</div>` : ""}</td>
+          <td><span class="pill ${f.status === "done" ? "good" : "bad"}">${f.status === "done" ? "Done" : "Failed"}</span></td><td>${num(f.words)}</td><td class="muted small-text">${esc(when(f.created_at))}</td></tr>`).join("") : `<tr><td colspan="5" class="muted">No file yet.</td></tr>`}
+        </tbody></table></div></div>`;
+  }
+  const loadPc = () => {
+    if (!openPc) { $("pcDetail").hidden = true; return Promise.resolve(); }
+    return bridgeApi("GET", `?id=${encodeURIComponent(openPc)}`).then(renderPcDetail).catch((e) => { openPc = ""; $("pcDetail").hidden = true; $("bridgeResult").textContent = e.message; });
+  };
+  $("pcDetail").addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).closest("button[data-close]")) { openPc = ""; $("pcDetail").hidden = true; loadBridge(); }
+  });
+  const loadBridge = () => bridgeApi("GET").then((data) => { renderBridge(data); return loadPc(); }).catch((e) => ($("bridgeResult").textContent = e.message));
   $("bridgeAdd").addEventListener("click", async () => {
     const name = ($("bridgeName") as HTMLInputElement).value;
     try {
@@ -308,6 +348,13 @@ const problem = Astro.url.searchParams.get("error") || "";
   $("bridgeMode").addEventListener("change", (e) => bridgeApi("PATCH", "", { mode: (e.target as HTMLSelectElement).value }).catch((x) => ($("bridgeResult").textContent = x.message)));
   $("bridgeLanguage").addEventListener("change", (e) => bridgeApi("PATCH", "", { language: (e.target as HTMLSelectElement).value }).catch((x) => ($("bridgeResult").textContent = x.message)));
   $("bridgePcs").addEventListener("click", async (e) => {
+    const card = (e.target as HTMLElement).closest(".pc-card[data-open]") as HTMLElement | null;
+    if (card && !(e.target as HTMLElement).closest("a, button")) {
+      openPc = card.dataset.open === openPc ? "" : card.dataset.open || "";
+      await loadBridge();
+      if (openPc) $("pcDetail").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      return;
+    }
     const button = (e.target as HTMLElement).closest("button[data-remove]") as HTMLElement | null;
     if (!button || !confirm(`Remove ${button.dataset.name}? The PC stops sending files until it is paired again. Its transcripts stay.`)) return;
     await bridgeApi("DELETE", `?id=${encodeURIComponent(button.dataset.remove || "")}`).catch((x) => ($("bridgeResult").textContent = x.message));
