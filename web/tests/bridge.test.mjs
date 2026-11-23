@@ -257,13 +257,15 @@ test("a team PC can switch the Google Sheet off and keeps its shared style and l
 test("a file that was already transcribed (by this PC or from Drive) is not done again, only brand new files are", async () => {
   const d1 = setup();
   d1.db.prepare("INSERT INTO drive_computers (folder_id, name, sheet_json, created_at) VALUES ('f1','Mahbub',NULL,1)").run();
-  d1.db.prepare("INSERT INTO drive_files (file_id, computer_id, name, file_day, job_id, created_at) VALUES ('x1','f1','Call Records/2026-11-11 14-56-14.mp4','2026-11-11','j',1), ('x2','other','2026-11-12 09-00-00.mp4','2026-11-12','j',1)").run();
+  d1.db.prepare("INSERT INTO drive_files (file_id, computer_id, name, file_day, job_id, created_at) VALUES ('x1','f1','Call Records / 2026-11-11 14-56-14.mp4','2026-11-11','j',1), ('x2','other','2026-11-12 09-00-00.mp4','2026-11-12','j',1), ('x3','f1','Call Records/ Sub / 2026-11-13 08-00-00.mp4','2026-11-13','j',1)").run();
   await setLinkPin("u1", "team-pin");
   const choice = (await linkChoices("team-pin")).find((c) => c.name === "Mahbub");
   const linked = await linkDevice("team-pin", choice.key);
   const device = await authDevice(new Request("https://x", { headers: { authorization: `Bearer ${linked.token}` } }));
 
-  assert.equal(await knownName(device, "2026-11-11 14-56-14.mp4"), true, "done from Drive (name inside a sub folder)");
+  assert.equal(await knownName(device, "2026-11-11 14-56-14.mp4"), true, "done from Drive (stored as Folder / name)");
+  assert.equal(await knownName(device, "2026-11-13 08-00-00.mp4"), true, "also inside a deeper folder");
+  assert.equal(await knownName(device, "11-13 08-00-00.mp4"), false, "a part of a name is not a match");
   assert.equal(await knownName(device, "2026-11-12 09-00-00.mp4"), false, "another computer's file is not this one's");
   assert.equal(await knownName(device, "2026-11-23 10-00-00.mp4"), false, "a brand new file is transcribed");
   await completeFile(device, { ...info(1), pieces: pieces("hello there") });

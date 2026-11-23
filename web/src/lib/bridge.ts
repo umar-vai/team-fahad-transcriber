@@ -472,7 +472,8 @@ export async function failFile(device: BridgeDevice, rawBody: any, duration = 0)
 /** Which of these fingerprints does the server already have? The PC skips them (safe to re-scan after a reinstall). */
 /**
  * Was a file with this name already transcribed for this computer? Either by this PC, or from Drive by the
- * nightly automation (same computer name). Such a file is not transcribed again, only brand new files are.
+ * nightly automation (same computer name). Drive stores the name as "Folder / file.mp3" (a path with spaces around the slash). Such a file is not
+ * transcribed again, only brand new files are.
  */
 export async function knownName(device: BridgeDevice, rawName: unknown): Promise<boolean> {
   const name = String(rawName || "").trim().slice(0, 300);
@@ -481,7 +482,7 @@ export async function knownName(device: BridgeDevice, rawName: unknown): Promise
   if (own) return true;
   if (device.kind !== "team") return false;
   const drive = await env.DB.prepare(
-    `SELECT 1 AS x FROM drive_files f WHERE (f.name = ?1 OR SUBSTR(f.name, -LENGTH(?1) - 1) = '/' || ?1)
+    `SELECT 1 AS x FROM drive_files f WHERE (f.name = ?1 OR SUBSTR(f.name, -LENGTH(?1) - 3) = ' / ' || ?1 OR SUBSTR(f.name, -LENGTH(?1) - 1) = '/' || ?1)
        AND f.computer_id IN (SELECT folder_id FROM drive_computers WHERE folder_id = ?2 OR LOWER(name) = LOWER(?3)) LIMIT 1`,
   ).bind(name, device.linked_computer_id || "", device.name).first();
   return Boolean(drive);
