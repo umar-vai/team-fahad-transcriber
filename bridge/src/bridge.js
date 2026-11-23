@@ -43,7 +43,8 @@ export class Bridge {
     if (!this.store.paired) return { state: "unpaired", lastContactAt: 0 };
     if (this.status.needsPairing) return { state: "removed", lastContactAt: this.api.lastOkAt };
     const { lastOkAt, lastFailAt } = this.api;
-    if (lastFailAt > lastOkAt) return { state: "offline", lastContactAt: lastOkAt };
+    // ">=": a failure in the same millisecond as the last success still counts as the latest event.
+    if (lastFailAt && lastFailAt >= lastOkAt) return { state: "offline", lastContactAt: lastOkAt };
     if (lastOkAt && now - lastOkAt < CONNECTED_WITHIN_MS) return { state: "connected", lastContactAt: lastOkAt };
     return { state: lastOkAt ? "offline" : "checking", lastContactAt: lastOkAt };
   }
