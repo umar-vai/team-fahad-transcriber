@@ -17,7 +17,7 @@ Security: each PC has its own secret token (shown once while pairing, stored on 
 ## Install on a PC (about 2 minutes)
 
 1. On the website open **Auto**, type the PC's name (for example `PC-03`) and press **Get pairing code**.
-2. Copy the zip (`TeamFahadBridge-windows.zip`, from this repository's *Actions* or *Releases* page) to the PC, extract it, double-click **install.bat**.
+2. Copy the zip (`TeamFahadBridge-windows.zip` from the [bridge-latest release](https://github.com/umar-vai/team-fahad-transcriber/releases/tag/bridge-latest); do not use GitHub's *Download ZIP* of the source code, it has no Node or ffmpeg) to the PC, extract it, double-click **install.bat**.
 3. A browser page opens (`http://127.0.0.1:47821`): enter the pairing code, choose the folder, press save.
 
 By default only files that arrive **after** setup are transcribed. Tick "also transcribe the files already in the folder" to include the old ones.

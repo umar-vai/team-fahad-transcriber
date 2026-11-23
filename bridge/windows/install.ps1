@@ -33,7 +33,9 @@ if ($Uninstall) {
 New-Item -ItemType Directory -Force -Path $app | Out-Null
 foreach ($item in @("node.exe", "package.json", "src", "ffmpeg")) {
   $from = Join-Path $source $item
-  if (-not (Test-Path $from)) { throw "$item is missing from this folder. Extract the whole zip first." }
+  if (-not (Test-Path $from)) {
+    throw "'$item' is missing. This looks like the source code, not the ready-to-install package. Download TeamFahadBridge-windows.zip from https://github.com/umar-vai/team-fahad-transcriber/releases/tag/bridge-latest , extract it fully, then run install.bat from inside that folder."
+  }
   $to = Join-Path $app $item
   if (Test-Path $to) { Remove-Item $to -Recurse -Force }
   Copy-Item $from $to -Recurse -Force
