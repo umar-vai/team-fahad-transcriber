@@ -49,6 +49,16 @@ export class Api {
     return this.call("/api/bridge/pair", { auth: false, headers: { "content-type": "application/json" }, body: JSON.stringify({ code }) });
   }
 
+  /** The computers this PC may take over (needs the team PIN). */
+  linkList(pin) {
+    return this.call("/api/bridge/link", { auth: false, headers: { "content-type": "application/json" }, body: JSON.stringify({ pin }) });
+  }
+
+  /** Take over the chosen computer: same name, same sheet tab. The old computer is switched off. */
+  link(pin, key) {
+    return this.call("/api/bridge/link", { auth: false, headers: { "content-type": "application/json" }, body: JSON.stringify({ pin, key }) });
+  }
+
   heartbeat(info) {
     return this.call("/api/bridge/heartbeat", { headers: { "content-type": "application/json" }, body: JSON.stringify({ version: this.version, ...info }), timeoutMs: 30_000 });
   }

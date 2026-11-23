@@ -98,6 +98,98 @@ export async function redeemPairingCode(rawCode: string): Promise<{ token: strin
   return { token, deviceId, name: claimed.name };
 }
 
+// ---------- Linking a PC to an existing computer ----------
+
+export const MIN_PIN_LENGTH = 4;
+const MAX_PIN_FAILS = 8;
+const PIN_LOCK_MINUTES = 10;
+
+/** A signed-in person sets (or changes) the team PIN a fresh PC must type before it sees the list. */
+export async function setLinkPin(userId: string, pin: string): Promise<void> {
+  const clean = String(pin || "").trim();
+  if (clean.length < MIN_PIN_LENGTH || clean.length > 40) throw new HttpError(400, `The PIN needs at least ${MIN_PIN_LENGTH} characters.`);
+  const salt = randomToken(8);
+  await env.DB.prepare("UPDATE bridge_settings SET link_pin_hash = ?, link_user_id = ?, link_fail_count = 0, link_locked_until = 0 WHERE id = 1")
+    .bind(`${salt}:${await sha256(`${salt}:${clean}`)}`, userId)
+    .run();
+}
+
+export async function linkPinIsSet(): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT link_pin_hash FROM bridge_settings WHERE id = 1").first<{ link_pin_hash: string | null }>();
+  return Boolean(row?.link_pin_hash);
+}
+
+/** Checks the PIN. Too many wrong tries lock the list for a few minutes. Returns the user the new PC belongs to. */
+async function checkLinkPin(rawPin: string): Promise<string> {
+  const row = await env.DB.prepare("SELECT link_pin_hash, link_user_id, link_fail_count, link_locked_until FROM bridge_settings WHERE id = 1").first<any>();
+  if (!row?.link_pin_hash || !row.link_user_id) throw new HttpError(403, "No team PIN is set yet. Open the Auto page on the website and set one first.");
+  const now = Date.now();
+  if (row.link_locked_until > now) throw new HttpError(429, `Too many wrong PINs. Try again in ${Math.ceil((row.link_locked_until - now) / 60_000)} minutes.`);
+  const [salt] = String(row.link_pin_hash).split(":");
+  const expected = String(row.link_pin_hash).slice(salt.length + 1);
+  const given = await sha256(`${salt}:${String(rawPin || "").trim()}`);
+  let diff = given.length ^ expected.length;
+  for (let i = 0; i < given.length; i++) diff |= given.charCodeAt(i) ^ (expected.charCodeAt(i) || 0);
+  if (diff !== 0) {
+    const fails = Number(row.link_fail_count) + 1;
+    const locked = fails >= MAX_PIN_FAILS;
+    await env.DB.prepare("UPDATE bridge_settings SET link_fail_count = ?, link_locked_until = ? WHERE id = 1").bind(locked ? 0 : fails, locked ? now + PIN_LOCK_MINUTES * 60_000 : 0).run();
+    throw new HttpError(403, locked ? `Too many wrong PINs. Try again in ${PIN_LOCK_MINUTES} minutes.` : "The PIN is wrong.");
+  }
+  if (row.link_fail_count) await env.DB.prepare("UPDATE bridge_settings SET link_fail_count = 0 WHERE id = 1").run();
+  return row.link_user_id;
+}
+
+export interface LinkChoice {
+  key: string;
+  name: string;
+}
+
+/** Every computer a new PC can take over: earlier bridge PCs and Drive computers that no bridge PC has taken yet. */
+export async function linkChoices(pin: string): Promise<LinkChoice[]> {
+  await checkLinkPin(pin);
+  const devices = await env.DB.prepare("SELECT id, name FROM bridge_devices").all<{ id: string; name: string }>();
+  const computers = await env.DB.prepare("SELECT folder_id, name FROM drive_computers WHERE folder_id NOT IN (SELECT linked_computer_id FROM bridge_devices WHERE linked_computer_id IS NOT NULL)").all<{ folder_id: string; name: string }>();
+  const taken = new Set(devices.results.map((d) => d.name.toLowerCase()));
+  return [
+    ...devices.results.map((d) => ({ key: `device:${d.id}`, name: d.name })),
+    ...computers.results.filter((c) => !taken.has(c.name.toLowerCase())).map((c) => ({ key: `computer:${c.folder_id}`, name: c.name })),
+  ].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+
+/**
+ * The new PC takes the place of the chosen computer: same name, same sheet tab, same History owner. A new token
+ * replaces the old one, so a computer that was linked before stops working at once (only one PC per name).
+ */
+export async function linkDevice(pin: string, key: string): Promise<{ token: string; deviceId: string; name: string }> {
+  const userId = await checkLinkPin(pin);
+  const [kind, id] = String(key || "").split(/:(.+)/);
+  const token = randomToken(32);
+  const tokenHash = await sha256(token);
+  const now = Date.now();
+  if (kind === "device" && id) {
+    const device = await env.DB.prepare("SELECT id, name FROM bridge_devices WHERE id = ?").bind(id).first<{ id: string; name: string }>();
+    if (!device) throw new HttpError(404, "This computer was removed from the website. Pick another one.");
+    await env.DB.prepare("UPDATE bridge_devices SET token_hash = ?, last_seen_at = ?, queue_size = 0, current_file = NULL, last_error = NULL WHERE id = ?").bind(tokenHash, now, device.id).run();
+    return { token, deviceId: device.id, name: device.name };
+  }
+  if (kind === "computer" && id) {
+    const computer = await env.DB.prepare("SELECT folder_id, name, sheet_json FROM drive_computers WHERE folder_id = ?").bind(id).first<{ folder_id: string; name: string; sheet_json: string | null }>();
+    if (!computer) throw new HttpError(404, "This computer is not on the website any more. Pick another one.");
+    const deviceId = crypto.randomUUID();
+    try {
+      await env.DB.prepare("INSERT INTO bridge_devices (id, user_id, name, token_hash, sheet_json, created_at, last_seen_at, linked_computer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(deviceId, userId, computer.name, tokenHash, computer.sheet_json, now, now, computer.folder_id)
+        .run();
+    } catch {
+      // Another PC took this computer a moment ago: the list now shows it as a normal PC.
+      throw new HttpError(409, "Another PC just linked to this computer. Press Refresh and pick it again.");
+    }
+    return { token, deviceId, name: computer.name };
+  }
+  throw new HttpError(400, "Pick a computer from the list.");
+}
+
 // ---------- Device requests ----------
 
 export async function authDevice(request: Request): Promise<BridgeDevice> {
@@ -105,7 +197,7 @@ export async function authDevice(request: Request): Promise<BridgeDevice> {
   const token = header.match(/^Bearer\s+([a-f0-9]{64})$/i)?.[1];
   if (!token) throw new HttpError(401, "This PC is not connected. Pair it again with a new code.");
   const device = await env.DB.prepare("SELECT * FROM bridge_devices WHERE token_hash = ?").bind(await sha256(token.toLowerCase())).first<BridgeDevice>();
-  if (!device) throw new HttpError(401, "This PC was removed. Pair it again with a new code.");
+  if (!device) throw new HttpError(401, "This PC was removed, or another computer took its place. Link it again.");
   return device;
 }
 

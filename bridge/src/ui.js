@@ -81,6 +81,16 @@ export function startUi(bridge, store, { port = UI_PORT } = {}) {
         bridge.nudge();
         return send(res, 200, { ok: true, name: result.name });
       }
+      if (url.pathname === "/api/link-list") return send(res, 200, await api.linkList(String(body.pin || "")));
+      if (url.pathname === "/api/link") {
+        const result = await api.link(String(body.pin || ""), String(body.key || ""));
+        store.saveConfig({ token: result.token, deviceName: result.name });
+        bridge.status.needsPairing = false;
+        bridge.status.lastError = null;
+        bridge.lastBeat = 0;
+        bridge.nudge();
+        return send(res, 200, { ok: true, name: result.name });
+      }
       if (url.pathname === "/api/folder") {
         const folder = String(body.folder || "").trim();
         if (!folder) return send(res, 400, { error: "Choose a folder." });

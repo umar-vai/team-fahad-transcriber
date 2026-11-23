@@ -9,6 +9,7 @@ import { Bridge } from "./bridge.js";
 import { log } from "./log.js";
 import { VERSION } from "./paths.js";
 import { Store } from "./store.js";
+import { startTray } from "./tray.js";
 import { UI_PORT, startUi } from "./ui.js";
 
 const self = fileURLToPath(import.meta.url);
@@ -41,6 +42,8 @@ async function work() {
   log(`Team Fahad Bridge ${VERSION} started. Setup page: http://127.0.0.1:${UI_PORT}`);
   process.on("uncaughtException", (error) => log(`Unexpected problem: ${error?.stack || error}`));
   process.on("unhandledRejection", (error) => log(`Unexpected problem: ${error?.stack || error}`));
+  // Only the tray icon is visible after sign-in. "Exit" ends this worker with code 0, so the supervisor stops too.
+  startTray({ onExit: () => process.exit(0) });
   await bridge.loop();
 }
 
