@@ -10,6 +10,7 @@ import { NoAudioError, PIECE_SECONDS, decodeToRaw, planPieces } from "../src/aud
 import { Bridge } from "../src/bridge.js";
 import { Processor } from "../src/processor.js";
 import { Store } from "../src/store.js";
+import { startUi } from "../src/ui.js";
 import { Watcher, fingerprint } from "../src/watcher.js";
 
 process.env.BRIDGE_QUIET = "1";
@@ -84,6 +85,11 @@ function fakeSite({ down = false } = {}) {
     const body = Buffer.concat(chunks);
     const reply = (status, data) => (res.writeHead(status, { "content-type": "application/json" }), res.end(JSON.stringify(data)));
     if (state.down) return reply(503, { error: "Server busy, try again." });
+    if (req.url === "/api/bridge/link") {
+      const { pin, key } = JSON.parse(body.toString());
+      if (pin !== "team-pin") return reply(403, { error: "The PIN is wrong." });
+      return key ? reply(200, { token: "a".repeat(64), deviceId: "d9", name: "Hasan" }) : reply(200, { computers: [{ key: "computer:f1", name: "Hasan" }] });
+    }
     if (state.reject401 && req.url !== "/api/bridge/pair") return reply(401, { error: "This PC was removed." });
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/api/bridge/pair") {
@@ -254,4 +260,29 @@ test("the connection indicator follows what really happened with the website", a
 
   store.saveConfig({ token: "" });
   assert.equal(bridge.connectionState().state, "unpaired");
+});
+
+test("the status window lists computers after the team PIN and links this PC to the chosen one", async () => {
+  const site = await fakeSite();
+  const dir = tmp();
+  const store = new Store(path.join(dir, "data"));
+  store.saveConfig({ server: site.url });
+  const api = new Api(store, "test");
+  const bridge = new Bridge(store, api, { processor: new Processor(api), watcher: new Watcher(store, { stableMs: 0 }) });
+  const port = 47900 + Math.floor(Math.random() * 90);
+  const ui = await startUi(bridge, store, { port });
+  const post = (route, body) => fetch(`http://127.0.0.1:${port}${route}`, { method: "POST", headers: { "content-type": "application/json", "x-bridge": "1" }, body: JSON.stringify(body) });
+  try {
+    assert.equal((await post("/api/link-list", { pin: "wrong" })).status, 403);
+    assert.equal(store.paired, false);
+    const list = await (await post("/api/link-list", { pin: "team-pin" })).json();
+    assert.deepEqual(list.computers, [{ key: "computer:f1", name: "Hasan" }]);
+    const linked = await (await post("/api/link", { pin: "team-pin", key: "computer:f1" })).json();
+    assert.equal(linked.name, "Hasan");
+    assert.equal(store.paired, true);
+    assert.equal(store.config.deviceName, "Hasan");
+  } finally {
+    ui.close();
+    site.server.close();
+  }
 });

@@ -40,6 +40,14 @@ const problem = Astro.url.searchParams.get("error") || "";
         </select>
       </label>
     </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px;align-items:flex-end">
+      <label>Team PIN for linking a PC to an existing computer
+        <input id="bridgePin" type="text" maxlength="40" autocomplete="off" placeholder="At least 4 characters" />
+      </label>
+      <button class="btn ghost" id="bridgePinSave" type="button">Save PIN</button>
+      <span class="muted small-text" id="bridgePinState"></span>
+    </div>
+    <p class="muted small-text" style="margin-bottom:0">On a fresh PC the bridge app asks for this PIN, then lists the computers above and the Drive computers (for example Mahbub, Hasan), and the PC takes the chosen one's place and sheet tab. Only one PC stays linked to each name: linking a new PC switches the old one off.</p>
     <p class="muted" id="bridgeResult" style="margin-bottom:0"></p>
   </div>
 
@@ -245,6 +253,7 @@ const problem = Astro.url.searchParams.get("error") || "";
   function renderBridge(data: any) {
     ($("bridgeMode") as unknown as HTMLSelectElement).value = data.settings.mode;
     ($("bridgeLanguage") as unknown as HTMLSelectElement).value = data.settings.language;
+    $("bridgePinState").textContent = data.pinSet ? "A PIN is set. Saving a new one replaces it." : "No PIN yet: PCs cannot link to an existing computer.";
     const devices: any[] = data.devices || [];
     $("bridgePcs").innerHTML = devices.length
       ? devices.map((d) => {
@@ -281,6 +290,17 @@ const problem = Astro.url.searchParams.get("error") || "";
       const shown = `${code.slice(0, 4)}-${code.slice(4)}`;
       $("bridgeResult").innerHTML = `Pairing code for <b>${esc(name)}</b>: <b style="font-size:1.4em;letter-spacing:.1em">${shown}</b>. Enter it in the bridge app within ${Math.round((expiresAt - Date.now()) / 60000)} minutes. It works once.`;
       ($("bridgeName") as HTMLInputElement).value = "";
+    } catch (error) {
+      $("bridgeResult").textContent = (error as Error).message;
+    }
+  });
+  $("bridgePinSave").addEventListener("click", async () => {
+    const input = $("bridgePin") as HTMLInputElement;
+    try {
+      await bridgeApi("PATCH", "", { pin: input.value });
+      input.value = "";
+      $("bridgeResult").textContent = "PIN saved. Type it in the bridge app when linking a PC.";
+      await loadBridge();
     } catch (error) {
       $("bridgeResult").textContent = (error as Error).message;
     }

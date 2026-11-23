@@ -19,6 +19,7 @@ export const PAGE = String.raw`<!doctype html>
   input[type=text] { width:100%; padding:10px 12px; font-size:16px; border:1px solid var(--line); border-radius:8px; background:transparent; color:inherit; }
   button { font:inherit; font-weight:600; padding:9px 16px; border-radius:8px; border:1px solid var(--main); background:var(--main); color:#fff; cursor:pointer; }
   button.ghost { background:transparent; color:var(--main); }
+  select { flex:1 1 240px; padding:10px 12px; font-size:16px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:inherit; }
   button:disabled { opacity:.5; cursor:default; }
   .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
   .row > input { flex:1 1 240px; width:auto; }
@@ -40,9 +41,26 @@ export const PAGE = String.raw`<!doctype html>
 
   <div class="card" id="pairCard" hidden>
     <h2>ধাপ ১: এই পিসি যুক্ত করুন</h2>
-    <p class="muted" style="margin-top:0">ওয়েবসাইটের <b>Auto</b> পেজে পিসির নাম লিখে <b>Get pairing code</b> চাপুন। যে কোডটি আসবে সেটি এখানে লিখুন।</p>
-    <div class="row"><input type="text" id="code" placeholder="ABCD-EFGH" maxlength="12" autocomplete="off"><button id="pairBtn">যুক্ত করুন</button></div>
-    <div class="err" id="pairErr"></div>
+    <div class="row" style="margin-top:0">
+      <button id="tabLink">আগের পিসির সাথে যুক্ত করুন</button>
+      <button class="ghost" id="tabNew">নতুন পিসি</button>
+    </div>
+
+    <div id="linkBox">
+      <p class="muted">আগে থেকে ওয়েবসাইটে থাকা কোনো পিসির (যেমন মাহবুব, হাসান) জায়গায় এই কম্পিউটারকে বসান। ওই পিসির শিট ট্যাবেই নতুন ট্রান্সক্রাইব যাবে। <b>একটা নামে একটাই কম্পিউটার চালু থাকে:</b> আগের কম্পিউটারটি বন্ধ হয়ে যাবে। ওয়েবসাইটের <b>Auto</b> পেজে ঠিক করা টিম পিনটি লিখুন।</p>
+      <div class="row"><input type="text" id="pin" placeholder="টিম পিন" maxlength="40" autocomplete="off"><button id="listBtn">তালিকা দেখান</button></div>
+      <div id="pickBox" hidden>
+        <div class="muted" style="margin-top:12px">এই কম্পিউটার কোনটি হবে?</div>
+        <div class="row"><select id="pick"></select><button id="linkBtn">যুক্ত করুন</button></div>
+      </div>
+      <div class="err" id="linkErr"></div>
+    </div>
+
+    <div id="newBox" hidden>
+      <p class="muted">ওয়েবসাইটের <b>Auto</b> পেজে পিসির নাম লিখে <b>Get pairing code</b> চাপুন। যে কোডটি আসবে সেটি এখানে লিখুন।</p>
+      <div class="row"><input type="text" id="code" placeholder="ABCD-EFGH" maxlength="12" autocomplete="off"><button id="pairBtn">যুক্ত করুন</button></div>
+      <div class="err" id="pairErr"></div>
+    </div>
   </div>
 
   <div class="card" id="folderCard" hidden>
@@ -98,7 +116,7 @@ export const PAGE = String.raw`<!doctype html>
     const CONN = {
       connected: ["good", "ওয়েবসাইটের সাথে সংযুক্ত", s.serverHost + (s.contactAgo == null ? "" : " · শেষ যোগাযোগ " + (s.contactAgo < 90 ? s.contactAgo + " সেকেন্ড" : Math.round(s.contactAgo / 60) + " মিনিট") + " আগে")],
       offline: ["bad", "ওয়েবসাইটে পৌঁছানো যাচ্ছে না", "ফাইল এই পিসিতে জমছে, ইন্টারনেট এলে নিজে থেকেই পাঠাবে।"],
-      removed: ["bad", "সংযোগ বিচ্ছিন্ন", "এই পিসি ওয়েবসাইট থেকে সরানো হয়েছে। নতুন কোড নিয়ে আবার যুক্ত করুন।"],
+      removed: ["bad", "সংযোগ বিচ্ছিন্ন", "এই পিসি ওয়েবসাইট থেকে সরানো হয়েছে। আবার যুক্ত করুন (অন্য কম্পিউটার এই পিসির জায়গা নিয়ে থাকতে পারে)।"],
       checking: ["warn", "ওয়েবসাইটের সাথে সংযোগ দেখা হচ্ছে…", s.serverHost],
     };
     const c = CONN[s.connection];
@@ -118,6 +136,26 @@ export const PAGE = String.raw`<!doctype html>
     $("failedList").innerHTML = s.failed.map((f) => "<div>" + esc(f.file.split(/[\\/]/).pop()) + " <span class=bad>" + esc(f.error || "") + "</span></div>").join("");
     $("log").textContent = s.log.join("\n");
   }
+  function showTab(link) {
+    $("linkBox").hidden = !link; $("newBox").hidden = link;
+    $("tabLink").className = link ? "" : "ghost"; $("tabNew").className = link ? "ghost" : "";
+  }
+  $("tabLink").onclick = () => showTab(true);
+  $("tabNew").onclick = () => showTab(false);
+  showTab(true);
+  $("listBtn").onclick = async () => {
+    $("linkErr").textContent = "";
+    try {
+      const { computers } = await post("/api/link-list", { pin: $("pin").value });
+      $("pick").innerHTML = computers.map((c) => "<option value='" + esc(c.key) + "'>" + esc(c.name) + "</option>").join("");
+      $("pickBox").hidden = !computers.length;
+      if (!computers.length) $("linkErr").textContent = "ওয়েবসাইটে এখনো কোনো পিসি নেই। 'নতুন পিসি' ব্যবহার করুন।";
+    } catch (e) { $("pickBox").hidden = true; $("linkErr").textContent = e.message; }
+  };
+  $("linkBtn").onclick = async () => {
+    $("linkErr").textContent = "";
+    try { await post("/api/link", { pin: $("pin").value, key: $("pick").value }); $("pin").value = ""; $("pickBox").hidden = true; await refresh(); } catch (e) { $("linkErr").textContent = e.message; }
+  };
   $("pairBtn").onclick = async () => {
     $("pairErr").textContent = "";
     try { await post("/api/pair", { code: $("code").value }); $("code").value = ""; await refresh(); } catch (e) { $("pairErr").textContent = e.message; }

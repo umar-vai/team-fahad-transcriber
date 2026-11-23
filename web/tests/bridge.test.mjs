@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { env } from "./stubs/cloudflare-workers.mjs";
-import { authDevice, completeFile, createPairingCode, failFile, knownFingerprints, normalizeCode, redeemPairingCode } from "../src/lib/bridge.ts";
+import { authDevice, completeFile, createPairingCode, failFile, knownFingerprints, linkChoices, linkDevice, normalizeCode, redeemPairingCode, setLinkPin } from "../src/lib/bridge.ts";
 
 /** A tiny D1 look-alike on node:sqlite. */
 function fakeD1() {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys = ON");
-  for (const file of ["0001_init", "0006_bridge"]) db.exec(readFileSync(new URL(`../migrations/${file}.sql`, import.meta.url), "utf8"));
+  for (const file of ["0001_init", "0003_auto_drive", "0006_bridge", "0007_bridge_link"]) db.exec(readFileSync(new URL(`../migrations/${file}.sql`, import.meta.url), "utf8"));
   const wrap = (sql, args = []) => ({
     bind: (...values) => wrap(sql, values),
     run: async () => ({ meta: { changes: Number(db.prepare(sql).run(...args).changes) } }),
@@ -153,4 +153,46 @@ test("sheet rows are written to the PC's own dated tab, created once", async () 
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("a fresh PC needs the team PIN, then takes over an earlier PC or a Drive computer and its sheet tab", async () => {
+  const d1 = setup();
+  const old = await pairDevice("Mahbub");
+  d1.db.prepare("INSERT INTO drive_computers (folder_id, name, sheet_json, created_at) VALUES ('f1','Hasan','{\"title\":\"Hasan\"}',1), ('f2','Mahbub',NULL,1)").run();
+
+  await assert.rejects(() => linkChoices("1234"), /No team PIN/);
+  await assert.rejects(() => setLinkPin("u1", "12"), /at least 4/);
+  await setLinkPin("u1", "team-pin");
+  assert.equal(d1.db.prepare("SELECT link_pin_hash FROM bridge_settings").get().link_pin_hash.includes("team-pin"), false);
+  await assert.rejects(() => linkChoices("nope"), /wrong/);
+
+  // The Drive computer with the same name as a bridge PC is not listed twice.
+  assert.deepEqual((await linkChoices("team-pin")).map((c) => c.name), ["Hasan", "Mahbub"]);
+
+  // A new computer takes over the Drive computer "Hasan": same name and same sheet tab.
+  const hasan = (await linkChoices("team-pin")).find((c) => c.name === "Hasan");
+  const linked = await linkDevice("team-pin", hasan.key);
+  assert.equal(linked.name, "Hasan");
+  const device = await authDevice(new Request("https://x", { headers: { authorization: `Bearer ${linked.token}` } }));
+  assert.equal(device.sheet_json, '{"title":"Hasan"}');
+  assert.equal(device.user_id, "u1");
+  assert.deepEqual((await linkChoices("team-pin")).map((c) => c.name), ["Hasan", "Mahbub"], "now listed as a normal PC");
+
+  // Linking Mahbub again switches the old computer off at once.
+  const mahbub = (await linkChoices("team-pin")).find((c) => c.name === "Mahbub");
+  const second = await linkDevice("team-pin", mahbub.key);
+  assert.equal(second.deviceId, old.deviceId);
+  await assert.rejects(() => authDevice(new Request("https://x", { headers: { authorization: `Bearer ${old.token}` } })), /another computer took its place/);
+  assert.equal((await authDevice(new Request("https://x", { headers: { authorization: `Bearer ${second.token}` } }))).name, "Mahbub");
+  await assert.rejects(() => linkDevice("team-pin", "device:missing"), /removed/);
+});
+
+test("too many wrong PINs lock the list for a while", async () => {
+  const d1 = setup();
+  await setLinkPin("u1", "team-pin");
+  for (let i = 0; i < 7; i++) await assert.rejects(() => linkChoices("bad"), /wrong/);
+  await assert.rejects(() => linkChoices("bad"), /Too many/);
+  await assert.rejects(() => linkChoices("team-pin"), /Too many/);
+  d1.db.prepare("UPDATE bridge_settings SET link_locked_until = 1").run();
+  assert.deepEqual(await linkChoices("team-pin"), []);
 });

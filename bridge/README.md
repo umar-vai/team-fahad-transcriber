@@ -19,15 +19,18 @@ Security: each PC has its own secret token (shown once while pairing, stored on 
 One file: **`TeamFahadBridge-Setup.exe`** (about 70 MB, Node and ffmpeg are inside, nothing else to install).
 Download it from the [bridge-latest release](https://github.com/umar-vai/team-fahad-transcriber/releases/tag/bridge-latest) and send it to whoever sets up the office PCs (Telegram, USB, anything). Do not use GitHub's *Download ZIP* of the source code.
 
-For each PC:
+Once: on the website open **Auto** and set the **Team PIN** (at least 4 characters).
 
-1. On the website open **Auto**, type the PC's name (for example `PC-03`) and press **Get pairing code**.
-2. On that PC double-click **TeamFahadBridge-Setup.exe**, press Next, Install, Finish. No administrator password is needed.
-3. The **Team Fahad Bridge** window opens: type the code, press *Connect*, choose the folder, press *Save*.
+For each PC, double-click **TeamFahadBridge-Setup.exe**, press Next, Install, Finish (no administrator password). The **Team Fahad Bridge** window opens with two ways to connect:
+
+- **Link to an earlier PC** (for a computer that is already on the website, for example Mahbub or Hasan): type the team PIN, press *Show list*, pick the computer, press *Link*. This PC takes that computer's place: same name, same Google Sheets tab, same History. Both the earlier bridge PCs and the Drive "Computers" are in the list. **Only one PC stays linked to a name:** the computer that was linked before stops working at once (it shows "disconnected").
+- **New PC:** on the website open **Auto**, type the PC's name (for example `PC-03`), press **Get pairing code**, and type the code in the window.
+
+Then choose the folder and press *Save*. Wrong PINs are counted: 8 wrong tries lock the list for 10 minutes.
 
 Windows may show **"Windows protected your PC"** the first time, because the file is not code-signed (signing certificates cost money). Press **More info**, then **Run anyway**. Telegram may also say the file is unknown: that is the same reason.
 
-What you get: a **Team Fahad Bridge** icon on the desktop and in the Start menu (opens the status window), and the bridge starts by itself, hidden, every time Windows signs in. Closing the window does not stop it. By default only files that arrive **after** setup are transcribed; tick "also transcribe the files already in the folder" to include the old ones.
+What you get: a **Team Fahad Bridge** icon on the desktop and in the Start menu (opens the status window), and the bridge starts by itself every time Windows signs in, with **no window, only the icon in the system tray** (next to the clock; it may be under the ^ arrow). Double click the icon, or right click and *Open status window*, to see the status; right click and *Exit* stops it until the next sign-in. Closing the window does not stop it. By default only files that arrive **after** setup are transcribed; tick "also transcribe the files already in the folder" to include the old ones.
 
 - **Silent install for many PCs:** `TeamFahadBridge-Setup.exe /SILENT` (add `/DIR="D:\Bridge"` to choose the folder).
 - **Update:** run the newer Setup.exe over the old one. Settings are kept.

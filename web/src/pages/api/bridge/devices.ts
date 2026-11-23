@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { handler, HttpError, json, requireUser } from "../../../lib/http";
-import { bridgeSettings, createPairingCode, saveBridgeSettings } from "../../../lib/bridge";
+import { bridgeSettings, createPairingCode, linkPinIsSet, saveBridgeSettings, setLinkPin } from "../../../lib/bridge";
 import { dayOf } from "../../../lib/autodrive";
 
 /** The PCs, their live state and today's numbers (Auto page). */
@@ -21,6 +21,7 @@ export const GET: APIRoute = handler(async (context) => {
   return json({
     today,
     settings: await bridgeSettings(),
+    pinSet: await linkPinIsSet(),
     devices: devices.results.map((d) => ({ ...d, sheet_url: d.sheet_json ? JSON.parse(d.sheet_json).url : null, sheet_json: undefined })),
   });
 });
@@ -32,10 +33,11 @@ export const POST: APIRoute = handler(async (context) => {
   return json(await createPairingCode(user.id, String(body.name || "")));
 });
 
-/** Output style and language for all bridge PCs. */
+/** Output style and language for all bridge PCs, and the team PIN for linking a PC. */
 export const PATCH: APIRoute = handler(async (context) => {
-  requireUser(context);
+  const user = requireUser(context);
   const body: any = await context.request.json().catch(() => ({}));
+  if (body.pin !== undefined) await setLinkPin(user.id, String(body.pin));
   await saveBridgeSettings({ mode: body.mode === undefined ? undefined : String(body.mode), language: body.language === undefined ? undefined : String(body.language) });
   return json({ ok: true });
 });
