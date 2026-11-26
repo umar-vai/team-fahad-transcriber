@@ -7,7 +7,8 @@
  */
 import { env } from "cloudflare:workers";
 import { googleApi } from "./google";
-import { sheetsConfigured, spreadsheetId } from "./sheets";
+import { accountSpreadsheetId, sheetsConfigured } from "./sheets";
+import { getConnections, type DriveConnection } from "./autodrive";
 
 /** Bangladesh calendar day (UTC+6, no daylight saving). */
 const dayOf = (ms: number) => new Date(ms + 6 * 3600_000).toISOString().slice(0, 10);
@@ -84,19 +85,19 @@ export function summarize(input: DashInput): DashSummary {
 
 // ---------- Reading the data ----------
 
-async function loadInput(now: number): Promise<DashInput> {
-  const computers = (await env.DB.prepare("SELECT folder_id, name, total_files FROM drive_computers ORDER BY name COLLATE NOCASE").all<any>()).results.map((c) => ({
+async function loadInput(now: number, account: DriveConnection): Promise<DashInput> {
+  const computers = (await env.DB.prepare("SELECT folder_id, name, total_files FROM drive_computers WHERE account_id = ? ORDER BY name COLLATE NOCASE").bind(account.id).all<any>()).results.map((c) => ({
     id: String(c.folder_id),
     name: String(c.name),
     totalFiles: Number(c.total_files || 0),
   }));
-  const picked = (await env.DB.prepare("SELECT file_id, computer_id, name, file_day, job_id FROM drive_files").all<any>()).results;
+  const picked = (await env.DB.prepare("SELECT file_id, computer_id, name, file_day, job_id FROM drive_files WHERE computer_id IN (SELECT folder_id FROM drive_computers WHERE account_id = ?)").bind(account.id).all<any>()).results;
   const jobs = (
     await env.DB.prepare(
-      `SELECT j.id, j.status, j.batch_id, b.status AS batch_status, b.failed_count FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id`,
-    ).all<any>()
+      `SELECT j.id, j.status, j.batch_id, b.status AS batch_status, b.failed_count FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id WHERE j.account_id = ?`,
+    ).bind(account.id).all<any>()
   ).results;
-  const connection = await env.DB.prepare("SELECT user_id FROM drive_connection WHERE id = 1").first<{ user_id: string }>();
+  const connection = { user_id: account.user_id };
 
   // Per job: which files are done, failed, or still waiting.
   const stateByFile = new Map<string, { state: FileState; name?: string; error?: string }>();
@@ -246,19 +247,38 @@ function chartRequest(sheetId: number, title: string, anchorColumn: number, anch
   };
 }
 
-export async function refreshSheetDashboard(now = Date.now()): Promise<string | null> {
-  if (!sheetsConfigured()) return null;
-  const id = spreadsheetId(env.SHEETS_SPREADSHEET_ID)!;
+/** Rewrite the Dashboard tab of every connected account (each in its own spreadsheet). Returns the first dashboard's link. */
+export async function refreshSheetDashboard(now = Date.now(), accountId?: string): Promise<string | null> {
+  const accounts = (await getConnections()).filter((a) => !accountId || a.id === accountId);
+  let first: string | null = null;
+  for (const account of accounts) {
+    if (!sheetsConfigured(account.spreadsheet)) continue;
+    // Accounts that share one spreadsheet each get a tab named after their email.
+    const shared = accounts.length > 1 && accounts.some((o) => o.id !== account.id && accountSpreadsheetId(o.spreadsheet) === accountSpreadsheetId(account.spreadsheet));
+    try {
+      const url = await writeDashboard(account, now, shared ? `${DASHBOARD_TAB} ${account.google_email.split("@")[0]}`.slice(0, 100) : DASHBOARD_TAB);
+      first ||= url;
+    } catch (error) {
+      // One account's sheet problem must not stop the others (an explicit single-account refresh still reports it).
+      if (accountId) throw error;
+      console.warn(`Dashboard of ${account.google_email} failed:`, error);
+    }
+  }
+  return first;
+}
+
+async function writeDashboard(account: DriveConnection, now: number, tabTitle: string): Promise<string> {
+  const id = accountSpreadsheetId(account.spreadsheet)!;
   const base = env.SHEETS_API_BASE || API;
-  const summary = summarize(await loadInput(now));
+  const summary = summarize(await loadInput(now, account));
   const updated = new Date(now + 6 * 3600_000).toISOString().slice(0, 16).replace("T", " ");
   const built = buildGrid(summary, updated);
 
   const meta = await googleApi(`${base}/${id}?fields=sheets(properties(sheetId,title),charts(chartId))`);
-  let sheet = (meta.sheets || []).find((s: any) => s.properties?.title === DASHBOARD_TAB);
+  let sheet = (meta.sheets || []).find((s: any) => s.properties?.title === tabTitle);
   if (!sheet) {
     const added = await googleApi(`${base}/${id}:batchUpdate`, {
-      body: { requests: [{ addSheet: { properties: { title: DASHBOARD_TAB, index: 0, tabColor: NAVY, gridProperties: { hideGridlines: true } } } }] },
+      body: { requests: [{ addSheet: { properties: { title: tabTitle, index: 0, tabColor: NAVY, gridProperties: { hideGridlines: true } } } }] },
     });
     sheet = { properties: { sheetId: added.replies?.[0]?.addSheet?.properties?.sheetId }, charts: [] };
   }

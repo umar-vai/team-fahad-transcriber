@@ -5,7 +5,7 @@
  */
 import { env } from "cloudflare:workers";
 import { googleApi } from "./google";
-import { safeTabTitle, sheetsConfigured, spreadsheetId, type SheetTab } from "./sheets";
+import { safeTabTitle, type SheetTab } from "./sheets";
 
 const API = "https://sheets.googleapis.com/v4/spreadsheets";
 const NAVY = { red: 0.15, green: 0.17, blue: 0.32 };
@@ -97,8 +97,7 @@ export function buildBatchGrid(folderName: string, items: DashItem[], updated: s
 }
 
 export async function writeBatchDashboard(tab: SheetTab, folderName: string, items: DashItem[]): Promise<void> {
-  if (!sheetsConfigured()) return;
-  const id = spreadsheetId(env.SHEETS_SPREADSHEET_ID)!;
+  const id = tab.spreadsheetId;
   const base = env.SHEETS_API_BASE || API;
   const meta = await googleApi(`${base}/${id}?fields=sheets(properties(sheetId,title),charts(chartId))`);
   const wanted = `Dashboard ${tab.title}`.slice(0, 100);

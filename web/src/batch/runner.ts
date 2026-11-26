@@ -47,6 +47,10 @@ export interface BatchConfig {
   computerId?: string;
   /** The files are private: download them with the connected Drive account's token. */
   authDrive?: boolean;
+  /** Which connected Drive account owns the files (its token downloads them). */
+  accountId?: string;
+  /** The spreadsheet of that account (link or id); empty means the team spreadsheet. */
+  spreadsheet?: string | null;
   /** Nightly auto jobs: false skips the Notion export (Sheets only). Manual folder batches always use Notion. */
   notion?: boolean;
 }
@@ -196,7 +200,7 @@ export class BatchRunner extends DurableObject<Env> {
       status: state.status,
       finishedAt: state.finishedAt,
       notion: { configured: notionConfigured(), url: state.notion?.pageUrl || null, error: state.notionError || null },
-      sheet: { configured: sheetsConfigured(), url: state.sheet?.url || null, error: state.sheetError || null },
+      sheet: { configured: sheetsConfigured(config.spreadsheet), url: state.sheet?.url || null, error: state.sheetError || null },
       items: items.map((item) => ({
         index: item.index,
         name: item.name,
@@ -361,7 +365,7 @@ export class BatchRunner extends DurableObject<Env> {
     let token: string | undefined;
     if (config.authDrive) {
       try {
-        token = await driveAccessToken();
+        token = await driveAccessToken(config.accountId);
       } catch (error) {
         return this.prepFailed(item, message(error));
       }
@@ -483,7 +487,7 @@ export class BatchRunner extends DurableObject<Env> {
   private async transcribePart(config: BatchConfig, item: BatchItem, part: PartInfo, codes: string[]): Promise<PieceResult> {
     const audio = item.audio!;
     const isLast = part.end >= audio.dataEnd;
-    const token = config.authDrive ? await driveAccessToken() : undefined;
+    const token = config.authDrive ? await driveAccessToken(config.accountId) : undefined;
     // MP3 pieces are read a little past their end so the cut can move to the next frame.
     const wanted = audio.kind === "mp3" && !isLast ? part.end + MP3_SLACK : part.end;
     const fetched = await driveRange(item.fileId, part.start, Math.min(wanted, audio.dataEnd), token);
@@ -579,9 +583,9 @@ export class BatchRunner extends DurableObject<Env> {
         state.notionError = message(error);
       }
     }
-    if (!state.sheet && sheetsConfigured()) {
+    if (!state.sheet && sheetsConfigured(config.spreadsheet)) {
       try {
-        state.sheet = await createSheetTab(config.folderName, Boolean(config.computerId));
+        state.sheet = await createSheetTab(config.folderName, Boolean(config.computerId), config.spreadsheet);
         state.sheetError = undefined;
         if (config.computerId) {
           await this.env.DB.prepare("UPDATE drive_computers SET sheet_json = ? WHERE folder_id = ?").bind(JSON.stringify(state.sheet), config.computerId).run();
