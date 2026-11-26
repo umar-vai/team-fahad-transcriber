@@ -146,6 +146,22 @@ export async function discoverComputers(token: string): Promise<ComputerFolder[]
     pageToken = result.nextPageToken || "";
     if (!pageToken) break;
   }
+  // Ordinary folders uploaded into My Drive sit directly under the root, so they have a parent and the
+  // search above misses them. List the top-level My Drive folders as well.
+  let rootToken = "";
+  for (let page = 0; page < 30; page++) {
+    const result = await driveGet(token, "files", {
+      q: `mimeType = '${FOLDER_MIME}' and 'root' in parents and trashed = false`,
+      fields: "nextPageToken,files(id,name)",
+      pageSize: "1000",
+      ...(rootToken ? { pageToken: rootToken } : {}),
+    });
+    for (const file of result.files || []) {
+      if (!found.has(String(file.id))) found.set(String(file.id), { id: String(file.id), name: String(file.name || "Folder") });
+    }
+    rootToken = result.nextPageToken || "";
+    if (!rootToken) break;
+  }
   for (const id of String(env.DRIVE_COMPUTER_FOLDER_IDS || "").split(/[\s,]+/).filter(Boolean)) {
     if (found.has(id)) continue;
     const meta = await driveGet(token, `files/${id}`, { fields: "id,name,mimeType" }).catch(() => null);

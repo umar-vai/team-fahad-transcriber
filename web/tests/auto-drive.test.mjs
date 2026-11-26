@@ -21,6 +21,10 @@ function fakeDrive(items) {
     const q = url.searchParams.get("q") || "";
     const parent = q.match(/'([^']+)' in parents/)?.[1];
     let files;
+    if (parent === "root") {
+      files = items.filter((i) => i.mimeType === "application/vnd.google-apps.folder" && i.parents?.includes("ROOT"));
+      return new Response(JSON.stringify({ files }), { status: 200 });
+    }
     if (url.pathname.endsWith("/files") && parent) {
       files = items.filter((i) => i.parents?.includes(parent));
     } else if (url.pathname.endsWith("/files")) {
@@ -43,6 +47,16 @@ test("computers are the owned folders that have no parent", async () => {
   ]);
   const computers = await discoverComputers("token");
   assert.deepEqual(computers.map((c) => c.name), ["Akash", "Hasan"]);
+});
+
+test("ordinary folders uploaded into My Drive are found too", async () => {
+  env.DRIVE_API_BASE = "https://drive.test/v3";
+  fakeDrive([
+    { id: "up", name: "3000 calls", mimeType: FOLDER, parents: ["ROOT"] },
+    { id: "deep", name: "Inner", mimeType: FOLDER, parents: ["up"] },
+  ]);
+  const computers = await discoverComputers("token");
+  assert.deepEqual(computers.map((c) => c.name), ["3000 calls"]);
 });
 
 test("lists every media file, even ones with an old modified time, through subfolders, tagged with their day", async () => {
