@@ -18,7 +18,7 @@ export interface WavFormat {
 }
 
 export interface AudioInfo {
-  kind: "mp3" | "wav";
+  kind: "mp3" | "wav" | "flac";
   /** First byte of the audio data (after tags or the WAV header). */
   dataStart: number;
   /** One past the last byte of the audio data. */
@@ -48,12 +48,30 @@ export const TARGET_PART_SECONDS = 300;
 export const PROBE_BYTES = 128 * 1024;
 /** Extra bytes read after a MP3 piece so the cut can move to the next frame boundary. */
 export const MP3_SLACK = 4096;
+/** FLAC cannot be cut by bytes, so a FLAC file is sent whole. Longer calls are not supported yet. */
+export const MAX_FLAC_BYTES = 12 * 1024 * 1024;
 
 // ---------- Probing ----------
 
 export function probeAudio(head: Uint8Array, totalSize: number): AudioInfo {
   if (ascii(head, 0, 4) === "RIFF" && ascii(head, 8, 4) === "WAVE") return probeWav(head, totalSize);
+  if (ascii(head, 0, 4) === "fLaC") return probeFlac(head, totalSize);
   return probeMp3(head, totalSize);
+}
+
+/** FLAC: the STREAMINFO block gives the sample rate and the number of samples. */
+function probeFlac(head: Uint8Array, totalSize: number): AudioInfo {
+  if (head.length < 8 + 34 || (head[4] & 0x7f) !== 0) throw new UnsupportedAudioError("This FLAC file is damaged (no stream information).");
+  if (totalSize > MAX_FLAC_BYTES) {
+    throw new UnsupportedAudioError(`This FLAC file is ${(totalSize / 1048576).toFixed(0)} MB. FLAC files are sent whole, so only files up to ${MAX_FLAC_BYTES / 1048576} MB are supported.`);
+  }
+  const d = 8;
+  const sampleRate = (head[d + 10] << 12) | (head[d + 11] << 4) | (head[d + 12] >> 4);
+  const samples = (head[d + 13] & 0x0f) * 2 ** 32 + (((head[d + 14] << 24) | (head[d + 15] << 16) | (head[d + 16] << 8) | head[d + 17]) >>> 0);
+  if (!sampleRate) throw new UnsupportedAudioError("This FLAC file is damaged (no sample rate).");
+  // A stream that does not say how long it is: assume about 50 kbit/s of speech.
+  const duration = samples > 0 ? samples / sampleRate : (totalSize * 8) / 50_000;
+  return { kind: "flac", dataStart: 0, dataEnd: totalSize, duration, bytesPerSec: totalSize / duration };
 }
 
 function ascii(b: Uint8Array, at: number, len: number): string {
@@ -153,7 +171,7 @@ function probeMp3(head: Uint8Array, totalSize: number): AudioInfo {
   }
   if (start >= totalSize) throw new UnsupportedAudioError("This file has no audio in it.");
   const at = findMp3Frame(head, start);
-  if (at < 0) throw new UnsupportedAudioError("This file is not a readable MP3 or WAV audio file.");
+  if (at < 0) throw new UnsupportedAudioError("This file is not a readable MP3, WAV or FLAC audio file.");
   const header = mp3Header(head, at)!;
 
   const dataEnd = totalSize;
@@ -186,6 +204,7 @@ function probeMp3(head: Uint8Array, totalSize: number): AudioInfo {
 // ---------- Planning ----------
 
 export function planParts(info: AudioInfo, maxBytes = MAX_PART_BYTES, targetSeconds = TARGET_PART_SECONDS): PartPlan[] {
+  if (info.kind === "flac") return [{ index: 0, offset: 0, duration: info.duration, start: 0, end: info.dataEnd }];
   const align = info.wav ? info.wav.blockAlign : 1;
   let partBytes = Math.min(Math.floor(targetSeconds * info.bytesPerSec), maxBytes);
   partBytes -= partBytes % align;
@@ -241,6 +260,7 @@ export function wavFile(format: WavFormat, pcm: Uint8Array): Uint8Array {
  * Both ends use the same rule, so neighbouring pieces meet exactly with nothing lost or repeated.
  */
 export function buildPart(info: AudioInfo, plan: PartPlan, fetched: Uint8Array, isLast: boolean): { data: Uint8Array; mimeType: string } {
+  if (info.kind === "flac") return { data: fetched.subarray(0, plan.end - plan.start), mimeType: "audio/flac" };
   if (info.kind === "wav") {
     return { data: wavFile(info.wav!, fetched.subarray(0, plan.end - plan.start)), mimeType: "audio/wav" };
   }

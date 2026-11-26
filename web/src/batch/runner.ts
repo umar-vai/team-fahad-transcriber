@@ -386,7 +386,7 @@ export class BatchRunner extends DurableObject<Env> {
     } catch (error) {
       if (error instanceof UnsupportedAudioError) {
         item.permanent = true;
-        await this.fail(item, `${error.message} Only MP3 and WAV files are supported, so it was skipped.`);
+        await this.fail(item, `${error.message} Only MP3, WAV and FLAC files are supported, so it was skipped.`);
         return 0;
       }
       return this.prepFailed(item, message(error));
