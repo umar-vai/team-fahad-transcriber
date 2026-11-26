@@ -29,7 +29,7 @@ export interface DriveFolder {
 /** Only MP3 and WAV: they can be cut by bytes, so no container is needed to prepare them. */
 const MEDIA_EXT = /\.(mp3|wav)$/i;
 const FOLDER_MIME = "application/vnd.google-apps.folder";
-const MAX_FILES = 300;
+const MAX_FILES = 5000;
 const MAX_DEPTH = 4;
 
 export function driveFolderId(raw: string): string | null {
