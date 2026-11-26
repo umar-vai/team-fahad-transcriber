@@ -4,7 +4,7 @@ import { LANGUAGES } from "../../../lib/gemini";
 import { handler, HttpError, json, requireUser } from "../../../lib/http";
 import { dayOf, dayStart, discoverComputers, driveAccessToken, getConnection, getConnections, nightlyRun, retryAllFailed } from "../../../lib/autodrive";
 import { refreshSheetDashboard } from "../../../lib/sheetdash";
-import { accountSpreadsheetId, spreadsheetId } from "../../../lib/sheets";
+import { accountSpreadsheetId, checkSpreadsheetAccess, spreadsheetId } from "../../../lib/sheets";
 import { BATCH_MODES, type BatchMode } from "../../../batch/runner";
 
 /** Connected Drive accounts, the computers found in them, and the latest nightly jobs. */
@@ -102,6 +102,12 @@ export const PATCH: APIRoute = handler(async (context) => {
   if (body.spreadsheet !== undefined) {
     const raw = String(body.spreadsheet || "").trim();
     if (raw && !spreadsheetId(raw)) throw new HttpError(400, "That is not a Google Sheets link. Paste the spreadsheet link (docs.google.com/spreadsheets/d/...), or leave it empty to use the team spreadsheet.");
+    if (raw) {
+      // Fail now, not on the first transcript: the sheet must be shared with the service account.
+      await checkSpreadsheetAccess(raw).catch((error) => {
+        throw new HttpError(400, error instanceof Error ? error.message : String(error));
+      });
+    }
     await set("spreadsheet", raw || null);
   }
   if (body.extraFolders !== undefined) await set("extra_folders", String(body.extraFolders || "").trim().slice(0, 2000) || null);
