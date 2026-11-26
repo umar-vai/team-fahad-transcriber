@@ -51,6 +51,8 @@ export function dayStart(day: string): number {
 // ---------- Connection and tokens ----------
 
 export interface DriveConnection {
+  /** Account id ("primary" for the first one, a random id for the others). */
+  id: string;
   user_id: string;
   google_email: string;
   refresh_token: string;
@@ -60,31 +62,47 @@ export interface DriveConnection {
   enabled: number;
   /** 1 = also write to Notion (off by default; Sheets is always used). */
   notion_enabled: number;
+  /** Link or id of this account's own spreadsheet; empty means the team spreadsheet. */
+  spreadsheet: string | null;
+  /** Extra folder ids to scan besides the top level of My Drive and the Computers folders. */
+  extra_folders: string | null;
   connected_at: number;
 }
 
-export async function getConnection(): Promise<DriveConnection | null> {
-  return env.DB.prepare("SELECT * FROM drive_connection WHERE id = 1").first<DriveConnection>();
+/** Every connected Google Drive account. */
+export async function getConnections(): Promise<DriveConnection[]> {
+  return (await env.DB.prepare("SELECT * FROM drive_accounts ORDER BY connected_at").all<DriveConnection>()).results;
 }
 
-export async function saveConnection(info: { userId: string; email: string; refreshToken: string; appUrl: string }): Promise<void> {
+/** One account by id; without an id, the first one. */
+export async function getConnection(id?: string | null): Promise<DriveConnection | null> {
+  if (id) return env.DB.prepare("SELECT * FROM drive_accounts WHERE id = ?").bind(id).first<DriveConnection>();
+  return env.DB.prepare("SELECT * FROM drive_accounts ORDER BY connected_at LIMIT 1").first<DriveConnection>();
+}
+
+/** Add an account, or refresh the token of one that is already connected (same Google email). */
+export async function saveConnection(info: { userId: string; email: string; refreshToken: string; appUrl: string }): Promise<string> {
+  const existing = await env.DB.prepare("SELECT id FROM drive_accounts WHERE google_email = ?").bind(info.email).first<{ id: string }>();
+  const id = existing?.id || crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO drive_connection (id, user_id, google_email, refresh_token, app_url, connected_at)
-     VALUES (1, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id, google_email = excluded.google_email,
+    `INSERT INTO drive_accounts (id, user_id, google_email, refresh_token, app_url, connected_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(google_email) DO UPDATE SET user_id = excluded.user_id,
        refresh_token = excluded.refresh_token, app_url = excluded.app_url, enabled = 1, connected_at = excluded.connected_at`,
   )
-    .bind(info.userId, info.email, info.refreshToken, info.appUrl, Date.now())
+    .bind(id, info.userId, info.email, info.refreshToken, info.appUrl, Date.now())
     .run();
+  return id;
 }
 
-let cachedToken: { token: string; until: number; refresh: string } | null = null;
+const cachedTokens = new Map<string, { token: string; until: number; refresh: string }>();
 
-/** Short-lived Drive access token from the stored refresh token. */
-export async function driveAccessToken(connection?: DriveConnection | null): Promise<string> {
-  const conn = connection ?? (await getConnection());
+/** Short-lived Drive access token from the stored refresh token of one account. */
+export async function driveAccessToken(connection?: DriveConnection | string | null): Promise<string> {
+  const conn = typeof connection === "string" || !connection ? await getConnection(connection || undefined) : connection;
   if (!conn) throw new Error("Google Drive is not connected yet. Open the Auto page and press Connect Drive.");
-  if (cachedToken && cachedToken.refresh === conn.refresh_token && cachedToken.until > Date.now()) return cachedToken.token;
+  const cached = cachedTokens.get(conn.id);
+  if (cached && cached.refresh === conn.refresh_token && cached.until > Date.now()) return cached.token;
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -98,10 +116,11 @@ export async function driveAccessToken(connection?: DriveConnection | null): Pro
   const payload: any = await response.json().catch(() => ({}));
   if (!response.ok || !payload.access_token) {
     const reason = payload.error_description || payload.error || response.status;
-    throw new Error(`Google Drive access was refused (${reason}). Press Connect Drive on the Auto page again.`);
+    throw new Error(`Google Drive access of ${conn.google_email} was refused (${reason}). Press Connect Drive on the Auto page again.`);
   }
-  cachedToken = { token: payload.access_token, refresh: conn.refresh_token, until: Date.now() + (Number(payload.expires_in) || 3600) * 1000 - 120_000 };
-  return cachedToken.token;
+  const entry = { token: payload.access_token as string, refresh: conn.refresh_token, until: Date.now() + (Number(payload.expires_in) || 3600) * 1000 - 120_000 };
+  cachedTokens.set(conn.id, entry);
+  return entry.token;
 }
 
 // ---------- Drive listing ----------
@@ -120,6 +139,13 @@ async function driveGet(token: string, path: string, params: Record<string, stri
   }
 }
 
+/** A folder id from a bare id or a drive.google.com/drive/folders/<id> link. */
+export function folderIdOf(raw: string): string {
+  const value = String(raw || "").trim();
+  const match = value.match(/\/folders\/([\w-]+)/);
+  return match ? match[1] : /^[\w-]{10,}$/.test(value) ? value : "";
+}
+
 export interface ComputerFolder {
   id: string;
   name: string;
@@ -130,7 +156,7 @@ export interface ComputerFolder {
  * the folders owned by the account that have no parent. DRIVE_COMPUTER_FOLDER_IDS (comma separated
  * ids) can be set as a fallback or to add folders by hand.
  */
-export async function discoverComputers(token: string): Promise<ComputerFolder[]> {
+export async function discoverComputers(token: string, extraFolders = ""): Promise<ComputerFolder[]> {
   const found = new Map<string, ComputerFolder>();
   let pageToken = "";
   for (let page = 0; page < 30; page++) {
@@ -162,9 +188,10 @@ export async function discoverComputers(token: string): Promise<ComputerFolder[]
     rootToken = result.nextPageToken || "";
     if (!rootToken) break;
   }
-  for (const id of String(env.DRIVE_COMPUTER_FOLDER_IDS || "").split(/[\s,]+/).filter(Boolean)) {
+  const manual = `${env.DRIVE_COMPUTER_FOLDER_IDS || ""},${extraFolders}`.split(/[\s,]+/).map(folderIdOf).filter(Boolean);
+  for (const id of manual) {
     if (found.has(id)) continue;
-    const meta = await driveGet(token, `files/${id}`, { fields: "id,name,mimeType" }).catch(() => null);
+    const meta = await driveGet(token, `files/${id}`, { fields: "id,name,mimeType", supportsAllDrives: "true" }).catch(() => null);
     if (meta?.mimeType === FOLDER_MIME) found.set(id, { id, name: String(meta.name || "Computer") });
   }
   return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -273,50 +300,66 @@ async function listWithRetry(token: string, folderId: string): Promise<FoundFile
  * and nothing is done twice. Safe to run more than once.
  */
 export async function queueNight(now = Date.now()): Promise<QueueResult> {
-  const connection = await getConnection();
-  if (!connection) throw new HttpError(400, "Google Drive is not connected yet.");
-  if (!connection.enabled) return { day: dayOf(now), computers: [] };
-  const token = await driveAccessToken(connection);
+  const connections = await getConnections();
+  if (!connections.length) throw new HttpError(400, "Google Drive is not connected yet.");
   const today = dayOf(now);
   const result: QueueResult = { day: today, computers: [] };
-
-  for (const computer of await discoverComputers(token)) {
-    await env.DB.prepare(
-      `INSERT INTO drive_computers (folder_id, name, created_at) VALUES (?, ?, ?)
-       ON CONFLICT(folder_id) DO UPDATE SET name = excluded.name`,
-    )
-      .bind(computer.id, computer.name, now)
-      .run();
-    let all: FoundFile[];
-    let fresh: FoundFile[];
+  for (const connection of connections) {
+    if (!connection.enabled) continue;
+    let token: string;
+    let found: ComputerFolder[];
     try {
-      all = await listWithRetry(token, computer.id);
-      fresh = await filterUnseen(all);
+      token = await driveAccessToken(connection);
+      found = await discoverComputers(token, connection.extra_folders || "");
     } catch (error) {
-      // One unreadable computer must not stop the others.
+      // One account with a broken login must not stop the other accounts.
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`Listing ${computer.name} failed:`, error);
-      await env.DB.prepare("UPDATE drive_computers SET last_scan_at = ?, scan_error = ? WHERE folder_id = ?").bind(now, message.slice(0, 300), computer.id).run();
-      result.computers.push({ name: computer.name, newFiles: -1, totalFiles: 0, error: message });
+      console.error(`Drive account ${connection.google_email} failed:`, error);
+      result.computers.push({ name: connection.google_email, newFiles: -1, totalFiles: 0, error: message });
       continue;
     }
-    await env.DB.prepare("UPDATE drive_computers SET total_files = ?, last_scan_at = ?, scan_error = NULL WHERE folder_id = ?").bind(all.length, now, computer.id).run();
-    result.computers.push({ name: computer.name, newFiles: fresh.length, totalFiles: all.length });
-    for (let i = 0; i < fresh.length; i += MAX_FILES_PER_JOB) {
-      const chunk = fresh.slice(i, i + MAX_FILES_PER_JOB);
-      const jobId = crypto.randomUUID();
-      await env.DB.batch([
-        env.DB.prepare(
-          `INSERT INTO drive_jobs (id, computer_id, computer_name, day, status, files_json, created_at) VALUES (?, ?, ?, ?, 'queued', ?, ?)`,
-        ).bind(jobId, computer.id, computer.name.slice(0, 200), today, JSON.stringify(chunk), now + i),
-        ...chunk.map((f) =>
-          env.DB.prepare(`INSERT OR IGNORE INTO drive_files (file_id, computer_id, name, file_day, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-            .bind(f.id, computer.id, f.path.slice(0, 300), f.day, jobId, now),
-        ),
-      ]);
+    for (const computer of found) {
+      await queueComputer(connection, token, computer, today, now, result);
     }
   }
   return result;
+}
+
+async function queueComputer(connection: DriveConnection, token: string, computer: ComputerFolder, today: string, now: number, result: QueueResult): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO drive_computers (folder_id, name, account_id, created_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(folder_id) DO UPDATE SET name = excluded.name, account_id = excluded.account_id`,
+  )
+    .bind(computer.id, computer.name, connection.id, now)
+    .run();
+  let all: FoundFile[];
+  let fresh: FoundFile[];
+  try {
+    all = await listWithRetry(token, computer.id);
+    fresh = await filterUnseen(all);
+  } catch (error) {
+    // One unreadable computer must not stop the others.
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Listing ${computer.name} failed:`, error);
+    await env.DB.prepare("UPDATE drive_computers SET last_scan_at = ?, scan_error = ? WHERE folder_id = ?").bind(now, message.slice(0, 300), computer.id).run();
+    result.computers.push({ name: computer.name, newFiles: -1, totalFiles: 0, error: message });
+    return;
+  }
+  await env.DB.prepare("UPDATE drive_computers SET total_files = ?, last_scan_at = ?, scan_error = NULL WHERE folder_id = ?").bind(all.length, now, computer.id).run();
+  result.computers.push({ name: computer.name, newFiles: fresh.length, totalFiles: all.length });
+  for (let i = 0; i < fresh.length; i += MAX_FILES_PER_JOB) {
+    const chunk = fresh.slice(i, i + MAX_FILES_PER_JOB);
+    const jobId = crypto.randomUUID();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO drive_jobs (id, computer_id, computer_name, account_id, day, status, files_json, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`,
+      ).bind(jobId, computer.id, computer.name.slice(0, 200), connection.id, today, JSON.stringify(chunk), now + i),
+      ...chunk.map((f) =>
+        env.DB.prepare(`INSERT OR IGNORE INTO drive_files (file_id, computer_id, name, file_day, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+          .bind(f.id, computer.id, f.path.slice(0, 300), f.day, jobId, now),
+      ),
+    ]);
+  }
 }
 
 // ---------- Running the queue ----------
@@ -325,6 +368,7 @@ export interface JobRow {
   id: string;
   computer_id: string;
   computer_name: string;
+  account_id: string;
   day: string;
   status: "queued" | "running" | "done";
   files_json: string;
@@ -350,6 +394,8 @@ async function startJob(connection: DriveConnection, job: JobRow): Promise<void>
     total: files.length,
     computerId: job.computer_id,
     authDrive: true,
+    accountId: connection.id,
+    spreadsheet: connection.spreadsheet,
     notion: Boolean(connection.notion_enabled),
   };
   await env.DB.prepare(
@@ -370,8 +416,8 @@ async function startJob(connection: DriveConnection, job: JobRow): Promise<void>
  */
 export async function pumpJobs(force = false): Promise<{ started: number; retried: number; finished: number }> {
   const summary = { started: 0, retried: 0, finished: 0 };
-  const connection = await getConnection();
-  if (!connection?.enabled) return summary;
+  const accounts = new Map((await getConnections()).filter((c) => c.enabled).map((c) => [c.id, c]));
+  if (!accounts.size) return summary;
 
   const running = await env.DB.prepare(
     `SELECT j.id, b.status AS batch_status FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id WHERE j.status = 'running'`,
@@ -387,10 +433,12 @@ export async function pumpJobs(force = false): Promise<{ started: number; retrie
   }
 
   if (active < MAX_CONCURRENT) {
-    const queued = await env.DB.prepare("SELECT * FROM drive_jobs WHERE status = 'queued' ORDER BY created_at LIMIT ?")
-      .bind(MAX_CONCURRENT - active)
-      .all<JobRow>();
+    // Jobs of every account share the slots, oldest first. Jobs of a switched-off account wait.
+    const queued = await env.DB.prepare("SELECT * FROM drive_jobs WHERE status = 'queued' ORDER BY created_at LIMIT 200").all<JobRow>();
     for (const job of queued.results) {
+      if (active >= MAX_CONCURRENT) break;
+      const connection = accounts.get(job.account_id);
+      if (!connection) continue;
       try {
         await startJob(connection, job);
         summary.started++;
@@ -405,15 +453,17 @@ export async function pumpJobs(force = false): Promise<{ started: number; retrie
     const now = Date.now();
     // The pause before the next try grows with every try: 5, 10, 15 ... 30 minutes.
     const candidates = await env.DB.prepare(
-      `SELECT j.id, j.batch_id, j.attempts, b.finished_at
+      `SELECT j.id, j.batch_id, j.attempts, j.account_id, b.finished_at
          FROM drive_jobs j JOIN batches b ON b.id = j.batch_id
         WHERE j.status = 'done' AND b.status = 'done' AND b.failed_count > 0 AND j.attempts < ?
         ORDER BY j.attempts, b.finished_at LIMIT 40`,
     )
       .bind(MAX_ATTEMPTS)
-      .all<{ id: string; batch_id: string; attempts: number; finished_at: number | null }>();
+      .all<{ id: string; batch_id: string; attempts: number; account_id: string; finished_at: number | null }>();
     for (const job of candidates.results) {
       if (active >= MAX_CONCURRENT) break;
+      const connection = accounts.get(job.account_id);
+      if (!connection) continue;
       const wait = Math.min(job.attempts + 1, 6) * RETRY_COOLDOWN_MS;
       if (!force && job.finished_at && now - job.finished_at < wait) continue;
       const runner = env.BATCH_RUNNER.getByName(job.batch_id);

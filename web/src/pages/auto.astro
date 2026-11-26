@@ -8,6 +8,7 @@ if (!user) return Astro.redirect("/login?next=/auto");
 const notice = Astro.url.searchParams.get("connected") ? "Google Drive connected." : "";
 const problem = Astro.url.searchParams.get("error") || "";
 ---
+<script is:inline type="application/json" id="opts" set:html={JSON.stringify({ modes: Object.entries(BATCH_MODES), languages: Object.keys(LANGUAGES) })} />
 <Base title="Auto · Team Fahad Transcriber">
   <div class="page-head">
     <div>
@@ -65,31 +66,18 @@ const problem = Astro.url.searchParams.get("error") || "";
     <div class="pc-grid" id="computers"></div>
   </section>
 
-  <div class="card" id="settings" hidden style="margin-top:16px">
-    <h2 style="margin-top:0">Settings</h2>
-    <label><input type="checkbox" id="enabled" /> Automatic nightly transcription is on</label>
-    <br />
-    <label><input type="checkbox" id="notion" /> Also save to Notion (off: Google Sheets only)</label>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
-      <label>Output style
-        <select id="mode">
-          {Object.entries(BATCH_MODES).map(([value, label]) => <option value={value}>{label}</option>)}
-        </select>
-      </label>
-      <label>Language
-        <select id="language">
-          {Object.keys(LANGUAGES).map((name) => <option value={name}>{name}</option>)}
-        </select>
-      </label>
+  <div id="settings" hidden>
+    <div id="accountCards"></div>
+    <div class="card" style="margin-top:16px">
+      <h2 style="margin-top:0">Run now</h2>
+      <p class="muted small-text" style="margin-top:0">These act on every connected Drive account.</p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <button class="btn" id="run" type="button">Run the nightly scan now</button>
+        <button class="btn" id="retryFailed" type="button">Retry all failed files</button>
+        <button class="btn ghost" id="sheetDash" type="button">Update sheet dashboards</button>
+      </div>
+      <p class="muted" id="result" style="margin-bottom:0"></p>
     </div>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
-      <button class="btn" id="check" type="button">Check computers in Drive</button>
-      <button class="btn" id="run" type="button">Run the nightly scan now</button>
-      <button class="btn" id="retryFailed" type="button">Retry all failed files</button>
-      <button class="btn ghost" id="sheetDash" type="button">Update sheet dashboard</button>
-      <a class="btn ghost hidden" id="sheetLink" target="_blank" rel="noopener">Open the sheet</a>
-    </div>
-    <p class="muted" id="result" style="margin-bottom:0"></p>
   </div>
 
   <div class="card" id="jobs" hidden style="margin-top:16px">
@@ -160,20 +148,49 @@ const problem = Astro.url.searchParams.get("error") || "";
         }).join("")
       : `<p class="muted">No scan has run yet. Press "Run the nightly scan now" below.</p>`;
   }
+  const opts = JSON.parse(document.getElementById("opts")!.textContent || "{}");
+  const selectHtml = (name: string, values: [string, string][], current: string) =>
+    `<select data-field="${name}">${values.map(([v, l]) => `<option value="${esc(v)}"${v === current ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  function renderAccounts(data: any) {
+    const accounts: any[] = data.accounts || [];
+    $("connection").innerHTML = accounts.length
+      ? `<strong>Connected Drive accounts:</strong> ${accounts.map((a) => esc(a.email)).join(", ")}
+         <a class="btn" style="margin-left:12px" href="/auth/drive">Connect another Drive account</a>`
+      : `<p style="margin-top:0">Connect a Google account whose Drive holds the folders to transcribe. It only gets read-only access. You can connect more than one account later.</p><a class="btn" href="/auth/drive">Connect Drive</a>`;
+    $("accountCards").innerHTML = accounts.map((a) => `
+      <div class="card" data-account="${esc(a.id)}" style="margin-top:16px">
+        <div class="section-head" style="margin-top:0"><h2 style="margin:0">${esc(a.email)}</h2>
+          <button class="btn ghost small" type="button" data-act="disconnect">Disconnect</button></div>
+        <label><input type="checkbox" data-field="enabled"${a.enabled ? " checked" : ""} /> Automatic nightly transcription is on</label><br />
+        <label><input type="checkbox" data-field="notion"${a.notion ? " checked" : ""} /> Also save to Notion (off: Google Sheets only)</label>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
+          <label>Output style ${selectHtml("mode", opts.modes, a.mode)}</label>
+          <label>Language ${selectHtml("language", opts.languages.map((n: string) => [n, n]), a.language)}</label>
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;align-items:flex-end">
+          <label style="flex:1;min-width:260px">This account's spreadsheet link (empty: the team spreadsheet)
+            <input type="text" data-field="spreadsheet" value="${esc(a.spreadsheet)}" placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
+          <button class="btn ghost small" type="button" data-act="save-sheet">Save</button>
+        </div>
+        <p class="muted small-text" style="margin:6px 0 0">Share that spreadsheet with the service account as Editor.</p>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;align-items:flex-end">
+          <label style="flex:1;min-width:260px">Extra folders to scan (links or ids, for folders inside other folders or shared with this account)
+            <input type="text" data-field="extraFolders" value="${esc(a.extraFolders)}" placeholder="https://drive.google.com/drive/folders/..." /></label>
+          <button class="btn ghost small" type="button" data-act="save-folders">Save</button>
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
+          <button class="btn" type="button" data-act="check">Check folders in Drive</button>
+          <button class="btn ghost" type="button" data-act="dash">Update sheet dashboard</button>
+          ${a.sheetUrl ? `<a class="btn ghost" href="${esc(a.sheetUrl)}" target="_blank" rel="noopener">Open the sheet</a>` : ""}
+        </div>
+        <p class="muted small-text" data-note style="margin-bottom:0"></p>
+      </div>`).join("");
+  }
   function render(data: any) {
-    const link = $("sheetLink") as unknown as HTMLAnchorElement;
-    link.classList.toggle("hidden", !data.sheetUrl);
-    if (data.sheetUrl) link.href = data.sheetUrl;
     $("dash").hidden = !data.connected;
     if (data.connected) renderDashboard(data);
-    $("connection").innerHTML = data.connected
-      ? `<strong>Connected:</strong> ${esc(data.email)} <a class="btn" style="margin-left:12px" href="/auth/drive">Reconnect</a>`
-      : `<p style="margin-top:0">Connect the Google account whose Drive holds the Computers folders. It only gets read-only access.</p><a class="btn" href="/auth/drive">Connect Drive</a>`;
+    renderAccounts(data);
     $("settings").hidden = $("jobs").hidden = !data.connected;
-    ($("enabled") as HTMLInputElement).checked = data.enabled;
-    ($("notion") as HTMLInputElement).checked = data.notion;
-    ($("mode") as unknown as HTMLSelectElement).value = data.mode;
-    ($("language") as unknown as HTMLSelectElement).value = data.language;
     allJobs = data.jobs || [];
     renderJobs();
   }
@@ -364,22 +381,67 @@ const problem = Astro.url.searchParams.get("error") || "";
   // Live status: only while the page is open and visible.
   setInterval(() => { if (!document.hidden) loadBridge(); }, 20_000);
 
-  async function load(check = false) {
-    const data = await api("GET", check ? "?check=1" : "");
+  async function load(check = "") {
+    const data = await api("GET", check ? `?check=1&account=${encodeURIComponent(check)}` : "");
     render(data);
     if (check) {
-      $("result").textContent = data.driveError
-        ? `Drive error: ${data.driveError}`
-        : data.computers?.length
-          ? `Found ${data.computers.length} computers: ${data.computers.map((c: any) => c.name).join(", ")}`
-          : "No computer folders were found. Set DRIVE_COMPUTER_FOLDER_IDS as a fallback.";
+      const note = document.querySelector(`[data-account="${CSS.escape(check)}"] [data-note]`);
+      if (note) {
+        note.textContent = data.driveError
+          ? `Drive error: ${data.driveError}`
+          : data.computers?.length
+            ? `Found ${data.computers.length} folders: ${data.computers.map((c: any) => c.name).join(", ")}`
+            : "No folders were found. If the folder is inside another folder, paste its link under Extra folders.";
+      }
     }
   }
-  const save = (patch: object) => api("PATCH", "", patch).catch((e) => ($("result").textContent = e.message));
-  $("enabled").addEventListener("change", (e) => save({ enabled: (e.target as HTMLInputElement).checked }));
-  $("notion").addEventListener("change", (e) => save({ notion: (e.target as HTMLInputElement).checked }));
-  $("mode").addEventListener("change", (e) => save({ mode: (e.target as HTMLSelectElement).value }));
-  $("language").addEventListener("change", (e) => save({ language: (e.target as HTMLSelectElement).value }));
+  $("accountCards").addEventListener("click", async (e) => {
+    const button = (e.target as HTMLElement).closest("button[data-act]") as HTMLElement | null;
+    const card = (e.target as HTMLElement).closest("[data-account]") as HTMLElement | null;
+    if (!button || !card) return;
+    const id = card.dataset.account || "";
+    const note = card.querySelector("[data-note]") as HTMLElement;
+    const value = (field: string) => (card.querySelector(`input[data-field="${field}"]`) as HTMLInputElement).value;
+    try {
+      switch (button.dataset.act) {
+        case "check":
+          note.textContent = "Checking…";
+          await load(id);
+          break;
+        case "save-sheet":
+          await api("PATCH", "", { account: id, spreadsheet: value("spreadsheet") });
+          await load();
+          (document.querySelector(`[data-account="${CSS.escape(id)}"] [data-note]`) as HTMLElement).textContent = "Spreadsheet saved.";
+          break;
+        case "save-folders":
+          await api("PATCH", "", { account: id, extraFolders: value("extraFolders") });
+          await load();
+          (document.querySelector(`[data-account="${CSS.escape(id)}"] [data-note]`) as HTMLElement).textContent = "Folders saved. They are scanned the next time the scan runs.";
+          break;
+        case "dash": {
+          note.textContent = "Updating the sheet dashboard…";
+          const result = await api("POST", `?dashboard=1&account=${encodeURIComponent(id)}`);
+          note.innerHTML = `Sheet dashboard updated. <a href="${esc(result.url)}" target="_blank" rel="noopener">Open it</a>`;
+          break;
+        }
+        case "disconnect":
+          if (!confirm("Disconnect this Drive account? Finished transcripts stay, waiting files are dropped.")) return;
+          await api("DELETE", `?account=${encodeURIComponent(id)}`);
+          await load();
+          break;
+      }
+    } catch (error) {
+      note.textContent = (error as Error).message;
+    }
+  });
+  $("accountCards").addEventListener("change", (e) => {
+    const input = e.target as HTMLInputElement | HTMLSelectElement;
+    const card = input.closest("[data-account]") as HTMLElement | null;
+    const field = input.dataset.field;
+    if (!card || !field || !["enabled", "notion", "mode", "language"].includes(field)) return;
+    const value = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : input.value;
+    api("PATCH", "", { account: card.dataset.account, [field]: value }).catch((x) => (($("result").textContent = x.message)));
+  });
   $("sheetDash").addEventListener("click", async () => {
     $("result").textContent = "Updating the sheet dashboard…";
     try {
@@ -401,7 +463,6 @@ const problem = Astro.url.searchParams.get("error") || "";
       $("result").textContent = (error as Error).message;
     }
   });
-  $("check").addEventListener("click", () => load(true).catch((e) => ($("result").textContent = e.message)));
   $("run").addEventListener("click", async () => {
     $("result").textContent = "Scanning Drive…";
     try {

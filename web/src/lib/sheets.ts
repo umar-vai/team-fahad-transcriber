@@ -31,8 +31,13 @@ export function spreadsheetId(raw: string | undefined): string | null {
   return /^[\w-]{20,}$/.test(value) ? value : null;
 }
 
-export function sheetsConfigured(): boolean {
-  return Boolean(serviceAccount() && spreadsheetId(env.SHEETS_SPREADSHEET_ID));
+/** The spreadsheet an account writes to: its own, or the team spreadsheet. */
+export function accountSpreadsheetId(own?: string | null): string | null {
+  return spreadsheetId(own || undefined) || spreadsheetId(env.SHEETS_SPREADSHEET_ID);
+}
+
+export function sheetsConfigured(own?: string | null): boolean {
+  return Boolean(serviceAccount() && accountSpreadsheetId(own));
 }
 
 /** Tab names cannot contain : \ / ? * [ ] and are limited to 100 characters. */
@@ -43,8 +48,8 @@ export function safeTabTitle(name: string, taken: Set<string>): string {
   return title;
 }
 
-export async function createSheetTab(folderName: string, dated = false): Promise<SheetTab> {
-  const id = spreadsheetId(env.SHEETS_SPREADSHEET_ID)!;
+export async function createSheetTab(folderName: string, dated = false, own?: string | null): Promise<SheetTab> {
+  const id = accountSpreadsheetId(own)!;
   const base = env.SHEETS_API_BASE || API;
   const meta = await googleApi(`${base}/${id}?fields=sheets.properties(sheetId,title)`);
   const taken = new Set<string>((meta.sheets || []).map((s: any) => String(s.properties?.title || "").toLowerCase()));

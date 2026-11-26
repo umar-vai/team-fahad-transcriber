@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { env } from "./stubs/cloudflare-workers.mjs";
-import { dayFromName, dayOf, dayStart, discoverComputers, listNewFiles } from "../src/lib/autodrive.ts";
+import { folderIdOf, dayFromName, dayOf, dayStart, discoverComputers, listNewFiles } from "../src/lib/autodrive.ts";
 
 test("days follow Bangladesh time (UTC+6), so 23:50 belongs to the same day", () => {
   // 23:50 on 17 Nov in Dhaka is 17:50 UTC.
@@ -30,6 +30,8 @@ function fakeDrive(items) {
     } else if (url.pathname.endsWith("/files")) {
       files = items.filter((i) => i.mimeType === "application/vnd.google-apps.folder");
     } else {
+      const one = items.find((i) => url.pathname.endsWith(`/files/${i.id}`));
+      if (one) return new Response(JSON.stringify(one), { status: 200 });
       files = [];
     }
     return new Response(JSON.stringify({ files }), { status: 200 });
@@ -57,6 +59,18 @@ test("ordinary folders uploaded into My Drive are found too", async () => {
   ]);
   const computers = await discoverComputers("token");
   assert.deepEqual(computers.map((c) => c.name), ["3000 calls"]);
+});
+
+test("extra folders (a link or an id) are scanned too", async () => {
+  env.DRIVE_API_BASE = "https://drive.test/v3";
+  fakeDrive([
+    { id: "inner12345", name: "Nested calls", mimeType: FOLDER, parents: ["somewhere"] },
+  ]);
+  const computers = await discoverComputers("token", "https://drive.google.com/drive/folders/inner12345?usp=sharing");
+  assert.deepEqual(computers.map((c) => c.name), ["Nested calls"]);
+  assert.equal(folderIdOf("https://drive.google.com/drive/folders/abc_DEF-123456"), "abc_DEF-123456");
+  assert.equal(folderIdOf("abc_DEF-123456"), "abc_DEF-123456");
+  assert.equal(folderIdOf("nonsense link"), "");
 });
 
 test("lists every media file, even ones with an old modified time, through subfolders, tagged with their day", async () => {
