@@ -21,7 +21,7 @@ import { writeBatchDashboard } from "../lib/batchdash";
 import { PROBE_BYTES, MP3_SLACK, UnsupportedAudioError, buildPart, planParts, probeAudio, type AudioInfo } from "../lib/audiosplit";
 import { driveRange } from "../lib/drivefetch";
 import { addNotionTranscript, archiveNotionPage, createNotionFolder, finishNotionFolder, notionConfigured, transcriptBlocks, type NotionFolder } from "../lib/notion";
-import { appendSheetRow, createSheetTab, replaceFailedRow, sheetRow, sheetsConfigured, type SheetTab } from "../lib/sheets";
+import { accountSpreadsheetId, appendSheetRow, createSheetTab, replaceFailedRow, sheetHint, sheetRow, sheetsConfigured, type SheetTab } from "../lib/sheets";
 import { driveAccessToken } from "../lib/autodrive";
 
 export type BatchMode = "smart" | "detailed";
@@ -247,6 +247,15 @@ export class BatchRunner extends DurableObject<Env> {
     const config = await this.config();
     if (!config || config.userId !== userId) return false;
     return (await this.items()).some((i) => i.status === "failed" && !i.permanent);
+  }
+
+  /** True if finished videos never reached the Google Sheet (for example the sheet was not shared yet). */
+  async hasSheetBacklog(userId: string): Promise<boolean> {
+    const config = await this.config();
+    const state = await this.state();
+    if (!config || !state || config.userId !== userId || state.status === "running") return false;
+    if (!sheetsConfigured(config.spreadsheet)) return false;
+    return (await this.items()).some((i) => i.status === "done" && !i.sheetDone);
   }
 
   /** Retry failed videos, continue a cancelled batch, or redo missing Notion/Sheets exports. */
@@ -564,7 +573,11 @@ export class BatchRunner extends DurableObject<Env> {
       : null;
     const useNotion = config.notion !== false;
     if (!state.notion && useNotion && computer?.notion_json) state.notion = JSON.parse(computer.notion_json);
-    if (!state.sheet && computer?.sheet_json) state.sheet = JSON.parse(computer.sheet_json);
+    if (!state.sheet && computer?.sheet_json) {
+      // A tab saved for another spreadsheet (the account's link changed since) is not reused.
+      const saved: SheetTab = JSON.parse(computer.sheet_json);
+      if (saved.spreadsheetId === accountSpreadsheetId(config.spreadsheet)) state.sheet = saved;
+    }
     if (!state.notion && useNotion && notionConfigured()) {
       try {
         state.notion = await createNotionFolder({
@@ -591,7 +604,7 @@ export class BatchRunner extends DurableObject<Env> {
           await this.env.DB.prepare("UPDATE drive_computers SET sheet_json = ? WHERE folder_id = ?").bind(JSON.stringify(state.sheet), config.computerId).run();
         }
       } catch (error) {
-        state.sheetError = message(error);
+        state.sheetError = sheetHint(message(error), config.spreadsheet);
       }
     }
     state.exportsReady = true;

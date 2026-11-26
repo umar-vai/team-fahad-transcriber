@@ -491,7 +491,36 @@ export async function retryAllFailed(): Promise<{ jobs: number; started: number 
       WHERE status = 'done' AND batch_id IN (SELECT id FROM batches WHERE failed_count > 0 AND status = 'done')`,
   ).run();
   const summary = await pumpJobs(true);
-  return { jobs: Number(reset.meta?.changes || 0), started: summary.retried };
+  const resent = await resendMissingSheets();
+  return { jobs: Number(reset.meta?.changes || 0) + resent, started: summary.retried + resent };
+}
+
+/**
+ * Finished jobs whose transcripts never reached the Google Sheet (the sheet was not shared yet, or the
+ * link was added later) are sent again, as many as there are free slots. Press the button again for more.
+ */
+export async function resendMissingSheets(): Promise<number> {
+  const accounts = new Map((await getConnections()).filter((c) => c.enabled).map((c) => [c.id, c]));
+  const running = await env.DB.prepare("SELECT COUNT(*) AS n FROM drive_jobs j JOIN batches b ON b.id = j.batch_id WHERE j.status = 'running' AND b.status = 'running'").first<{ n: number }>();
+  let active = Number(running?.n || 0);
+  const jobs = await env.DB.prepare(
+    `SELECT j.id, j.batch_id, j.account_id FROM drive_jobs j JOIN batches b ON b.id = j.batch_id
+      WHERE j.status = 'done' AND b.status = 'done' AND b.done_count > 0 ORDER BY b.finished_at DESC LIMIT 200`,
+  ).all<{ id: string; batch_id: string; account_id: string }>();
+  let started = 0;
+  for (const job of jobs.results) {
+    if (active >= MAX_CONCURRENT) break;
+    const connection = accounts.get(job.account_id);
+    if (!connection) continue;
+    const runner = env.BATCH_RUNNER.getByName(job.batch_id);
+    if (!(await runner.hasSheetBacklog(connection.user_id).catch(() => false))) continue;
+    if (await runner.resume(connection.user_id).catch(() => false)) {
+      await env.DB.prepare("UPDATE drive_jobs SET status = 'running' WHERE id = ?").bind(job.id).run();
+      started++;
+      active++;
+    }
+  }
+  return started;
 }
 
 /** What the cron does at 23:50, and what the "Run now" button does. */

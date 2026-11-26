@@ -147,3 +147,24 @@ export async function appendSheetRow(tab: SheetTab, row: (string | number)[]): P
     body: { requests: [{ appendCells: { sheetId: tab.sheetId, rows: [{ values }], fields: "userEnteredValue" } }] },
   });
 }
+
+/** Turns a Google "no permission" error into what the person has to do. */
+export function sheetHint(error: string, own?: string | null): string {
+  const email = serviceAccount()?.client_email;
+  if (email && /permission|forbidden|403|not found|404|does not have/i.test(error)) {
+    return `The spreadsheet ${accountSpreadsheetId(own) ? "" : "(none set) "}is not shared with ${email}. Open it in Google Sheets, press Share and add that address as Editor. (${error.slice(0, 160)})`;
+  }
+  return error;
+}
+
+/** Checks that the service account can edit this spreadsheet. Throws a clear message when it cannot. */
+export async function checkSpreadsheetAccess(raw: string): Promise<void> {
+  const id = spreadsheetId(raw);
+  if (!id) throw new Error("That is not a Google Sheets link.");
+  const base = env.SHEETS_API_BASE || API;
+  try {
+    await googleApi(`${base}/${id}?fields=spreadsheetId`);
+  } catch (error) {
+    throw new Error(sheetHint(error instanceof Error ? error.message : String(error), raw));
+  }
+}
