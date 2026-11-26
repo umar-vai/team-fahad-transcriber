@@ -7,7 +7,7 @@
     "build": "astro build",
     "preview": "astro build && wrangler dev",
     "check": "astro check",
-    "test:quality": "node --experimental-transform-types --import ./tests/cf-loader.mjs --test tests/transcription-quality.test.mjs tests/shayari.test.mjs tests/drive-batch.test.mjs tests/auto-drive.test.mjs tests/sheet-dashboard.test.mjs tests/audiosplit.test.mjs tests/drivefetch.test.mjs tests/bridge.test.mjs",
+    "test:quality": "node --experimental-transform-types --import ./tests/cf-loader.mjs --test tests/transcription-quality.test.mjs tests/shayari.test.mjs tests/drive-batch.test.mjs tests/auto-drive.test.mjs tests/sheet-dashboard.test.mjs tests/batch-dashboard.test.mjs tests/audiosplit.test.mjs tests/drivefetch.test.mjs tests/bridge.test.mjs",
     "deploy": "astro build && wrangler deploy",
     "cf-typegen": "wrangler types"
   },

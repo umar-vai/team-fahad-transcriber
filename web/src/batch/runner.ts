@@ -17,6 +17,7 @@ import { LANGUAGES, TranscriptionQualityError, UserFacingError, transcribe, type
 import { inferBanglaLanguage } from "../lib/transcription-quality";
 import { clock, mergePieces, speakerTranscript, type PieceResult, type Segment } from "../lib/segments";
 import { driveFileUrl } from "../lib/drive";
+import { writeBatchDashboard } from "../lib/batchdash";
 import { PROBE_BYTES, MP3_SLACK, UnsupportedAudioError, buildPart, planParts, probeAudio, type AudioInfo } from "../lib/audiosplit";
 import { driveRange } from "../lib/drivefetch";
 import { addNotionTranscript, archiveNotionPage, createNotionFolder, finishNotionFolder, notionConfigured, transcriptBlocks, type NotionFolder } from "../lib/notion";
@@ -73,6 +74,8 @@ export interface BatchItem {
   error?: string;
   /** The file itself is unusable (no audio, empty or corrupt), so retrying cannot help. */
   permanent?: boolean;
+  /** How many times the whole file came back with no speech. A silent file is checked twice before it is given up. */
+  silentTries?: number;
   /** Format details read from the file header (set when the file is ready). */
   audio?: AudioInfo;
   prepAttempts: number;
@@ -104,12 +107,18 @@ interface BatchState {
   sheetError?: string;
   finishedAt?: number;
   summaryWritten?: boolean;
+  /** Automatic "try the failed files again" rounds done after everything else finished. */
+  retryRounds?: number;
 }
 
 const PARALLEL_PARTS = 4;
 const POLL_MS = 5000;
 const MAX_PREP_ATTEMPTS = 8;
 const MAX_PART_ERRORS = 6;
+/** A file with no speech is transcribed this many times before it is given up. */
+const SILENT_TRIES = 2;
+/** After all files were tried, the files that could still succeed are tried again this many times. */
+const MAX_RETRY_ROUNDS = 2;
 /** How long a video keeps waiting on Gemini (quota, busy servers, timeouts) before it is marked failed. */
 const QUOTA_WAIT_LIMIT_MS = 6 * 3600_000;
 /** Temporary Gemini or network trouble (including Gemini sometimes refusing the server's egress location): the same audio part works again later, so it is never counted as a real failure. */
@@ -260,6 +269,7 @@ export class BatchRunner extends DurableObject<Env> {
       await this.saveItem(item);
     }
     state.status = "running";
+    state.retryRounds = 0;
     state.finishedAt = undefined;
     state.summaryWritten = false;
     if (!state.notion) state.notionError = undefined;
@@ -303,6 +313,17 @@ export class BatchRunner extends DurableObject<Env> {
       const pending = items.find((i) => this.needsExport(i, state));
       if (pending) {
         await this.exportItem(config, state, pending);
+        return 0;
+      }
+      // Everything was tried once: give the failed files that could still work another go.
+      const retry = items.filter((i) => i.status === "failed" && !i.permanent);
+      if (retry.length && (state.retryRounds || 0) < MAX_RETRY_ROUNDS) {
+        state.retryRounds = (state.retryRounds || 0) + 1;
+        for (const item of retry) {
+          Object.assign(item, { status: "queued", error: undefined, detail: undefined, prepAttempts: 0, partErrors: 0, partsDone: 0, parts: undefined, quotaWaitSince: undefined, finishedAt: undefined });
+          await this.saveItem(item);
+        }
+        await this.ctx.storage.put("state", state);
         return 0;
       }
       await this.finish(config, state, items);
@@ -480,8 +501,14 @@ export class BatchRunner extends DurableObject<Env> {
     const merged = mergePieces([...stored.values()], config.mode === "detailed");
     if (!merged.transcript.trim()) {
       await this.ctx.storage.delete([...stored.keys()]);
-      item.permanent = true;
-      await this.fail(item, "No speech was found in this video.");
+      item.silentTries = (item.silentTries || 0) + 1;
+      if (item.silentTries >= SILENT_TRIES) {
+        item.permanent = true;
+        await this.fail(item, `No speech was found in this file (checked ${item.silentTries} times).`);
+      } else {
+        // Not final yet: it is checked once more after the other files are done.
+        await this.fail(item, `No speech was found (check ${item.silentTries} of ${SILENT_TRIES}), it will be checked again.`);
+      }
       return;
     }
     item.historyId ||= crypto.randomUUID();
@@ -686,6 +713,9 @@ export class BatchRunner extends DurableObject<Env> {
         await finishNotionFolder(state.notion, summary).catch((error) => console.warn("Notion summary:", error));
       }
       state.summaryWritten = true;
+    }
+    if (state.sheet && !config.computerId) {
+      await writeBatchDashboard(state.sheet, config.folderName, items).catch((error) => console.warn("Batch dashboard:", error));
     }
     state.status = "done";
     state.finishedAt = Date.now();
