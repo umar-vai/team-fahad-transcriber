@@ -20,7 +20,7 @@ There is **no container** any more. It cost too much (Memory billing), so it was
   16 kHz audio is uploaded, not the whole file.
 - **YouTube:** Gemini reads public YouTube videos directly, in parallel 5 minute clips.
 - **Google Drive folder:** paste a public folder link and pick Smart clean or
-  Subtitles (timed). The server lists every **MP3 and WAV** file (subfolders
+  Subtitles (timed). The server lists every **MP3, WAV and FLAC** file (subfolders
   too, sorted by name so "2" comes before "10") and works through them one by
   one in a `BatchRunner` Durable Object, so the browser can be closed. Each file
   is cut into pieces of about 5 minutes (or at most 10 MB) by reading byte ranges

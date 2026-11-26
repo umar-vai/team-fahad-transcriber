@@ -126,3 +126,33 @@ test("a tiny tail is merged into the previous part", () => {
   assert.equal(parts.length, 2);
   assert.equal(parts[1].end, info.dataEnd);
 });
+
+test("a FLAC file is read from its stream info and sent whole", async () => {
+  const { probeAudio, planParts, buildPart } = await import("../src/lib/audiosplit.ts");
+  const bytes = new Uint8Array(4096);
+  bytes.set([0x66, 0x4c, 0x61, 0x43], 0); // "fLaC"
+  bytes[4] = 0x00; // STREAMINFO, not the last block
+  bytes[7] = 34;
+  const d = 8;
+  // 8000 Hz, 1 channel, 16 bit, 80000 samples = 10 seconds
+  const rate = 8000;
+  bytes[d + 10] = (rate >> 12) & 0xff;
+  bytes[d + 11] = (rate >> 4) & 0xff;
+  bytes[d + 12] = ((rate & 0x0f) << 4) | (0 << 1) | 0;
+  bytes[d + 13] = (15 << 4) | 0;
+  const samples = 80000;
+  bytes[d + 14] = (samples >>> 24) & 0xff;
+  bytes[d + 15] = (samples >>> 16) & 0xff;
+  bytes[d + 16] = (samples >>> 8) & 0xff;
+  bytes[d + 17] = samples & 0xff;
+  const info = probeAudio(bytes, 4096);
+  assert.equal(info.kind, "flac");
+  assert.equal(Math.round(info.duration), 10);
+  const parts = planParts(info);
+  assert.equal(parts.length, 1);
+  assert.equal(parts[0].end, 4096);
+  const built = buildPart(info, parts[0], bytes, true);
+  assert.equal(built.mimeType, "audio/flac");
+  assert.equal(built.data.length, 4096);
+  assert.throws(() => probeAudio(bytes, 50 * 1024 * 1024), /FLAC/);
+});

@@ -26,8 +26,8 @@ export interface DriveFolder {
   method: "service-account" | "api-key" | "public-page";
 }
 
-/** Only MP3 and WAV: they can be cut by bytes, so no container is needed to prepare them. */
-const MEDIA_EXT = /\.(mp3|wav)$/i;
+/** MP3 and WAV can be cut by bytes; FLAC is sent whole (up to 12 MB). No container is needed to prepare them. */
+const MEDIA_EXT = /\.(mp3|wav|flac)$/i;
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const MAX_FILES = 5000;
 const MAX_DEPTH = 4;
@@ -56,7 +56,7 @@ export function driveFolderUrl(id: string): string {
 
 export function isMedia(name: string, mimeType?: string): boolean {
   if (MEDIA_EXT.test(name)) return true;
-  return Boolean(mimeType && /^audio\/(mpeg|mp3|wav|x-wav|wave|vnd\.wave)$/i.test(mimeType));
+  return Boolean(mimeType && /^audio\/(mpeg|mp3|wav|x-wav|wave|vnd\.wave|flac|x-flac)$/i.test(mimeType));
 }
 
 function naturalSort(files: DriveFile[]): DriveFile[] {
