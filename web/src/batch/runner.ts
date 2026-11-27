@@ -203,6 +203,7 @@ export class BatchRunner extends DurableObject<Env> {
       sheet: { configured: sheetsConfigured(config.spreadsheet), url: state.sheet?.url || null, error: state.sheetError || null },
       items: items.map((item) => ({
         index: item.index,
+        fileId: item.fileId,
         name: item.name,
         title: item.title,
         status: item.status,
