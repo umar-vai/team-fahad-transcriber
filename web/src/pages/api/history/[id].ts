@@ -1,50 +1,45 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { handler, HttpError, json, requireUser } from "../../../lib/http";
+import { transcriptAccess } from "../../../lib/workspaces";
 
-export const GET: APIRoute = handler(async (context) => {
+async function load(context: Parameters<APIRoute>[0], edit: boolean) {
   const user = requireUser(context);
-  const row = await env.DB.prepare("SELECT * FROM transcriptions WHERE id = ? AND user_id = ?")
-    .bind(context.params.id, user.id)
-    .first();
-  if (!row) throw new HttpError(404, "Not found.");
-  return json(row);
-});
+  const found = await transcriptAccess(user, String(context.params.id || ""));
+  if (!found) throw new HttpError(404, "Not found.");
+  if (edit && !found.canEdit) throw new HttpError(403, "Only a manager of this team can change team transcripts.");
+  return found.row;
+}
+
+export const GET: APIRoute = handler(async (context) => json(await load(context, false)));
 
 /** Update the title or transcript, or store AI tool results (summary, translations...). */
 export const PATCH: APIRoute = handler(async (context) => {
-  const user = requireUser(context);
   const body: any = await context.request.json().catch(() => ({}));
-  const row = await env.DB.prepare("SELECT extras_json FROM transcriptions WHERE id = ? AND user_id = ?")
-    .bind(context.params.id, user.id)
-    .first<{ extras_json: string | null }>();
-  if (!row) throw new HttpError(404, "Not found.");
+  // Saving AI results (summary, translation) is allowed for everyone who can open the transcript.
+  const changesText = (typeof body.title === "string" && body.title.trim()) || (typeof body.transcript === "string" && body.transcript.trim());
+  const row = await load(context, Boolean(changesText));
+  const id = row.id;
   if (typeof body.title === "string" && body.title.trim()) {
-    await env.DB.prepare("UPDATE transcriptions SET title = ? WHERE id = ? AND user_id = ?")
-      .bind(body.title.trim().slice(0, 200), context.params.id, user.id)
-      .run();
+    await env.DB.prepare("UPDATE transcriptions SET title = ? WHERE id = ?").bind(body.title.trim().slice(0, 200), id).run();
   }
   if (typeof body.transcript === "string" && body.transcript.trim()) {
     if (body.transcript.length > 1_500_000) throw new HttpError(413, "Transcript too large to save.");
     // Shayari mode saves the pronunciation first and adds the Bangla meaning when it arrives.
-    await env.DB.prepare("UPDATE transcriptions SET transcript = ? WHERE id = ? AND user_id = ?")
-      .bind(body.transcript, context.params.id, user.id)
-      .run();
+    await env.DB.prepare("UPDATE transcriptions SET transcript = ? WHERE id = ?").bind(body.transcript, id).run();
   }
   if (body.extras && typeof body.extras === "object") {
     const extras = { ...JSON.parse(row.extras_json || "{}") };
     for (const [key, value] of Object.entries(body.extras)) {
       if (/^[\w:-]{1,40}$/.test(key) && typeof value === "string") extras[key] = value.slice(0, 300_000);
     }
-    await env.DB.prepare("UPDATE transcriptions SET extras_json = ? WHERE id = ? AND user_id = ?")
-      .bind(JSON.stringify(extras), context.params.id, user.id)
-      .run();
+    await env.DB.prepare("UPDATE transcriptions SET extras_json = ? WHERE id = ?").bind(JSON.stringify(extras), id).run();
   }
   return json({ ok: true });
 });
 
 export const DELETE: APIRoute = handler(async (context) => {
-  const user = requireUser(context);
-  await env.DB.prepare("DELETE FROM transcriptions WHERE id = ? AND user_id = ?").bind(context.params.id, user.id).run();
+  const row = await load(context, true);
+  await env.DB.prepare("DELETE FROM transcriptions WHERE id = ?").bind(row.id).run();
   return json({ ok: true });
 });

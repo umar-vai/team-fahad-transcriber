@@ -4,8 +4,8 @@ import { completeDriveConnect, completeGoogleLogin, isDriveCallback } from "../.
 export const GET: APIRoute = async ({ url, cookies, redirect }) => {
   if (isDriveCallback(url, cookies)) {
     try {
-      await completeDriveConnect(url, cookies);
-      return redirect("/auto?connected=1", 302);
+      const workspace = await completeDriveConnect(url, cookies);
+      return redirect(`/auto?team=${encodeURIComponent(workspace)}&connected=1`, 302);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Drive connect failed.";
       return redirect(`/auto?error=${encodeURIComponent(message)}`, 302);

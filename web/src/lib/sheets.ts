@@ -33,6 +33,8 @@ export function spreadsheetId(raw: string | undefined): string | null {
 
 /** The spreadsheet an account writes to: its own, or the team spreadsheet. */
 export function accountSpreadsheetId(own?: string | null): string | null {
+  // "none": a team without a spreadsheet of its own never writes into the shared team spreadsheet.
+  if (own === "none") return null;
   return spreadsheetId(own || undefined) || spreadsheetId(env.SHEETS_SPREADSHEET_ID);
 }
 

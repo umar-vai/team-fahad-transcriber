@@ -20,6 +20,7 @@ import { HttpError } from "./http";
 import { isMedia } from "./drive";
 import { refreshSheetDashboardSafe } from "./sheetdash";
 import type { BatchConfig, BatchMode } from "../batch/runner";
+import { effectiveSpreadsheet } from "./workspaces";
 
 /** Bangladesh has no daylight saving time: always UTC+6. */
 export const DAY_OFFSET_MS = 6 * 3600_000;
@@ -62,35 +63,65 @@ export interface DriveConnection {
   enabled: number;
   /** 1 = also write to Notion (off by default; Sheets is always used). */
   notion_enabled: number;
-  /** Link or id of this account's own spreadsheet; empty means the team spreadsheet. */
+  /**
+   * The spreadsheet this account writes to, already resolved: its own link, the team's link, null (the shared
+   * team spreadsheet, original team only) or "none" (no spreadsheet).
+   */
   spreadsheet: string | null;
+  /** The account's own spreadsheet link as typed on the Auto page. */
+  own_spreadsheet: string | null;
+  /** The team this account belongs to. */
+  workspace_id: string;
+  /** 1 when the team is the original one (it may use Notion and the shared spreadsheet). */
+  ws_default: number;
+  /** 0 when an admin switched the Drive feature off for this team. */
+  ws_drive: number;
   /** Extra folder ids to scan besides the top level of My Drive and the Computers folders. */
   extra_folders: string | null;
   connected_at: number;
 }
 
-/** Every connected Google Drive account. */
-export async function getConnections(): Promise<DriveConnection[]> {
-  return (await env.DB.prepare("SELECT * FROM drive_accounts ORDER BY connected_at").all<DriveConnection>()).results;
+const ACCOUNT_SELECT = `SELECT a.*, a.spreadsheet AS own_spreadsheet, w.spreadsheet AS ws_spreadsheet,
+    COALESCE(w.is_default, 0) AS ws_default, COALESCE(w.feature_drive, 1) AS ws_drive
+  FROM drive_accounts a LEFT JOIN workspaces w ON w.id = a.workspace_id`;
+
+function resolve(row: any): DriveConnection {
+  const { ws_spreadsheet, ...rest } = row;
+  return { ...rest, spreadsheet: effectiveSpreadsheet(row.own_spreadsheet, { spreadsheet: ws_spreadsheet, is_default: row.ws_default }) };
 }
 
-/** One account by id; without an id, the first one. */
-export async function getConnection(id?: string | null): Promise<DriveConnection | null> {
-  if (id) return env.DB.prepare("SELECT * FROM drive_accounts WHERE id = ?").bind(id).first<DriveConnection>();
-  return env.DB.prepare("SELECT * FROM drive_accounts ORDER BY connected_at LIMIT 1").first<DriveConnection>();
+/** Every connected Google Drive account; with a team id, only that team's accounts. */
+export async function getConnections(workspaceId?: string): Promise<DriveConnection[]> {
+  const rows = workspaceId
+    ? await env.DB.prepare(`${ACCOUNT_SELECT} WHERE a.workspace_id = ? ORDER BY a.connected_at`).bind(workspaceId).all<any>()
+    : await env.DB.prepare(`${ACCOUNT_SELECT} ORDER BY a.connected_at`).all<any>();
+  return rows.results.map(resolve);
 }
 
-/** Add an account, or refresh the token of one that is already connected (same Google email). */
-export async function saveConnection(info: { userId: string; email: string; refreshToken: string; appUrl: string }): Promise<string> {
-  const existing = await env.DB.prepare("SELECT id FROM drive_accounts WHERE google_email = ?").bind(info.email).first<{ id: string }>();
+/** One account by id (optionally only within one team); without an id, the first one. */
+export async function getConnection(id?: string | null, workspaceId?: string): Promise<DriveConnection | null> {
+  const row = id
+    ? workspaceId
+      ? await env.DB.prepare(`${ACCOUNT_SELECT} WHERE a.id = ? AND a.workspace_id = ?`).bind(id, workspaceId).first<any>()
+      : await env.DB.prepare(`${ACCOUNT_SELECT} WHERE a.id = ?`).bind(id).first<any>()
+    : await env.DB.prepare(`${ACCOUNT_SELECT} ORDER BY a.connected_at LIMIT 1`).first<any>();
+  return row ? resolve(row) : null;
+}
+
+/** Add an account to a team, or refresh the token of one that is already connected (same Google email). */
+export async function saveConnection(info: { userId: string; workspaceId: string; email: string; refreshToken: string; appUrl: string }): Promise<string> {
+  const existing = await env.DB.prepare("SELECT id, workspace_id FROM drive_accounts WHERE google_email = ?").bind(info.email).first<{ id: string; workspace_id: string }>();
+  if (existing && existing.workspace_id !== info.workspaceId) {
+    throw new Error(`${info.email} is already connected to another team. Disconnect it there first.`);
+  }
   const id = existing?.id || crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO drive_accounts (id, user_id, google_email, refresh_token, app_url, connected_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO drive_accounts (id, user_id, google_email, refresh_token, app_url, connected_at, workspace_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(google_email) DO UPDATE SET user_id = excluded.user_id,
        refresh_token = excluded.refresh_token, app_url = excluded.app_url, enabled = 1, connected_at = excluded.connected_at`,
   )
-    .bind(id, info.userId, info.email, info.refreshToken, info.appUrl, Date.now())
+    .bind(id, info.userId, info.email, info.refreshToken, info.appUrl, Date.now(), info.workspaceId)
     .run();
   return id;
 }
@@ -299,13 +330,14 @@ async function listWithRetry(token: string, folderId: string): Promise<FoundFile
  * Every file Drive holds is considered and the ones already handled are skipped, so nothing is missed
  * and nothing is done twice. Safe to run more than once.
  */
-export async function queueNight(now = Date.now()): Promise<QueueResult> {
-  const connections = await getConnections();
+export async function queueNight(now = Date.now(), workspaceId?: string): Promise<QueueResult> {
+  const connections = await getConnections(workspaceId);
   if (!connections.length) throw new HttpError(400, "Google Drive is not connected yet.");
   const today = dayOf(now);
   const result: QueueResult = { day: today, computers: [] };
   for (const connection of connections) {
-    if (!connection.enabled) continue;
+    // A switched-off account, or a team whose Drive feature an admin switched off, is not scanned.
+    if (!connection.enabled || !connection.ws_drive) continue;
     let token: string;
     let found: ComputerFolder[];
     try {
@@ -352,8 +384,8 @@ async function queueComputer(connection: DriveConnection, token: string, compute
     const jobId = crypto.randomUUID();
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO drive_jobs (id, computer_id, computer_name, account_id, day, status, files_json, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`,
-      ).bind(jobId, computer.id, computer.name.slice(0, 200), connection.id, today, JSON.stringify(chunk), now + i),
+        `INSERT INTO drive_jobs (id, computer_id, computer_name, account_id, workspace_id, day, status, files_json, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+      ).bind(jobId, computer.id, computer.name.slice(0, 200), connection.id, connection.workspace_id, today, JSON.stringify(chunk), now + i),
       ...chunk.map((f) =>
         env.DB.prepare(`INSERT OR IGNORE INTO drive_files (file_id, computer_id, name, file_day, job_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
           .bind(f.id, computer.id, f.path.slice(0, 300), f.day, jobId, now),
@@ -396,13 +428,15 @@ async function startJob(connection: DriveConnection, job: JobRow): Promise<void>
     authDrive: true,
     accountId: connection.id,
     spreadsheet: connection.spreadsheet,
-    notion: Boolean(connection.notion_enabled),
+    // Only the original team writes to the shared Notion page.
+    notion: Boolean(connection.notion_enabled && connection.ws_default),
+    workspaceId: connection.workspace_id,
   };
   await env.DB.prepare(
-    `INSERT INTO batches (id, user_id, folder_id, folder_name, folder_url, mode, language, total, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
+    `INSERT INTO batches (id, user_id, folder_id, folder_name, folder_url, mode, language, total, status, created_at, workspace_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
   )
-    .bind(batchId, config.userId, config.folderId, `${job.computer_name} · ${job.day}`.slice(0, 300), config.folderUrl, config.mode, config.language, config.total, config.createdAt)
+    .bind(batchId, config.userId, config.folderId, `${job.computer_name} · ${job.day}`.slice(0, 300), config.folderUrl, config.mode, config.language, config.total, config.createdAt, connection.workspace_id)
     .run();
   await env.BATCH_RUNNER.getByName(batchId, { locationHint: "enam" }).start(config, files.map((f) => ({ id: f.id, path: f.path, name: f.name, date: f.day })));
   await env.DB.prepare("UPDATE drive_jobs SET status = 'running', batch_id = ? WHERE id = ?").bind(batchId, job.id).run();
@@ -416,7 +450,7 @@ async function startJob(connection: DriveConnection, job: JobRow): Promise<void>
  */
 export async function pumpJobs(force = false): Promise<{ started: number; retried: number; finished: number }> {
   const summary = { started: 0, retried: 0, finished: 0 };
-  const accounts = new Map((await getConnections()).filter((c) => c.enabled).map((c) => [c.id, c]));
+  const accounts = new Map((await getConnections()).filter((c) => c.enabled && c.ws_drive).map((c) => [c.id, c]));
   if (!accounts.size) return summary;
 
   const running = await env.DB.prepare(
@@ -486,13 +520,13 @@ export async function pumpJobs(force = false): Promise<{ started: number; retrie
 }
 
 /** The "Retry all failed" button: give every finished job with failed videos fresh retry rounds and start them now. */
-export async function retryAllFailed(): Promise<{ jobs: number; started: number }> {
+export async function retryAllFailed(workspaceId: string): Promise<{ jobs: number; started: number }> {
   const reset = await env.DB.prepare(
     `UPDATE drive_jobs SET attempts = 0
-      WHERE status = 'done' AND batch_id IN (SELECT id FROM batches WHERE failed_count > 0 AND status = 'done')`,
-  ).run();
+      WHERE status = 'done' AND workspace_id = ? AND batch_id IN (SELECT id FROM batches WHERE failed_count > 0 AND status = 'done')`,
+  ).bind(workspaceId).run();
   const summary = await pumpJobs(true);
-  const resent = await resendMissingSheets();
+  const resent = await resendMissingSheets(workspaceId);
   return { jobs: Number(reset.meta?.changes || 0) + resent, started: summary.retried + resent };
 }
 
@@ -500,8 +534,8 @@ export async function retryAllFailed(): Promise<{ jobs: number; started: number 
  * Finished jobs whose transcripts never reached the Google Sheet (the sheet was not shared yet, or the
  * link was added later) are sent again, as many as there are free slots. Press the button again for more.
  */
-export async function resendMissingSheets(): Promise<number> {
-  const accounts = new Map((await getConnections()).filter((c) => c.enabled).map((c) => [c.id, c]));
+export async function resendMissingSheets(workspaceId: string): Promise<number> {
+  const accounts = new Map((await getConnections(workspaceId)).filter((c) => c.enabled && c.ws_drive).map((c) => [c.id, c]));
   const running = await env.DB.prepare("SELECT COUNT(*) AS n FROM drive_jobs j JOIN batches b ON b.id = j.batch_id WHERE j.status = 'running' AND b.status = 'running'").first<{ n: number }>();
   let active = Number(running?.n || 0);
   const jobs = await env.DB.prepare(
@@ -525,7 +559,7 @@ export async function resendMissingSheets(): Promise<number> {
 }
 
 /** What the cron does at 23:50, and what the "Run now" button does. */
-export async function nightlyRun(now = Date.now()): Promise<QueueResult & { pump: Awaited<ReturnType<typeof pumpJobs>> }> {
-  const queued = await queueNight(now);
+export async function nightlyRun(now = Date.now(), workspaceId?: string): Promise<QueueResult & { pump: Awaited<ReturnType<typeof pumpJobs>> }> {
+  const queued = await queueNight(now, workspaceId);
   return { ...queued, pump: await pumpJobs() };
 }

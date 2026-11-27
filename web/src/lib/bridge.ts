@@ -11,6 +11,10 @@ import { appendSheetRow, createSheetTab, replaceFailedRow, sheetRow, sheetsConfi
 import { clock, mergePieces, speakerTranscript, type PieceResult } from "./segments";
 import { dayFromName, dayOf } from "./autodrive";
 import type { BatchMode } from "../batch/runner";
+import { effectiveSpreadsheet, getWorkspace, type Workspace } from "./workspaces";
+
+/** Team PCs made before teams existed belong to the original team. */
+const DEFAULT_WORKSPACE = "team-fahad";
 
 export const PAIRING_MINUTES = 15;
 const MODE_LABELS: Record<string, string> = { smart: "Smart clean", detailed: "Subtitles (timed)" };
@@ -38,6 +42,12 @@ export interface BridgeDevice {
   mode: string | null;
   language: string | null;
   sheet_enabled: number;
+  /** The team of a team PC (personal PCs have none). */
+  workspace_id: string | null;
+}
+
+async function deviceWorkspace(device: BridgeDevice): Promise<Workspace | null> {
+  return device.kind === "personal" ? null : getWorkspace(device.workspace_id || DEFAULT_WORKSPACE);
 }
 
 export async function sha256(value: string): Promise<string> {
@@ -61,14 +71,15 @@ export const normalizeCode = (code: string) => String(code || "").toUpperCase().
 
 // ---------- Settings ----------
 
-export async function bridgeSettings(): Promise<{ mode: BatchMode; language: string }> {
-  const row = await env.DB.prepare("SELECT mode, language FROM bridge_settings WHERE id = 1").first<{ mode: BatchMode; language: string }>();
+/** The output style and language a team's PCs use. */
+export async function bridgeSettings(workspaceId: string): Promise<{ mode: BatchMode; language: string }> {
+  const row = await env.DB.prepare("SELECT bridge_mode AS mode, bridge_language AS language FROM workspaces WHERE id = ?").bind(workspaceId).first<{ mode: BatchMode; language: string }>();
   return row || { mode: "smart", language: "Bangla (Bangladesh)" };
 }
 
-/** The style and language this PC uses: the shared team setting, or the person's own choice on a personal PC. */
+/** The style and language this PC uses: its team's setting, or the person's own choice on a personal PC. */
 export async function settingsFor(device: BridgeDevice): Promise<{ mode: string; language: string }> {
-  const shared = await bridgeSettings();
+  const shared = await bridgeSettings(device.workspace_id || DEFAULT_WORKSPACE);
   if (device.kind !== "personal") return shared;
   return {
     mode: device.mode && PERSONAL_MODES[device.mode] ? device.mode : "smart",
@@ -158,28 +169,28 @@ export async function pollLogin(requestId: string): Promise<{ pending: true } | 
   return { token, deviceId, name: row.name, account: user?.email || null };
 }
 
-export async function saveBridgeSettings(patch: { mode?: string; language?: string }): Promise<void> {
+export async function saveBridgeSettings(workspaceId: string, patch: { mode?: string; language?: string }): Promise<void> {
   if (patch.mode !== undefined) {
     if (!(patch.mode in MODE_LABELS)) throw new HttpError(400, "Choose Smart clean or Subtitles (timed).");
-    await env.DB.prepare("UPDATE bridge_settings SET mode = ? WHERE id = 1").bind(patch.mode).run();
+    await env.DB.prepare("UPDATE workspaces SET bridge_mode = ? WHERE id = ?").bind(patch.mode, workspaceId).run();
   }
   if (patch.language !== undefined) {
     if (!LANGUAGES[patch.language]) throw new HttpError(400, "Unknown language.");
-    await env.DB.prepare("UPDATE bridge_settings SET language = ? WHERE id = 1").bind(patch.language).run();
+    await env.DB.prepare("UPDATE workspaces SET bridge_language = ? WHERE id = ?").bind(patch.language, workspaceId).run();
   }
 }
 
 // ---------- Pairing ----------
 
-/** A signed-in person asks for a code for a new PC. */
-export async function createPairingCode(userId: string, name: string): Promise<{ code: string; expiresAt: number }> {
+/** A manager of a team asks for a code for a new PC of that team. */
+export async function createPairingCode(userId: string, workspaceId: string, name: string): Promise<{ code: string; expiresAt: number }> {
   const clean = name.trim().slice(0, 60);
   if (!clean) throw new HttpError(400, "Give the PC a name, for example PC-03.");
   const now = Date.now();
   await env.DB.prepare("DELETE FROM bridge_pairing WHERE expires_at < ?").bind(now).run();
   const code = pairingCode();
   const expiresAt = now + PAIRING_MINUTES * 60_000;
-  await env.DB.prepare("INSERT INTO bridge_pairing (code_hash, user_id, name, expires_at) VALUES (?, ?, ?, ?)").bind(await sha256(code), userId, clean, expiresAt).run();
+  await env.DB.prepare("INSERT INTO bridge_pairing (code_hash, user_id, name, expires_at, workspace_id) VALUES (?, ?, ?, ?, ?)").bind(await sha256(code), userId, clean, expiresAt, workspaceId).run();
   return { code, expiresAt };
 }
 
@@ -189,12 +200,12 @@ export async function redeemPairingCode(rawCode: string): Promise<{ token: strin
   if (code.length !== 8) throw new HttpError(400, "The code has 8 letters and numbers.");
   const hash = await sha256(code);
   // Deleting first makes the code single use even if two requests race.
-  const claimed = await env.DB.prepare("DELETE FROM bridge_pairing WHERE code_hash = ? AND expires_at >= ? RETURNING user_id, name").bind(hash, Date.now()).first<{ user_id: string; name: string }>();
+  const claimed = await env.DB.prepare("DELETE FROM bridge_pairing WHERE code_hash = ? AND expires_at >= ? RETURNING user_id, name, workspace_id").bind(hash, Date.now()).first<{ user_id: string; name: string; workspace_id: string | null }>();
   if (!claimed) throw new HttpError(400, "This code is wrong or has expired. Make a new one on the Auto page.");
   const token = randomToken(32);
   const deviceId = crypto.randomUUID();
-  await env.DB.prepare("INSERT INTO bridge_devices (id, user_id, name, token_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(deviceId, claimed.user_id, claimed.name, await sha256(token), Date.now(), Date.now())
+  await env.DB.prepare("INSERT INTO bridge_devices (id, user_id, name, token_hash, created_at, last_seen_at, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(deviceId, claimed.user_id, claimed.name, await sha256(token), Date.now(), Date.now(), claimed.workspace_id || DEFAULT_WORKSPACE)
     .run();
   return { token, deviceId, name: claimed.name };
 }
@@ -205,40 +216,54 @@ export const MIN_PIN_LENGTH = 4;
 const MAX_PIN_FAILS = 8;
 const PIN_LOCK_MINUTES = 10;
 
-/** A signed-in person sets (or changes) the team PIN a fresh PC must type before it sees the list. */
-export async function setLinkPin(userId: string, pin: string): Promise<void> {
+/** A manager sets (or changes) the team PIN a fresh PC must type before it sees that team's list. */
+export async function setLinkPin(workspaceId: string, userId: string, pin: string): Promise<void> {
   const clean = String(pin || "").trim();
   if (clean.length < MIN_PIN_LENGTH || clean.length > 40) throw new HttpError(400, `The PIN needs at least ${MIN_PIN_LENGTH} characters.`);
+  // Each team needs its own PIN: the PIN is what tells the app which team a PC joins.
+  for (const other of (await env.DB.prepare("SELECT id, link_pin_hash FROM workspaces WHERE id != ? AND link_pin_hash IS NOT NULL").bind(workspaceId).all<{ id: string; link_pin_hash: string }>()).results) {
+    if (await pinMatches(other.link_pin_hash, clean)) throw new HttpError(400, "Another team already uses this PIN. Choose a different one.");
+  }
   const salt = randomToken(8);
-  await env.DB.prepare("UPDATE bridge_settings SET link_pin_hash = ?, link_user_id = ?, link_fail_count = 0, link_locked_until = 0 WHERE id = 1")
-    .bind(`${salt}:${await sha256(`${salt}:${clean}`)}`, userId)
+  await env.DB.prepare("UPDATE workspaces SET link_pin_hash = ?, link_user_id = ? WHERE id = ?")
+    .bind(`${salt}:${await sha256(`${salt}:${clean}`)}`, userId, workspaceId)
     .run();
 }
 
-export async function linkPinIsSet(): Promise<boolean> {
-  const row = await env.DB.prepare("SELECT link_pin_hash FROM bridge_settings WHERE id = 1").first<{ link_pin_hash: string | null }>();
+export async function linkPinIsSet(workspaceId: string): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT link_pin_hash FROM workspaces WHERE id = ?").bind(workspaceId).first<{ link_pin_hash: string | null }>();
   return Boolean(row?.link_pin_hash);
 }
 
-/** Checks the PIN. Too many wrong tries lock the list for a few minutes. Returns the user the new PC belongs to. */
-async function checkLinkPin(rawPin: string): Promise<string> {
-  const row = await env.DB.prepare("SELECT link_pin_hash, link_user_id, link_fail_count, link_locked_until FROM bridge_settings WHERE id = 1").first<any>();
-  if (!row?.link_pin_hash || !row.link_user_id) throw new HttpError(403, "No team PIN is set yet. Open the Auto page on the website and set one first.");
-  const now = Date.now();
-  if (row.link_locked_until > now) throw new HttpError(429, `Too many wrong PINs. Try again in ${Math.ceil((row.link_locked_until - now) / 60_000)} minutes.`);
-  const [salt] = String(row.link_pin_hash).split(":");
-  const expected = String(row.link_pin_hash).slice(salt.length + 1);
+async function pinMatches(stored: string, rawPin: string): Promise<boolean> {
+  const [salt] = String(stored).split(":");
+  const expected = String(stored).slice(salt.length + 1);
   const given = await sha256(`${salt}:${String(rawPin || "").trim()}`);
   let diff = given.length ^ expected.length;
   for (let i = 0; i < given.length; i++) diff |= given.charCodeAt(i) ^ (expected.charCodeAt(i) || 0);
-  if (diff !== 0) {
-    const fails = Number(row.link_fail_count) + 1;
-    const locked = fails >= MAX_PIN_FAILS;
-    await env.DB.prepare("UPDATE bridge_settings SET link_fail_count = ?, link_locked_until = ? WHERE id = 1").bind(locked ? 0 : fails, locked ? now + PIN_LOCK_MINUTES * 60_000 : 0).run();
-    throw new HttpError(403, locked ? `Too many wrong PINs. Try again in ${PIN_LOCK_MINUTES} minutes.` : "The PIN is wrong.");
+  return diff === 0;
+}
+
+/**
+ * Checks the PIN against every team's PIN. Too many wrong tries lock linking for a few minutes (one shared
+ * counter, since a wrong PIN belongs to no team). Returns the team and the person new PCs belong to.
+ */
+async function checkLinkPin(rawPin: string): Promise<{ workspaceId: string; userId: string }> {
+  const lock = await env.DB.prepare("SELECT link_fail_count, link_locked_until FROM bridge_settings WHERE id = 1").first<any>();
+  const now = Date.now();
+  if (lock && lock.link_locked_until > now) throw new HttpError(429, `Too many wrong PINs. Try again in ${Math.ceil((lock.link_locked_until - now) / 60_000)} minutes.`);
+  const teams = (await env.DB.prepare("SELECT id, link_pin_hash, link_user_id FROM workspaces WHERE link_pin_hash IS NOT NULL AND link_user_id IS NOT NULL").all<{ id: string; link_pin_hash: string; link_user_id: string }>()).results;
+  if (!teams.length) throw new HttpError(403, "No team PIN is set yet. Open the Auto page on the website and set one first.");
+  for (const team of teams) {
+    if (await pinMatches(team.link_pin_hash, rawPin)) {
+      if (lock?.link_fail_count) await env.DB.prepare("UPDATE bridge_settings SET link_fail_count = 0 WHERE id = 1").run();
+      return { workspaceId: team.id, userId: team.link_user_id };
+    }
   }
-  if (row.link_fail_count) await env.DB.prepare("UPDATE bridge_settings SET link_fail_count = 0 WHERE id = 1").run();
-  return row.link_user_id;
+  const fails = Number(lock?.link_fail_count || 0) + 1;
+  const locked = fails >= MAX_PIN_FAILS;
+  await env.DB.prepare("UPDATE bridge_settings SET link_fail_count = ?, link_locked_until = ? WHERE id = 1").bind(locked ? 0 : fails, locked ? now + PIN_LOCK_MINUTES * 60_000 : 0).run();
+  throw new HttpError(403, locked ? `Too many wrong PINs. Try again in ${PIN_LOCK_MINUTES} minutes.` : "The PIN is wrong.");
 }
 
 export interface LinkChoice {
@@ -248,9 +273,12 @@ export interface LinkChoice {
 
 /** Every computer a new PC can take over: earlier bridge PCs and Drive computers that no bridge PC has taken yet. */
 export async function linkChoices(pin: string): Promise<LinkChoice[]> {
-  await checkLinkPin(pin);
-  const devices = await env.DB.prepare("SELECT id, name FROM bridge_devices WHERE kind = 'team'").all<{ id: string; name: string }>();
-  const computers = await env.DB.prepare("SELECT folder_id, name FROM drive_computers WHERE folder_id NOT IN (SELECT linked_computer_id FROM bridge_devices WHERE linked_computer_id IS NOT NULL)").all<{ folder_id: string; name: string }>();
+  const { workspaceId } = await checkLinkPin(pin);
+  const devices = await env.DB.prepare("SELECT id, name FROM bridge_devices WHERE kind = 'team' AND workspace_id = ?").bind(workspaceId).all<{ id: string; name: string }>();
+  const computers = await env.DB.prepare(
+    `SELECT folder_id, name FROM drive_computers WHERE account_id IN (SELECT id FROM drive_accounts WHERE workspace_id = ?)
+       AND folder_id NOT IN (SELECT linked_computer_id FROM bridge_devices WHERE linked_computer_id IS NOT NULL)`,
+  ).bind(workspaceId).all<{ folder_id: string; name: string }>();
   const taken = new Set(devices.results.map((d) => d.name.toLowerCase()));
   return [
     ...devices.results.map((d) => ({ key: `device:${d.id}`, name: d.name })),
@@ -263,24 +291,26 @@ export async function linkChoices(pin: string): Promise<LinkChoice[]> {
  * replaces the old one, so a computer that was linked before stops working at once (only one PC per name).
  */
 export async function linkDevice(pin: string, key: string): Promise<{ token: string; deviceId: string; name: string }> {
-  const userId = await checkLinkPin(pin);
+  const { userId, workspaceId } = await checkLinkPin(pin);
   const [kind, id] = String(key || "").split(/:(.+)/);
   const token = randomToken(32);
   const tokenHash = await sha256(token);
   const now = Date.now();
   if (kind === "device" && id) {
-    const device = await env.DB.prepare("SELECT id, name FROM bridge_devices WHERE id = ?").bind(id).first<{ id: string; name: string }>();
+    const device = await env.DB.prepare("SELECT id, name FROM bridge_devices WHERE id = ? AND kind = 'team' AND workspace_id = ?").bind(id, workspaceId).first<{ id: string; name: string }>();
     if (!device) throw new HttpError(404, "This computer was removed from the website. Pick another one.");
     await env.DB.prepare("UPDATE bridge_devices SET token_hash = ?, last_seen_at = ?, queue_size = 0, current_file = NULL, last_error = NULL WHERE id = ?").bind(tokenHash, now, device.id).run();
     return { token, deviceId: device.id, name: device.name };
   }
   if (kind === "computer" && id) {
-    const computer = await env.DB.prepare("SELECT folder_id, name, sheet_json FROM drive_computers WHERE folder_id = ?").bind(id).first<{ folder_id: string; name: string; sheet_json: string | null }>();
+    const computer = await env.DB.prepare("SELECT folder_id, name, sheet_json FROM drive_computers WHERE folder_id = ? AND account_id IN (SELECT id FROM drive_accounts WHERE workspace_id = ?)")
+      .bind(id, workspaceId)
+      .first<{ folder_id: string; name: string; sheet_json: string | null }>();
     if (!computer) throw new HttpError(404, "This computer is not on the website any more. Pick another one.");
     const deviceId = crypto.randomUUID();
     try {
-      await env.DB.prepare("INSERT INTO bridge_devices (id, user_id, name, token_hash, sheet_json, created_at, last_seen_at, linked_computer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(deviceId, userId, computer.name, tokenHash, computer.sheet_json, now, now, computer.folder_id)
+      await env.DB.prepare("INSERT INTO bridge_devices (id, user_id, name, token_hash, sheet_json, created_at, last_seen_at, linked_computer_id, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(deviceId, userId, computer.name, tokenHash, computer.sheet_json, now, now, computer.folder_id, workspaceId)
         .run();
     } catch {
       // Another PC took this computer a moment ago: the list now shows it as a normal PC.
@@ -339,12 +369,15 @@ export function fileDay(info: FileInfo): string {
 }
 
 async function deviceSheet(device: BridgeDevice): Promise<SheetTab | null> {
-  if (!sheetsConfigured()) return null;
+  const workspace = await deviceWorkspace(device);
+  // The team's own spreadsheet; only the original team falls back to the shared team spreadsheet.
+  const sheet = effectiveSpreadsheet(null, workspace);
+  if (!sheetsConfigured(sheet)) return null;
   if (device.sheet_json) return JSON.parse(device.sheet_json);
   // Another request may have created the tab a moment ago.
   const fresh = await env.DB.prepare("SELECT sheet_json FROM bridge_devices WHERE id = ?").bind(device.id).first<{ sheet_json: string | null }>();
   if (fresh?.sheet_json) return JSON.parse(fresh.sheet_json);
-  const tab = await createSheetTab(device.name, true);
+  const tab = await createSheetTab(device.name, true, sheet);
   await env.DB.prepare("UPDATE bridge_devices SET sheet_json = ? WHERE id = ?").bind(JSON.stringify(tab), device.id).run();
   device.sheet_json = JSON.stringify(tab);
   return tab;
@@ -426,10 +459,12 @@ export async function completeFile(device: BridgeDevice, rawBody: any): Promise<
 
   const language = LANGUAGES[String(rawBody?.language || "")] ? String(rawBody.language) : settings.language;
   await env.DB.prepare(
-    `INSERT OR IGNORE INTO transcriptions (id, user_id, title, source_type, source_ref, mode, language, duration, transcript, segments_json, extras_json, created_at)
-     VALUES (?, ?, ?, 'bridge', ?, ?, ?, ?, ?, ?, '{}', ?)`,
+    `INSERT OR IGNORE INTO transcriptions (id, user_id, title, source_type, source_ref, mode, language, duration, transcript, segments_json, extras_json, created_at, workspace_id)
+     VALUES (?, ?, ?, 'bridge', ?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
   )
-    .bind(historyId, device.user_id, info.name.slice(0, 200), `${device.name}: ${info.name}`.slice(0, 300), settings.mode, language, duration || null, merged.transcript, JSON.stringify(merged.segments), Date.now())
+    // A team PC's transcripts belong to the team (its Auto page), not to anyone's personal History.
+    .bind(historyId, device.user_id, info.name.slice(0, 200), `${device.name}: ${info.name}`.slice(0, 300), settings.mode, language, duration || null, merged.transcript, JSON.stringify(merged.segments), Date.now(),
+      device.kind === "personal" ? null : device.workspace_id || DEFAULT_WORKSPACE)
     .run();
 
   await writeSheetRow(device, info, file, {
@@ -483,8 +518,9 @@ export async function knownName(device: BridgeDevice, rawName: unknown): Promise
   if (device.kind !== "team") return false;
   const drive = await env.DB.prepare(
     `SELECT 1 AS x FROM drive_files f WHERE (f.name = ?1 OR SUBSTR(f.name, -LENGTH(?1) - 3) = ' / ' || ?1 OR SUBSTR(f.name, -LENGTH(?1) - 1) = '/' || ?1)
-       AND f.computer_id IN (SELECT folder_id FROM drive_computers WHERE folder_id = ?2 OR LOWER(name) = LOWER(?3)) LIMIT 1`,
-  ).bind(name, device.linked_computer_id || "", device.name).first();
+       AND f.computer_id IN (SELECT folder_id FROM drive_computers WHERE (folder_id = ?2 OR LOWER(name) = LOWER(?3))
+             AND account_id IN (SELECT id FROM drive_accounts WHERE workspace_id = ?4)) LIMIT 1`,
+  ).bind(name, device.linked_computer_id || "", device.name, device.workspace_id || DEFAULT_WORKSPACE).first();
   return Boolean(drive);
 }
 

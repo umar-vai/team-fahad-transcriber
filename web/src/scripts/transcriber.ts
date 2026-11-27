@@ -675,7 +675,7 @@ export function initTranscriber(): void {
     const files = pendingFiles;
     pendingFiles = [];
     input.value = "";
-    $("file-label").textContent = "Drop audio or video files here, or click to choose (you can pick many)";
+    $("file-label").textContent = "Drop audio or video files here, or click to choose";
     enqueue(files.map((file) => ({ kind: "file" as const, name: file.name, file })));
   });
   $("link-go").addEventListener("click", () => {

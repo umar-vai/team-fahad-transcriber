@@ -1,0 +1,48 @@
+---
+import Base from "../layouts/Base.astro";
+import Icon from "../components/Icon.astro";
+
+const user = Astro.locals.user;
+if (!user) return Astro.redirect("/login?next=/admin");
+if (!Astro.locals.isAdmin) return Astro.redirect("/");
+---
+<Base title="Admin · Team Fahad Transcriber">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow"><Icon name="shield" size="sm" />Admin</div>
+      <h1>Teams and access</h1>
+      <p>Create teams for Team Fahad, Sukun Life and paying customers. Each team gets its own independent Automation page: only its members see its PCs, Drive accounts and transcripts.</p>
+    </div>
+    <div class="actions"><button class="btn" id="new-team" type="button"><Icon name="plus" />New team</button></div>
+  </div>
+
+  <div class="stats" id="admin-stats" style="margin-bottom:20px"></div>
+
+  <div class="admin-layout">
+    <section class="card flush">
+      <div class="card-head"><h3>Teams</h3><span class="muted small-text" id="team-count"></span></div>
+      <div class="team-list" id="team-list" role="listbox" aria-label="Teams"><p class="muted" style="padding:16px">Loading…</p></div>
+    </section>
+    <div class="stack" id="team-detail"></div>
+  </div>
+
+  <dialog class="modal" id="team-dialog">
+    <div class="card-head"><h3>New team</h3></div>
+    <form method="dialog" id="team-form">
+      <label>Name<input type="text" name="name" required maxlength="80" placeholder="e.g. Sukun Life" /></label>
+      <fieldset class="choice">
+        <legend>Kind</legend>
+        <label><input type="radio" name="kind" value="team" checked /><span><strong>Our team</strong><small class="muted">Team Fahad, Sukun Life and other in-house teams</small></span></label>
+        <label><input type="radio" name="kind" value="customer" /><span><strong>Customer</strong><small class="muted">A paying customer with its own separate page</small></span></label>
+      </fieldset>
+      <div class="row end">
+        <button class="btn ghost" value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button class="btn" value="create" type="submit">Create team</button>
+      </div>
+    </form>
+  </dialog>
+</Base>
+<script>
+  import { initAdmin } from "../scripts/admin";
+  initAdmin();
+</script>

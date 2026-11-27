@@ -53,6 +53,8 @@ export interface BatchConfig {
   spreadsheet?: string | null;
   /** Nightly auto jobs: false skips the Notion export (Sheets only). Manual folder batches always use Notion. */
   notion?: boolean;
+  /** Nightly auto jobs: the team that owns the transcripts (they stay out of personal History). */
+  workspaceId?: string | null;
 }
 
 type ItemStatus = "queued" | "preparing" | "ready" | "transcribing" | "saving" | "done" | "failed";
@@ -528,8 +530,8 @@ export class BatchRunner extends DurableObject<Env> {
     item.historyId ||= crypto.randomUUID();
     // INSERT OR IGNORE: a repeated step after a restart never creates a second row.
     await this.env.DB.prepare(
-      `INSERT OR IGNORE INTO transcriptions (id, user_id, title, source_type, source_ref, mode, language, duration, transcript, segments_json, extras_json, created_at, batch_id)
-       VALUES (?, ?, ?, 'drive', ?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
+      `INSERT OR IGNORE INTO transcriptions (id, user_id, title, source_type, source_ref, mode, language, duration, transcript, segments_json, extras_json, created_at, batch_id, workspace_id)
+       VALUES (?, ?, ?, 'drive', ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)`,
     )
       .bind(
         item.historyId,
@@ -543,6 +545,8 @@ export class BatchRunner extends DurableObject<Env> {
         JSON.stringify(merged.segments),
         Date.now(),
         config.id,
+        // Auto jobs started before teams existed belong to the original team.
+        config.workspaceId ?? (config.computerId ? "team-fahad" : null),
       )
       .run();
     item.words = wordCount(merged.transcript);

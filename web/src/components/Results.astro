@@ -1,56 +1,62 @@
 ---
 /** Result panel. Filled in by src/scripts/results.ts. */
+import Icon from "./Icon.astro";
 ---
-<section id="results" class="card stack hidden" aria-live="polite">
-  <div class="page-head" style="margin:0">
-    <div>
+<section id="results" class="card flush hidden" aria-live="polite">
+  <div class="card-head">
+    <div class="stack tight" style="min-width:0">
       <h2 id="result-title">Transcript</h2>
       <div class="chips" id="result-chips"></div>
     </div>
     <div class="row">
-      <button class="btn ghost small" id="copy-btn" type="button">Copy text</button>
-      <button class="btn ghost small" id="copy-timed-btn" type="button">Copy with timestamps</button>
-      <a class="btn ghost small hidden" id="history-link" href="/history">Saved in history</a>
+      <button class="btn ghost small" id="copy-btn" type="button"><Icon name="copy" />Copy text</button>
+      <button class="btn ghost small" id="copy-timed-btn" type="button"><Icon name="clock" />Copy with times</button>
+      <a class="btn ghost small hidden" id="history-link" href="/history"><Icon name="check" />Saved in History</a>
     </div>
   </div>
-  <p class="notice small-text hidden" id="result-note"></p>
-  <div class="tabs" role="tablist">
-    <button role="tab" aria-selected="true" data-tab="text">Transcript</button>
-    <button role="tab" aria-selected="false" data-tab="subs">Subtitles</button>
-    <button role="tab" aria-selected="false" data-tab="ai">AI tools</button>
-    <button role="tab" aria-selected="false" data-tab="files">Downloads</button>
-  </div>
-  <div data-panel="text">
-    <input type="search" id="find" placeholder="Search in transcript" style="margin-bottom:10px" />
-    <div class="transcript" id="transcript-view"></div>
-  </div>
-  <div data-panel="subs" class="hidden">
-    <div class="row" style="margin-bottom:10px">
-      <button class="btn ghost small" data-copy-kind="plain" type="button">Copy text</button>
-      <button class="btn ghost small" data-copy-kind="timed" type="button">Copy with timestamps</button>
+  <div class="card-body">
+    <p class="notice small-text hidden" id="result-note" style="margin-bottom:14px"></p>
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-tab="text" type="button"><Icon name="text" />Transcript</button>
+      <button role="tab" aria-selected="false" data-tab="subs" type="button"><Icon name="clock" />Subtitles</button>
+      <button role="tab" aria-selected="false" data-tab="ai" type="button"><Icon name="sparkle" />AI tools</button>
+      <button role="tab" aria-selected="false" data-tab="files" type="button"><Icon name="download" />Downloads</button>
     </div>
-    <div class="segments" id="segments-view"></div>
-  </div>
-  <div data-panel="ai" class="hidden stack">
-    <div class="row">
-      <button class="btn ghost small" data-ai="summary" type="button">Summary + key points</button>
-      <button class="btn ghost small" data-ai="explain" type="button">Explain clearly</button>
-      <button class="btn ghost small" data-ai="content" type="button">Creator content pack</button>
+    <div data-panel="text">
+      <div class="search" style="margin-bottom:12px">
+        <Icon name="search" />
+        <input type="search" id="find" placeholder="Search in transcript" />
+      </div>
+      <div class="transcript" id="transcript-view"></div>
     </div>
-    <div class="row">
-      <select id="translate-target" style="width:auto">
-        <option>Bangla</option><option>English</option><option>Arabic</option><option>Hindi</option>
-      </select>
-      <button class="btn ghost small" data-ai="translate" type="button">Translate full transcript</button>
+    <div data-panel="subs" class="hidden">
+      <div class="row" style="margin-bottom:12px">
+        <button class="btn ghost small" data-copy-kind="plain" type="button"><Icon name="copy" />Copy text</button>
+        <button class="btn ghost small" data-copy-kind="timed" type="button"><Icon name="clock" />Copy with times</button>
+      </div>
+      <div class="segments" id="segments-view"></div>
     </div>
-    <div id="ai-output" class="stack"></div>
-  </div>
-  <div data-panel="files" class="hidden row">
-    <button class="btn ghost small" data-dl="txt" type="button">TXT</button>
-    <button class="btn ghost small" data-dl="srt" type="button">SRT subtitles</button>
-    <button class="btn ghost small" data-dl="vtt" type="button">VTT subtitles</button>
-    <button class="btn ghost small" data-dl="speakers" type="button">Timestamped TXT</button>
-    <button class="btn ghost small" data-dl="docx" type="button">Word (DOCX)</button>
-    <button class="btn small" data-dl="zip" type="button">Everything (ZIP)</button>
+    <div data-panel="ai" class="hidden stack">
+      <div class="row">
+        <button class="btn ghost small" data-ai="summary" type="button">Summary and key points</button>
+        <button class="btn ghost small" data-ai="explain" type="button">Explain clearly</button>
+        <button class="btn ghost small" data-ai="content" type="button">Creator content pack</button>
+      </div>
+      <div class="row">
+        <select id="translate-target" style="width:auto">
+          <option>Bangla</option><option>English</option><option>Arabic</option><option>Hindi</option>
+        </select>
+        <button class="btn ghost small" data-ai="translate" type="button"><Icon name="globe" />Translate full transcript</button>
+      </div>
+      <div id="ai-output" class="stack"></div>
+    </div>
+    <div data-panel="files" class="hidden row">
+      <button class="btn ghost small" data-dl="txt" type="button">TXT</button>
+      <button class="btn ghost small" data-dl="srt" type="button">SRT subtitles</button>
+      <button class="btn ghost small" data-dl="vtt" type="button">VTT subtitles</button>
+      <button class="btn ghost small" data-dl="speakers" type="button">Timestamped TXT</button>
+      <button class="btn ghost small" data-dl="docx" type="button">Word (DOCX)</button>
+      <button class="btn small" data-dl="zip" type="button"><Icon name="download" />Everything (ZIP)</button>
+    </div>
   </div>
 </section>

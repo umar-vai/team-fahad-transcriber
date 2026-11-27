@@ -28,6 +28,10 @@ interface Batch {
   notion: { configured: boolean; url: string | null; error: string | null };
   sheet: { configured: boolean; url: string | null; error: string | null };
   items: Item[];
+  /** Set for nightly Auto batches: the team that owns them. */
+  workspaceId?: string | null;
+  /** False for team viewers: they can watch but not stop or retry. */
+  canManage?: boolean;
 }
 
 const POLL_MS = 4000;
@@ -91,10 +95,17 @@ function render(batch: Batch): void {
   const failed = items.filter((i) => i.status === "failed").length;
   const running = batch.status === "running";
   document.title = `${batch.folderName} · Team Fahad Transcriber`;
-  $("b-title").textContent = `📁 ${batch.folderName}`;
+  $("b-title").textContent = batch.folderName;
+  if (batch.workspaceId) {
+    const back = $("b-back") as HTMLAnchorElement | null;
+    if (back) {
+      back.href = `/auto?team=${encodeURIComponent(batch.workspaceId)}`;
+      back.textContent = "← Back to Auto";
+    }
+  }
   const statusText = running ? "Running" : batch.status === "done" ? "Finished" : "Stopped";
   $("b-chips").innerHTML = [
-    `<span class="chip" style="color:${running ? "var(--accent-2)" : batch.status === "done" ? "var(--good)" : "var(--muted)"}">${statusText}</span>`,
+    `<span class="pill ${running ? "work" : batch.status === "done" ? (failed ? "warn" : "good") : ""}">${statusText}</span>`,
     `<span class="chip">${batch.mode === "detailed" ? "Subtitles (timed)" : "Smart clean"}</span>`,
     `<span class="chip">${escapeHtml(batch.language)}</span>`,
   ].join("");
@@ -111,16 +122,18 @@ function render(batch: Batch): void {
   if (batch.sheet.url) links.push(linkHtml("Google Sheet tab", batch.sheet.url));
   $("b-links").innerHTML = links.join("");
   const notes: string[] = [];
-  if (!batch.notion.configured) notes.push("Notion is not connected yet, so transcripts are only saved to History.");
-  else if (batch.notion.error) notes.push(`Notion problem: ${batch.notion.error}`);
+  if (!batch.notion.configured) {
+    if (!batch.workspaceId) notes.push("Notion is not connected yet, so transcripts are only saved to History.");
+  } else if (batch.notion.error) notes.push(`Notion problem: ${batch.notion.error}`);
   if (!batch.sheet.configured) notes.push("Google Sheets is not connected yet.");
   else if (batch.sheet.error) notes.push(`Google Sheets problem: ${batch.sheet.error}`);
   if (running) notes.push("This runs on the server. You can close this page and come back any time.");
   $("b-note").textContent = notes.join(" ");
 
   $("b-items").innerHTML = items.map((item) => itemHtml(item, running)).join("");
-  $("b-stop").classList.toggle("hidden", !running);
-  const canResume = !running && (failed > 0 || batch.status === "cancelled" || items.some((i) => i.exportError));
+  const manage = batch.canManage !== false;
+  $("b-stop").classList.toggle("hidden", !running || !manage);
+  const canResume = manage && !running && (failed > 0 || batch.status === "cancelled" || items.some((i) => i.exportError));
   $("b-resume").classList.toggle("hidden", !canResume);
   $("b-resume").textContent = batch.status === "cancelled" ? "Continue" : "Retry failed";
   $("b-zip").classList.toggle("hidden", done === 0);

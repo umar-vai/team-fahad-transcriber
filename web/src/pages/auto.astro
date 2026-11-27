@@ -1,477 +1,177 @@
 ---
 import Base from "../layouts/Base.astro";
+import Icon from "../components/Icon.astro";
 import { LANGUAGES } from "../lib/gemini";
 import { BATCH_MODES } from "../batch/runner";
+import { accessibleWorkspaces } from "../lib/workspaces";
 
 const user = Astro.locals.user;
 if (!user) return Astro.redirect("/login?next=/auto");
-const notice = Astro.url.searchParams.get("connected") ? "Google Drive connected." : "";
-const problem = Astro.url.searchParams.get("error") || "";
+const teams = await accessibleWorkspaces(user);
+const wanted = Astro.url.searchParams.get("team") || "";
+const current = teams.find((t) => t.workspace.id === wanted) || teams[0] || null;
+const tabs = current
+  ? [
+      ...(current.workspace.feature_bridge ? [["bridge", "Bridge PCs", "monitor"]] : []),
+      ...(current.workspace.feature_drive ? [["drive", "Google Drive", "cloud"]] : []),
+      ["transcripts", "Transcripts", "text"],
+    ]
+  : [];
+const askedTab = Astro.url.searchParams.get("tab") || "";
+const tab = tabs.some(([key]) => key === askedTab) ? askedTab : tabs[0]?.[0] || "transcripts";
+const boot = current && {
+  team: {
+    id: current.workspace.id,
+    name: current.workspace.name,
+    kind: current.workspace.kind,
+    canManage: current.canManage,
+    role: current.role,
+    isDefault: Boolean(current.workspace.is_default),
+  },
+  tab,
+  modes: Object.entries(BATCH_MODES),
+  languages: Object.keys(LANGUAGES),
+  connected: Boolean(Astro.url.searchParams.get("connected")),
+  problem: Astro.url.searchParams.get("error") || "",
+};
+const roleLabel: Record<string, string> = { admin: "Admin", manager: "Manager", viewer: "Viewer" };
 ---
-<script is:inline type="application/json" id="opts" set:html={JSON.stringify({ modes: Object.entries(BATCH_MODES), languages: Object.keys(LANGUAGES) })} />
-<Base title="Auto · Team Fahad Transcriber">
-  <div class="page-head">
-    <div>
-      <h1>Automatic transcription</h1>
-      <p class="muted" style="margin:0">Bridge PCs transcribe new files live. Every night at 11:50 PM (Bangladesh time) the new files of every computer under Drive "Computers" are also transcribed and added to Notion and Google Sheets, one page and one tab per computer, by date.</p>
-    </div>
-  </div>
-  {notice ? <div class="card" style="border-color:var(--good)">{notice}</div> : null}
-  {problem ? <div class="card" style="border-color:var(--bad,#c33)">{problem}</div> : null}
-
-  <div class="card" id="bridge">
-    <div class="section-head" style="margin-top:0">
-      <h2 style="margin:0">Bridge PCs (live)</h2>
-      <span class="muted small-text">The bridge app on each PC transcribes new files as soon as they arrive.</span>
-    </div>
-    <div class="pc-grid" id="bridgePcs"><p class="muted" style="margin:0">Loading…</p></div>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px;align-items:flex-end">
-      <label>New PC name
-        <input id="bridgeName" type="text" maxlength="60" placeholder="PC-03" />
-      </label>
-      <button class="btn" id="bridgeAdd" type="button">Get pairing code</button>
-      <label>Output style
-        <select id="bridgeMode">
-          {Object.entries(BATCH_MODES).map(([value, label]) => <option value={value}>{label}</option>)}
-        </select>
-      </label>
-      <label>Language
-        <select id="bridgeLanguage">
-          {Object.keys(LANGUAGES).map((name) => <option value={name}>{name}</option>)}
-        </select>
-      </label>
-    </div>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px;align-items:flex-end">
-      <label>Team PIN for linking a PC to an existing computer
-        <input id="bridgePin" type="text" maxlength="40" autocomplete="off" placeholder="At least 4 characters" />
-      </label>
-      <button class="btn ghost" id="bridgePinSave" type="button">Save PIN</button>
-      <span class="muted small-text" id="bridgePinState"></span>
-    </div>
-    <div class="pc-detail card" id="pcDetail" hidden></div>
-    <p class="muted small-text" style="margin-bottom:0">On a fresh PC the bridge app asks for this PIN, then lists the computers above and the Drive computers (for example Mahbub, Hasan), and the PC takes the chosen one's place and sheet tab. Only one PC stays linked to each name: linking a new PC switches the old one off.</p>
-    <p class="muted" id="bridgeResult" style="margin-bottom:0"></p>
-  </div>
-
-  <div class="card" id="connection">
-    <p class="muted" style="margin:0">Loading…</p>
-  </div>
-
-  <section id="dash" hidden>
-    <div class="batch-stats" id="totals"></div>
-    <div class="section-head">
-      <h2>Team progress</h2>
-      <span class="muted small-text" id="todayLabel"></span>
-    </div>
-    <div class="pc-grid" id="computers"></div>
-  </section>
-
-  <div id="settings" hidden>
-    <div id="accountCards"></div>
-    <div class="card" style="margin-top:16px">
-      <h2 style="margin-top:0">Run now</h2>
-      <p class="muted small-text" style="margin-top:0">These act on every connected Drive account.</p>
-      <div style="display:flex;gap:12px;flex-wrap:wrap">
-        <button class="btn" id="run" type="button">Run the nightly scan now</button>
-        <button class="btn" id="retryFailed" type="button">Retry failed files and resend missing sheet rows</button>
-        <button class="btn ghost" id="sheetDash" type="button">Update sheet dashboards</button>
+<Base title={`${current ? current.workspace.name : "Automation"} · Team Fahad Transcriber`}>
+  {!current ? (
+    <section class="card">
+      <div class="empty">
+        <span class="empty-icon"><Icon name="bolt" size="lg" /></span>
+        <h3>Automation is for teams</h3>
+        <p>Automatic transcription from team PCs and Google Drive is available to team members. Ask an admin to add your email to a team.</p>
+        <a class="btn small" href="/">Go to Transcribe</a>
       </div>
-      <p class="muted" id="result" style="margin-bottom:0"></p>
-    </div>
-  </div>
+    </section>
+  ) : (
+    <>
+      <div class="team-bar">
+        <div class="team-switch">
+          <span class="team-avatar">{current.workspace.name.trim()[0]}</span>
+          <div class="stack tight" style="gap:4px">
+            {teams.length > 1 ? (
+              <select id="team-select" aria-label="Choose team">
+                {teams.map((t) => <option value={t.workspace.id} selected={t.workspace.id === current.workspace.id}>{t.workspace.name}</option>)}
+              </select>
+            ) : (
+              <h1 style="font-size:20px">{current.workspace.name}</h1>
+            )}
+            <div class="chips">
+              <span class:list={["badge", current.workspace.kind === "customer" ? "info" : "accent"]}>{current.workspace.kind === "customer" ? "Customer" : "Team"}</span>
+              <span class="badge">{roleLabel[current.role]}</span>
+            </div>
+          </div>
+        </div>
+        {Astro.locals.isAdmin && <a class="btn ghost small" href={`/admin?team=${encodeURIComponent(current.workspace.id)}`}><Icon name="users" />Members and features</a>}
+      </div>
 
-  <div class="card" id="jobs" hidden style="margin-top:16px">
-    <div class="section-head" style="margin-top:0">
-      <h2>Jobs</h2>
-      <select id="jobPc" aria-label="Filter by computer" style="width:auto"></select>
-    </div>
-    <div class="tabs" id="jobTabs" role="tablist"></div>
-    <div id="jobList" class="job-list"></div>
-  </div>
+      <div class="notice ok hidden" id="flash-ok"><Icon name="check" /><span></span></div>
+      <div class="notice error hidden" id="flash-bad"><Icon name="alert" /><span></span></div>
+
+      <nav class="tabs" role="tablist" id="auto-tabs">
+        {tabs.map(([key, label, icon]: string[]) => (
+          <button role="tab" type="button" data-tab={key} aria-selected={key === tab ? "true" : "false"}><Icon name={icon} />{label}</button>
+        ))}
+      </nav>
+
+      <!-- Bridge PCs -->
+      <section data-panel="bridge" class="stack hidden">
+        <div class="section-head" style="margin:0">
+          <div>
+            <h2>Bridge PCs</h2>
+            <p>The Bridge app on each PC transcribes new recordings as soon as they arrive.</p>
+          </div>
+          <span class="muted small-text" id="bridge-updated"></span>
+        </div>
+        <div class="stats" id="bridge-stats"></div>
+        <div class="pc-grid" id="bridge-pcs"><p class="muted">Loading…</p></div>
+        <div class="card flush hidden" id="pc-detail"></div>
+
+        <div class="grid-2 manage-only">
+          <section class="card stack">
+            <div class="card-title"><span class="icon-box"><Icon name="plus" /></span><div><h3>Add a PC</h3><p class="muted small-text">Get a one-time code, then type it in the Bridge app on that PC.</p></div></div>
+            <div class="input-group">
+              <label>PC name<input id="bridge-name" type="text" maxlength="60" placeholder="e.g. PC-03" /></label>
+              <button class="btn" id="bridge-add" type="button">Get pairing code</button>
+            </div>
+            <div id="pairing" class="notice hidden"></div>
+          </section>
+          <section class="card stack">
+            <div class="card-title"><span class="icon-box"><Icon name="settings" /></span><div><h3>PC settings</h3><p class="muted small-text">Used by every PC of this team.</p></div></div>
+            <div class="grid-2">
+              <label>Output style<select id="bridge-mode"></select></label>
+              <label>Language<select id="bridge-language"></select></label>
+            </div>
+            <div class="input-group">
+              <label>Team PIN <span class="hint" id="pin-state"></span><input id="bridge-pin" type="text" maxlength="40" autocomplete="off" placeholder="At least 4 characters" /></label>
+              <button class="btn ghost" id="bridge-pin-save" type="button">Save PIN</button>
+            </div>
+            <p class="field-hint">On a fresh PC the Bridge app asks for this PIN, lists this team's computers, and the PC takes the chosen one's place and sheet tab.</p>
+          </section>
+        </div>
+      </section>
+
+      <!-- Google Drive -->
+      <section data-panel="drive" class="stack hidden">
+        <div class="section-head" style="margin:0">
+          <div>
+            <h2>Google Drive</h2>
+            <p>Every night at 11:50 PM (Bangladesh time) new recordings in the connected Drive accounts are transcribed and added to Google Sheets.</p>
+          </div>
+          <div class="row manage-only">
+            <button class="btn ghost small" id="drive-run" type="button"><Icon name="play" />Scan now</button>
+            <button class="btn ghost small" id="drive-retry" type="button"><Icon name="refresh" />Retry failed</button>
+            <button class="btn ghost small" id="drive-dash" type="button"><Icon name="sheet" />Update sheet dashboard</button>
+          </div>
+        </div>
+        <div id="drive-empty" class="card hidden"></div>
+        <div class="stats" id="drive-stats"></div>
+        <div id="drive-computers-wrap">
+          <div class="section-head"><h3>Computers</h3><span class="muted small-text" id="drive-today"></span></div>
+          <div class="pc-grid" id="drive-computers"></div>
+        </div>
+        <div id="drive-jobs-wrap">
+          <div class="section-head">
+            <h3>Jobs</h3>
+            <select id="job-pc" aria-label="Filter by computer" style="width:auto;min-width:180px"></select>
+          </div>
+          <div class="tabs" id="job-tabs" role="tablist"></div>
+          <div id="job-list" class="job-list"></div>
+        </div>
+        <div>
+          <div class="section-head">
+            <h3>Connected accounts</h3>
+            <a class="btn small manage-only" id="drive-connect" href={`/auth/drive?team=${encodeURIComponent(current.workspace.id)}`}><Icon name="plus" />Connect a Drive account</a>
+          </div>
+          <div class="stack" id="drive-accounts"></div>
+        </div>
+      </section>
+
+      <!-- Transcripts -->
+      <section data-panel="transcripts" class="stack hidden">
+        <div class="section-head" style="margin:0">
+          <div>
+            <h2>Team transcripts</h2>
+            <p>Everything this team's PCs and Drive accounts transcribed. They are kept here, separate from everyone's personal History.</p>
+          </div>
+          <form class="search" id="tx-search" style="width:min(320px,100%)">
+            <Icon name="search" />
+            <input type="search" name="q" placeholder="Search file names and text" aria-label="Search team transcripts" />
+          </form>
+        </div>
+        <section class="card flush"><div class="list" id="tx-list"><p class="muted" style="padding:20px">Loading…</p></div></section>
+        <button class="btn ghost hidden" id="tx-more" type="button" style="justify-self:center">Load more</button>
+      </section>
+
+      <script is:inline type="application/json" id="auto-boot" set:html={JSON.stringify(boot).replace(/</g, "\\u003c")} />
+    </>
+  )}
 </Base>
-<script>
-  const $ = (id: string) => document.getElementById(id) as HTMLElement;
-  const esc = (v: unknown) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
-  async function api(method: string, query = "", body?: unknown) {
-    const response = await fetch(`/api/auto${query}`, {
-      method,
-      headers: { "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const data: any = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "Something went wrong.");
-    return data;
-  }
-  const num = (n: unknown) => Number(n || 0).toLocaleString();
-  function renderDashboard(data: any) {
-    const rows: any[] = data.stats || [];
-    const sum = (key: string) => rows.reduce((total, row) => total + Number(row[key] || 0), 0);
-    // "Recorded" is every file the app has picked up so far (not only what is still in Drive today).
-    const recorded = sum("picked_up");
-    const done = sum("done");
-    const failed = sum("failed");
-    const waiting = sum("waiting");
-    $("totals").innerHTML = [
-      ["Computers", rows.length],
-      ["Recordings picked up", recorded],
-      ["Transcribed", done],
-      ["Waiting", waiting],
-      ["Failed", failed],
-      ["Transcribed today", sum("done_today")],
-    ].map(([label, value]) => `<div class="stat"><strong>${num(value)}</strong><span>${label}</span></div>`).join("");
-    $("todayLabel").textContent = data.today ? `Today: ${data.today}` : "";
-    $("computers").innerHTML = rows.length
-      ? rows.map((row) => {
-          const total = Number(row.picked_up || 0);
-          const ok = Number(row.done || 0);
-          const bad = Number(row.failed || 0);
-          const left = Number(row.waiting || 0);
-          const pct = total ? Math.round((ok / total) * 100) : 0;
-          const state = row.scan_error ? `<span class="pill bad">Could not read Drive</span>`
-            : row.open_jobs ? `<span class="pill work">Transcribing</span>`
-            : left ? `<span class="pill warn">${left} waiting</span>`
-            : `<span class="pill good">All done</span>`;
-          return `<div class="pc-card">
-            <div class="pc-head"><strong>${esc(row.name)}</strong>${state}</div>
-            <div class="pc-big"><b>${num(ok)}</b><span> of ${num(total)} transcribed</span></div>
-            <div class="progress"><div style="width:${pct}%"></div></div>
-            <div class="pc-nums">
-              <span><b>${num(total)}</b>recorded</span>
-              <span><b>${num(ok)}</b>done</span>
-              <span><b>${num(left)}</b>waiting</span>
-              <span class="${bad ? "bad" : ""}"><b>${num(bad)}</b>failed</span>
-            </div>
-            <div class="muted small-text">Today: ${num(row.recorded_today)} recorded, ${num(row.done_today)} transcribed</div>
-            ${row.scan_error ? `<div class="small-text bad-text">${esc(row.scan_error)}</div>` : ""}
-            ${row.last_scan_at ? `<div class="muted small-text">Last scan: ${esc(new Date(row.last_scan_at).toLocaleString())}</div>` : ""}
-          </div>`;
-        }).join("")
-      : `<p class="muted">No scan has run yet. Press "Run the nightly scan now" below.</p>`;
-  }
-  const opts = JSON.parse(document.getElementById("opts")!.textContent || "{}");
-  const selectHtml = (name: string, values: [string, string][], current: string) =>
-    `<select data-field="${name}">${values.map(([v, l]) => `<option value="${esc(v)}"${v === current ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
-  function renderAccounts(data: any) {
-    const accounts: any[] = data.accounts || [];
-    $("connection").innerHTML = accounts.length
-      ? `<strong>Connected Drive accounts:</strong> ${accounts.map((a) => esc(a.email)).join(", ")}
-         <a class="btn" style="margin-left:12px" href="/auth/drive">Connect another Drive account</a>`
-      : `<p style="margin-top:0">Connect a Google account whose Drive holds the folders to transcribe. It only gets read-only access. You can connect more than one account later.</p><a class="btn" href="/auth/drive">Connect Drive</a>`;
-    $("accountCards").innerHTML = accounts.map((a) => `
-      <div class="card" data-account="${esc(a.id)}" style="margin-top:16px">
-        <div class="section-head" style="margin-top:0"><h2 style="margin:0">${esc(a.email)}</h2>
-          <button class="btn ghost small" type="button" data-act="disconnect">Disconnect</button></div>
-        <label><input type="checkbox" data-field="enabled"${a.enabled ? " checked" : ""} /> Automatic nightly transcription is on</label><br />
-        <label><input type="checkbox" data-field="notion"${a.notion ? " checked" : ""} /> Also save to Notion (off: Google Sheets only)</label>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
-          <label>Output style ${selectHtml("mode", opts.modes, a.mode)}</label>
-          <label>Language ${selectHtml("language", opts.languages.map((n: string) => [n, n]), a.language)}</label>
-        </div>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;align-items:flex-end">
-          <label style="flex:1;min-width:260px">This account's spreadsheet link (empty: the team spreadsheet)
-            <input type="text" data-field="spreadsheet" value="${esc(a.spreadsheet)}" placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
-          <button class="btn ghost small" type="button" data-act="save-sheet">Save</button>
-        </div>
-        <p class="muted small-text" style="margin:6px 0 0">Share that spreadsheet with the service account as Editor.</p>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;align-items:flex-end">
-          <label style="flex:1;min-width:260px">Extra folders to scan (links or ids, for folders inside other folders or shared with this account)
-            <input type="text" data-field="extraFolders" value="${esc(a.extraFolders)}" placeholder="https://drive.google.com/drive/folders/..." /></label>
-          <button class="btn ghost small" type="button" data-act="save-folders">Save</button>
-        </div>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
-          <button class="btn" type="button" data-act="check">Check folders in Drive</button>
-          <button class="btn ghost" type="button" data-act="dash">Update sheet dashboard</button>
-          ${a.sheetUrl ? `<a class="btn ghost" href="${esc(a.sheetUrl)}" target="_blank" rel="noopener">Open the sheet</a>` : ""}
-        </div>
-        <p class="muted small-text" data-note style="margin-bottom:0"></p>
-      </div>`).join("");
-  }
-  function render(data: any) {
-    $("dash").hidden = !data.connected;
-    if (data.connected) renderDashboard(data);
-    renderAccounts(data);
-    $("settings").hidden = $("jobs").hidden = !data.connected;
-    allJobs = data.jobs || [];
-    renderJobs();
-  }
-  type Tab = "all" | "progress" | "finished" | "failed";
-  let allJobs: any[] = [];
-  let tab: Tab = "all";
-  let pc = "";
-  const phase = (j: any): Exclude<Tab, "all"> => (j.status === "queued" || j.status === "running" ? "progress" : Number(j.failed_count || 0) > 0 ? "failed" : "finished");
-  const inTab = (j: any, t: Tab) => t === "all" || (t === "failed" ? Number(j.failed_count || 0) > 0 : phase(j) === t);
-  function renderJobs() {
-    const scoped = allJobs.filter((j) => !pc || j.computer_name === pc);
-    const tabs: [Tab, string][] = [["all", "All"], ["progress", "In progress"], ["finished", "Finished"], ["failed", "Failed"]];
-    $("jobTabs").innerHTML = tabs
-      .map(([key, label]) => `<button type="button" role="tab" data-tab="${key}" aria-selected="${tab === key}">${label} <span class="count">${scoped.filter((j) => inTab(j, key)).length}</span></button>`)
-      .join("");
-    const names = [...new Set(allJobs.map((j) => String(j.computer_name)))].sort((x, y) => x.localeCompare(y));
-    $("jobPc").innerHTML = `<option value="">All computers</option>` + names.map((n) => `<option value="${esc(n)}"${n === pc ? " selected" : ""}>${esc(n)}</option>`).join("");
-    const shown = scoped.filter((j) => inTab(j, tab));
-    $("jobList").innerHTML = shown.length
-      ? shown.map((j) => {
-          const total = Number(j.files || 0);
-          const ok = Number(j.done_count || 0);
-          const bad = Number(j.failed_count || 0);
-          const p = phase(j);
-          const pill = j.status === "queued" ? `<span class="pill warn">Waiting for a slot</span>`
-            : j.status === "running" ? `<span class="pill work">Transcribing</span>`
-            : bad ? `<span class="pill bad">Finished with ${bad} failed</span>`
-            : `<span class="pill good">Finished</span>`;
-          const pct = total ? Math.round(((ok) / total) * 100) : 0;
-          return `<div class="job ${bad ? "has-bad" : p === "finished" ? "is-done" : ""}">
-            <div class="job-top">
-              <div><strong>${esc(j.computer_name)}</strong> <span class="muted small-text">${esc(j.day)}</span></div>
-              ${pill}
-            </div>
-            <div class="progress"><div style="width:${pct}%"></div></div>
-            <div class="job-nums muted small-text">
-              <span><b>${num(total)}</b> files</span>
-              <span><b>${num(ok)}</b> done</span>
-              ${bad ? `<span class="bad-text"><b>${num(bad)}</b> failed</span>` : ""}
-              ${j.attempts ? `<span>retried ${j.attempts}×</span>` : ""}
-            </div>
-            <div class="links">
-              ${j.batch_id ? `<a class="btn ghost small" href="/batches/${esc(j.batch_id)}">Details</a>` : ""}
-              ${j.sheet_url ? `<a class="btn ghost small" href="${esc(j.sheet_url)}" target="_blank" rel="noopener">Sheet</a>` : ""}
-              ${j.notion_url ? `<a class="btn ghost small" href="${esc(j.notion_url)}" target="_blank" rel="noopener">Notion</a>` : ""}
-            </div>
-          </div>`;
-        }).join("")
-      : `<p class="muted" style="margin:0">Nothing here.</p>`;
-  }
-  $("jobTabs").addEventListener("click", (e) => {
-    const key = (e.target as HTMLElement).closest("button")?.dataset.tab as Tab | undefined;
-    if (key) {
-      tab = key;
-      renderJobs();
-    }
-  });
-  $("jobPc").addEventListener("change", (e) => {
-    pc = (e.target as HTMLSelectElement).value;
-    renderJobs();
-  });
-  // ---------- Bridge PCs ----------
-  async function bridgeApi(method: string, query = "", body?: unknown) {
-    const response = await fetch(`/api/bridge/devices${query}`, {
-      method,
-      headers: { "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const data: any = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "Something went wrong.");
-    return data;
-  }
-  const ago = (ms: number | null) => {
-    if (!ms) return "never";
-    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-    return s < 90 ? "just now" : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`;
-  };
-  function renderBridge(data: any) {
-    ($("bridgeMode") as unknown as HTMLSelectElement).value = data.settings.mode;
-    ($("bridgeLanguage") as unknown as HTMLSelectElement).value = data.settings.language;
-    $("bridgePinState").textContent = data.pinSet ? "A PIN is set. Saving a new one replaces it." : "No PIN yet: PCs cannot link to an existing computer.";
-    const devices: any[] = data.devices || [];
-    $("bridgePcs").innerHTML = devices.length
-      ? devices.map((d) => {
-          const online = d.last_seen_at && Date.now() - d.last_seen_at < 150_000;
-          const state = !online ? `<span class="pill bad">Offline</span>`
-            : d.current_file ? `<span class="pill work">Transcribing</span>`
-            : d.queue_size ? `<span class="pill warn">${num(d.queue_size)} waiting</span>`
-            : `<span class="pill good">Online</span>`;
-          return `<div class="pc-card clickable${d.id === openPc ? " selected" : ""}" data-open="${esc(d.id)}" title="Click for details">
-            <div class="pc-head"><strong>${esc(d.name)}</strong>${state}</div>
-            <div class="pc-big"><b>${num(d.done_today)}</b><span> transcribed today</span></div>
-            <div class="pc-nums">
-              <span><b>${num(d.done)}</b>total</span>
-              <span><b>${num(d.queue_size)}</b>waiting</span>
-              <span class="${d.failed ? "bad" : ""}"><b>${num(d.failed)}</b>failed</span>
-            </div>
-            ${d.current_file ? `<div class="muted small-text">Now: ${esc(d.current_file)}</div>` : ""}
-            ${d.last_error ? `<div class="small-text bad-text">${esc(d.last_error)}</div>` : ""}
-            <div class="muted small-text">Seen ${ago(d.last_seen_at)}${d.version ? ` · v${esc(d.version)}` : ""}</div>
-            ${d.watch_folder ? `<div class="muted small-text">Folder: ${esc(d.watch_folder)}</div>` : ""}
-            <div class="links">
-              ${d.sheet_url ? `<a class="btn ghost small" href="${esc(d.sheet_url)}" target="_blank" rel="noopener">Sheet tab</a>` : ""}
-              <button class="btn ghost small" type="button" data-remove="${esc(d.id)}" data-name="${esc(d.name)}">Remove</button>
-            </div>
-          </div>`;
-        }).join("")
-      : `<p class="muted" style="margin:0">No PC is connected yet. Type a name below, press "Get pairing code", then enter the code in the bridge app on that PC.</p>`;
-  }
-  let openPc = "";
-  const when = (ms: number | null) => (ms ? new Date(ms).toLocaleString() : "");
-  function renderPcDetail(data: any) {
-    const d = data.device, t = data.totals;
-    const online = d.last_seen_at && Date.now() - d.last_seen_at < 150_000;
-    const stateText = !online ? "Offline" : d.current_file ? "Transcribing" : d.queue_size ? `${num(d.queue_size)} waiting` : "Online";
-    $("pcDetail").hidden = false;
-    $("pcDetail").innerHTML = `
-      <div class="pc-head"><strong style="font-size:1.2rem">${esc(d.name)}</strong><span class="pill ${online ? "good" : "bad"}">${esc(stateText)}</span>
-        <button class="btn ghost small" type="button" data-close="1" style="margin-left:auto">Close</button></div>
-      <div class="stats">
-        <span><b>${num(t.done)}</b>transcribed</span>
-        <span><b>${num(d.queue_size)}</b>waiting</span>
-        <span class="${t.failed ? "bad-text" : ""}"><b>${num(t.failed)}</b>failed</span>
-        <span><b>${num(t.words)}</b>words</span>
-      </div>
-      <div class="muted small-text">
-        Seen ${ago(d.last_seen_at)}${d.version ? ` · app v${esc(d.version)}` : ""}${d.watch_folder ? ` · Folder: ${esc(d.watch_folder)}` : ""}<br />
-        Google Sheet: ${d.sheet_enabled ? (d.sheet_url ? `<a href="${esc(d.sheet_url)}" target="_blank" rel="noopener">open the tab</a>` : "on (tab is made with the first file)") : "switched off in the app"}
-        ${d.current_file ? `<br />Now: ${esc(d.current_file)}` : ""}
-        ${d.last_error ? `<br /><span class="bad-text">${esc(d.last_error)}</span>` : ""}
-      </div>
-      <div><strong>Per day</strong>
-        <div class="scroll"><table><thead><tr><th>Day</th><th>Transcribed</th><th>Failed</th><th>Words</th></tr></thead><tbody>
-        ${data.days.length ? data.days.map((x: any) => `<tr><td>${esc(x.day)}</td><td>${num(x.done)}</td><td class="${x.failed ? "bad-text" : ""}">${num(x.failed)}</td><td>${num(x.words)}</td></tr>`).join("") : `<tr><td colspan="4" class="muted">No file yet.</td></tr>`}
-        </tbody></table></div></div>
-      <div><strong>Files</strong> <span class="muted small-text">(latest ${data.files.length})</span>
-        <div class="scroll"><table><thead><tr><th>Date</th><th>File</th><th>Status</th><th>Words</th><th>Done at</th></tr></thead><tbody>
-        ${data.files.length ? data.files.map((f: any) => `<tr><td>${esc(f.file_day)}</td><td>${esc(f.name)}${f.error ? `<div class="bad-text small-text">${esc(f.error)}</div>` : ""}</td>
-          <td><span class="pill ${f.status === "done" ? "good" : "bad"}">${f.status === "done" ? "Done" : "Failed"}</span></td><td>${num(f.words)}</td><td class="muted small-text">${esc(when(f.created_at))}</td></tr>`).join("") : `<tr><td colspan="5" class="muted">No file yet.</td></tr>`}
-        </tbody></table></div></div>`;
-  }
-  const loadPc = () => {
-    if (!openPc) { $("pcDetail").hidden = true; return Promise.resolve(); }
-    return bridgeApi("GET", `?id=${encodeURIComponent(openPc)}`).then(renderPcDetail).catch((e) => { openPc = ""; $("pcDetail").hidden = true; $("bridgeResult").textContent = e.message; });
-  };
-  $("pcDetail").addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).closest("button[data-close]")) { openPc = ""; $("pcDetail").hidden = true; loadBridge(); }
-  });
-  const loadBridge = () => bridgeApi("GET").then((data) => { renderBridge(data); return loadPc(); }).catch((e) => ($("bridgeResult").textContent = e.message));
-  $("bridgeAdd").addEventListener("click", async () => {
-    const name = ($("bridgeName") as HTMLInputElement).value;
-    try {
-      const { code, expiresAt } = await bridgeApi("POST", "", { name });
-      const shown = `${code.slice(0, 4)}-${code.slice(4)}`;
-      $("bridgeResult").innerHTML = `Pairing code for <b>${esc(name)}</b>: <b style="font-size:1.4em;letter-spacing:.1em">${shown}</b>. Enter it in the bridge app within ${Math.round((expiresAt - Date.now()) / 60000)} minutes. It works once.`;
-      ($("bridgeName") as HTMLInputElement).value = "";
-    } catch (error) {
-      $("bridgeResult").textContent = (error as Error).message;
-    }
-  });
-  $("bridgePinSave").addEventListener("click", async () => {
-    const input = $("bridgePin") as HTMLInputElement;
-    try {
-      await bridgeApi("PATCH", "", { pin: input.value });
-      input.value = "";
-      $("bridgeResult").textContent = "PIN saved. Type it in the bridge app when linking a PC.";
-      await loadBridge();
-    } catch (error) {
-      $("bridgeResult").textContent = (error as Error).message;
-    }
-  });
-  $("bridgeMode").addEventListener("change", (e) => bridgeApi("PATCH", "", { mode: (e.target as HTMLSelectElement).value }).catch((x) => ($("bridgeResult").textContent = x.message)));
-  $("bridgeLanguage").addEventListener("change", (e) => bridgeApi("PATCH", "", { language: (e.target as HTMLSelectElement).value }).catch((x) => ($("bridgeResult").textContent = x.message)));
-  $("bridgePcs").addEventListener("click", async (e) => {
-    const card = (e.target as HTMLElement).closest(".pc-card[data-open]") as HTMLElement | null;
-    if (card && !(e.target as HTMLElement).closest("a, button")) {
-      openPc = card.dataset.open === openPc ? "" : card.dataset.open || "";
-      await loadBridge();
-      if (openPc) $("pcDetail").scrollIntoView({ behavior: "smooth", block: "nearest" });
-      return;
-    }
-    const button = (e.target as HTMLElement).closest("button[data-remove]") as HTMLElement | null;
-    if (!button || !confirm(`Remove ${button.dataset.name}? The PC stops sending files until it is paired again. Its transcripts stay.`)) return;
-    await bridgeApi("DELETE", `?id=${encodeURIComponent(button.dataset.remove || "")}`).catch((x) => ($("bridgeResult").textContent = x.message));
-    await loadBridge();
-  });
-  loadBridge();
-  // Live status: only while the page is open and visible.
-  setInterval(() => { if (!document.hidden) loadBridge(); }, 20_000);
 
-  async function load(check = "") {
-    const data = await api("GET", check ? `?check=1&account=${encodeURIComponent(check)}` : "");
-    render(data);
-    if (check) {
-      const note = document.querySelector(`[data-account="${CSS.escape(check)}"] [data-note]`);
-      if (note) {
-        note.textContent = data.driveError
-          ? `Drive error: ${data.driveError}`
-          : data.computers?.length
-            ? `Found ${data.computers.length} folders: ${data.computers.map((c: any) => c.name).join(", ")}`
-            : "No folders were found. If the folder is inside another folder, paste its link under Extra folders.";
-      }
-    }
-  }
-  $("accountCards").addEventListener("click", async (e) => {
-    const button = (e.target as HTMLElement).closest("button[data-act]") as HTMLElement | null;
-    const card = (e.target as HTMLElement).closest("[data-account]") as HTMLElement | null;
-    if (!button || !card) return;
-    const id = card.dataset.account || "";
-    const note = card.querySelector("[data-note]") as HTMLElement;
-    const value = (field: string) => (card.querySelector(`input[data-field="${field}"]`) as HTMLInputElement).value;
-    try {
-      switch (button.dataset.act) {
-        case "check":
-          note.textContent = "Checking…";
-          await load(id);
-          break;
-        case "save-sheet":
-          await api("PATCH", "", { account: id, spreadsheet: value("spreadsheet") });
-          await load();
-          (document.querySelector(`[data-account="${CSS.escape(id)}"] [data-note]`) as HTMLElement).textContent = "Spreadsheet saved.";
-          break;
-        case "save-folders":
-          await api("PATCH", "", { account: id, extraFolders: value("extraFolders") });
-          await load();
-          (document.querySelector(`[data-account="${CSS.escape(id)}"] [data-note]`) as HTMLElement).textContent = "Folders saved. They are scanned the next time the scan runs.";
-          break;
-        case "dash": {
-          note.textContent = "Updating the sheet dashboard…";
-          const result = await api("POST", `?dashboard=1&account=${encodeURIComponent(id)}`);
-          note.innerHTML = `Sheet dashboard updated. <a href="${esc(result.url)}" target="_blank" rel="noopener">Open it</a>`;
-          break;
-        }
-        case "disconnect":
-          if (!confirm("Disconnect this Drive account? Finished transcripts stay, waiting files are dropped.")) return;
-          await api("DELETE", `?account=${encodeURIComponent(id)}`);
-          await load();
-          break;
-      }
-    } catch (error) {
-      note.textContent = (error as Error).message;
-    }
-  });
-  $("accountCards").addEventListener("change", (e) => {
-    const input = e.target as HTMLInputElement | HTMLSelectElement;
-    const card = input.closest("[data-account]") as HTMLElement | null;
-    const field = input.dataset.field;
-    if (!card || !field || !["enabled", "notion", "mode", "language"].includes(field)) return;
-    const value = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : input.value;
-    api("PATCH", "", { account: card.dataset.account, [field]: value }).catch((x) => (($("result").textContent = x.message)));
-  });
-  $("sheetDash").addEventListener("click", async () => {
-    $("result").textContent = "Updating the sheet dashboard…";
-    try {
-      const result = await api("POST", "?dashboard=1");
-      $("result").innerHTML = `Sheet dashboard updated. <a href="${esc(result.url)}" target="_blank" rel="noopener">Open it</a>`;
-    } catch (error) {
-      $("result").textContent = (error as Error).message;
-    }
-  });
-  $("retryFailed").addEventListener("click", async () => {
-    $("result").textContent = "Restarting failed files…";
-    try {
-      const result = await api("POST", "?retry=1");
-      $("result").textContent = result.jobs
-        ? `${result.started} job(s) restarted now. The other ${Math.max(0, result.jobs - result.started)} follow automatically as slots free up. Files with no audio or a corrupt file are skipped.`
-        : "No job has failed files or rows missing from the sheet.";
-      await load();
-    } catch (error) {
-      $("result").textContent = (error as Error).message;
-    }
-  });
-  $("run").addEventListener("click", async () => {
-    $("result").textContent = "Scanning Drive…";
-    try {
-      const result = await api("POST");
-      $("result").textContent = result.computers.map((c: any) => `${c.name}: ${c.newFiles < 0 ? `could not read (${c.error || "error"})` : `${c.newFiles} new of ${c.totalFiles}`}`).join(" · ") || "No computers found.";
-      await load();
-    } catch (error) {
-      $("result").textContent = (error as Error).message;
-    }
-  });
-  load().catch((e) => ($("connection").textContent = e.message));
+<script>
+  import { initAuto } from "../scripts/auto";
+  initAuto();
 </script>

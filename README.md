@@ -23,3 +23,26 @@ Video and audio transcription with the Gemini API, running fully on Cloudflare a
 
 Setup and deployment are described in [`web/README.md`](web/README.md).
 Pushing to `main` deploys automatically through `.github/workflows/deploy-cloudflare.yml`.
+
+## Teams and access
+
+- **Admins** see every team and manage them on the **Admin** page. The admins are
+  `umaar.ibn.sulaiman@gmail.com` and `teamfahad86@gmail.com`; set `ADMIN_EMAILS`
+  (comma separated) in Cloudflare to change the list.
+- An admin creates **teams** (our own teams such as Team Fahad or Sukun Life, or paying
+  **customers**), switches each team's features (Bridge PCs, Google Drive automation) on or off,
+  and adds members by Gmail address as **Manager** (can pair PCs, connect Drive, change settings)
+  or **Viewer** (can only look).
+- The **Automation** page only appears for admins and team members, and each team only sees its
+  own PCs, Drive accounts, jobs and transcripts. Team transcripts are listed on the team's page and
+  never mixed into anyone's personal **History**.
+- Only the original team (Team Fahad) may use the shared team spreadsheet and Notion. Other teams
+  use their own spreadsheet link (Admin page, or per Drive account).
+- Migration `0010_workspaces.sql` moves everything that existed before into the team "Team Fahad".
+  Apply it before deploying: `npx wrangler d1 migrations apply team-fahad-transcriber --remote`.
+
+## Local development without Google
+
+Put `DEV_LOGIN=1` in `web/.dev.vars` and run `npm run dev` in `web/`. The sign-in page then shows
+a "Sign in without Google" form on `localhost` only, so layouts and permissions can be checked as
+any email. It never works on the live site.
