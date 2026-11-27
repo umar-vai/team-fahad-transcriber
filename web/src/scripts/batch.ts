@@ -94,7 +94,7 @@ function render(batch: Batch): void {
   const done = items.filter((i) => i.status === "done").length;
   const failed = items.filter((i) => i.status === "failed").length;
   const running = batch.status === "running";
-  document.title = `${batch.folderName} · Team Fahad Transcriber`;
+  document.title = `${batch.folderName} · TEAMCRIBER`;
   $("b-title").textContent = batch.folderName;
   if (batch.workspaceId) {
     const back = $("b-back") as HTMLAnchorElement | null;

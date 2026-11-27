@@ -4,7 +4,7 @@ export const PAGE = String.raw`<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Team Fahad Bridge</title>
+<title>TEAMCRIBER Bridge</title>
 <style>
   :root { --bg:#f6f6fb; --card:#fff; --ink:#1d2033; --muted:#6b6f85; --line:#e3e4ee; --main:#4a43d8; --good:#0d8c59; --warn:#b36b00; --bad:#c62828; }
   @media (prefers-color-scheme: dark) { :root { --bg:#14151f; --card:#1d1f2e; --ink:#eceef8; --muted:#9a9db5; --line:#2f3248; --main:#8b86ff; --good:#3ecf8e; --warn:#f0b04a; --bad:#ff6b6b; } }
@@ -35,7 +35,7 @@ export const PAGE = String.raw`<!doctype html>
 </head>
 <body>
 <main>
-  <h1>Team Fahad Bridge</h1>
+  <h1>TEAMCRIBER Bridge</h1>
   <div class="muted" id="sub">লোড হচ্ছে…</div>
   <div class="card conn" id="conn" hidden><span class="dot" id="dot"></span><div><b id="connTitle"></b><div class="muted" id="connSub"></div></div></div>
 

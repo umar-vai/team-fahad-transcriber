@@ -17,6 +17,9 @@ declare namespace Cloudflare {
     /** Forwards Gemini requests from North America when Gemini refuses the server's location. */
     GEMINI_RELAY?: DurableObjectNamespace<import("./lib/geminirelay").GeminiRelay>;
     APP_NAME: string;
+    /** Optional: shown on the public About page under Contact. */
+    CONTACT_EMAIL?: string;
+    CONTACT_PHONE?: string;
     ALLOWED_EMAILS?: string;
     /** Comma separated admin emails (they manage every team). Empty: the built-in owner accounts. */
     ADMIN_EMAILS?: string;

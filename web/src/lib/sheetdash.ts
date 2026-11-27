@@ -204,7 +204,7 @@ export function buildGrid(summary: DashSummary, updated: string) {
   const section = (label: string) => add(text(label, { textFormat: { bold: true, fontSize: 13, foregroundColor: NAVY } }));
   const t = summary.totals;
 
-  add(text("Team Fahad Transcriber · Dashboard", { textFormat: { bold: true, fontSize: 20, foregroundColor: NAVY } }));
+  add(text("TEAMCRIBER · Dashboard", { textFormat: { bold: true, fontSize: 20, foregroundColor: NAVY } }));
   add(text(`Updated ${updated} (Bangladesh time). Rewritten automatically after every nightly job.`, { textFormat: { italic: true, foregroundColor: { red: 0.4, green: 0.4, blue: 0.45 } } }));
   blank();
   const tile = (label: string, color: Cell) => text(label, { backgroundColor: LAVENDER, textFormat: { bold: true, fontSize: 10, foregroundColor: color }, horizontalAlignment: "CENTER" });

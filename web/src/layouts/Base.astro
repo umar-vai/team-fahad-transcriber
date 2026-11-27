@@ -1,5 +1,6 @@
 ---
 import Icon from "../components/Icon.astro";
+import Logo from "../components/Logo.astro";
 
 interface Props {
   title?: string;
@@ -10,7 +11,7 @@ interface Props {
   /** Kept for older pages: wide is now the default. */
   wide?: boolean;
 }
-const { title = "Team Fahad Transcriber", narrow = false, bare = false } = Astro.props;
+const { title = "TEAMCRIBER", narrow = false, bare = false } = Astro.props;
 const user = Astro.locals.user;
 const isAdmin = Astro.locals.isAdmin;
 const autoAccess = Astro.locals.autoAccess;
@@ -28,7 +29,7 @@ const nav = [
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Accurate Bangla and English transcripts, speaker subtitles, summaries and translations, for teams." />
+    <meta name="description" content="TEAMCRIBER by Magnus Inc. turns voice and video into accurate text in Bangla, English and many more languages, with speaker subtitles, summaries and translations." />
     <meta name="theme-color" content="#0b7a68" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -45,18 +46,12 @@ const nav = [
     ) : (
       <div class="app" id="app">
         <header class="topbar">
-          <a href="/" class="brand">
-            <span class="brand-mark"><Icon name="wave" /></span>
-            <span class="brand-name"><strong>Team Fahad</strong><span>Transcriber</span></span>
-          </a>
+          <a href="/" class="brand" aria-label="TEAMCRIBER home"><Logo size={34} tagline /></a>
           <button class="btn quiet icon-only" type="button" id="nav-open" aria-label="Open menu"><Icon name="menu" /></button>
         </header>
         <div class="scrim" id="nav-scrim"></div>
         <aside class="sidebar" aria-label="Main">
-          <a href="/" class="brand">
-            <span class="brand-mark"><Icon name="wave" /></span>
-            <span class="brand-name"><strong>Team Fahad</strong><span>Transcriber</span></span>
-          </a>
+          <a href="/" class="brand" aria-label="TEAMCRIBER home"><Logo size={34} tagline /></a>
           <nav class="nav-group">
             {nav.map((item) => (
               <a href={item.href} class:list={["nav-link", { active: active(item.href) }]} aria-current={active(item.href) ? "page" : undefined}>
@@ -71,7 +66,10 @@ const nav = [
                 <a href="/auto" class:list={["nav-link", { active: active("/auto") }]}><Icon name="bolt" />Automation</a>
               )}
               {isAdmin && (
-                <a href="/admin" class:list={["nav-link", { active: active("/admin") }]}><Icon name="shield" />Admin</a>
+                <a href="/admin" class:list={["nav-link", { active: path === "/admin" }]}><Icon name="shield" />Admin</a>
+              )}
+              {isAdmin && (
+                <a href="/admin/pricing" class:list={["nav-link", { active: active("/admin/pricing") }]}><Icon name="tag" />Pricing and plans</a>
               )}
             </nav>
           )}
@@ -88,7 +86,7 @@ const nav = [
         </aside>
         <div class="main">
           <main class:list={["content", { narrow }]}><slot /></main>
-          <footer class="footer">Team Fahad Transcriber · Developed by Umar Vai</footer>
+          <footer class="footer">TEAMCRIBER · A product of <a href="/about">Magnus Inc.</a> · <a href="/pricing">Pricing</a> · Developed by Umar Vai</footer>
         </div>
       </div>
     )}

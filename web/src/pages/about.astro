@@ -1,0 +1,60 @@
+---
+import Public from "../layouts/Public.astro";
+import Icon from "../components/Icon.astro";
+import { env } from "cloudflare:workers";
+
+const email = String(env.CONTACT_EMAIL || "").trim();
+const phone = String(env.CONTACT_PHONE || "").trim();
+const values = [
+  { icon: "check", title: "Accuracy first", text: "A transcript is only useful if you can trust it. We test every change on real Bangla and English recordings." },
+  { icon: "shield", title: "Private by default", text: "Your recordings and transcripts belong to you. Nothing is shared, sold or used to advertise to you." },
+  { icon: "bolt", title: "Work that runs itself", text: "Teams should not copy files by hand. Bridge PCs and Drive automation do it every night." },
+];
+---
+<Public title="About · TEAMCRIBER by Magnus Inc.">
+  <section class="pub-section page-top">
+    <div class="pub-wrap narrow">
+      <div class="pub-section-head left">
+        <span class="kicker">About us</span>
+        <h1>TEAMCRIBER is a product of Magnus Inc.</h1>
+        <p>Magnus Inc. builds practical software for teams in Bangladesh and beyond. TEAMCRIBER, our transcription product, started as an in-house tool for a busy team that needed hundreds of recordings written out every week, in Bangla and English, without hiring typists. It now serves individuals, offices, clinics and customers who need the same.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="pub-section alt">
+    <div class="pub-wrap">
+      <div class="pub-section-head"><span class="kicker">What we believe</span><h2>Three promises</h2></div>
+      <div class="feature-grid three">
+        {values.map((v) => (
+          <article class="feature">
+            <span class="feature-icon"><Icon name={v.icon} /></span>
+            <h3>{v.title}</h3>
+            <p>{v.text}</p>
+          </article>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="pub-section" id="team">
+    <div class="pub-wrap narrow prose">
+      <h2>Who builds it</h2>
+      <p>TEAMCRIBER is designed and developed by Umar Vai for Magnus Inc., together with Team Fahad, the first team to use it every day. Their feedback shapes every feature, from speaker subtitles to nightly Google Drive automation.</p>
+
+      <h2 id="contact">Contact</h2>
+      <p>For plans, team setups, invoices or help, get in touch with the Magnus Inc. team.</p>
+      <div class="contact-cards">
+        {email && <a class="contact-card" href={`mailto:${email}`}><Icon name="external" /><span><strong>Email</strong>{email}</span></a>}
+        {phone && <a class="contact-card" href={`tel:${phone.replace(/[^+\d]/g, "")}`}><Icon name="mic" /><span><strong>Phone</strong>{phone}</span></a>}
+        <a class="contact-card" href="/login?next=/"><Icon name="users" /><span><strong>Already a customer?</strong>Sign in and ask your team admin</span></a>
+      </div>
+
+      <h2 id="privacy">Privacy</h2>
+      <p>You sign in with Google; we receive your name, email address and profile picture. Audio is sent to our transcription engine only to make the transcript and is not stored as audio by TEAMCRIBER. Transcripts are saved to your private history until you delete them. Team transcripts can be seen only by the members an admin added to that team. If you connect Google Drive, access is read-only and can be removed at any time from your Google account.</p>
+
+      <h2 id="terms">Terms of use</h2>
+      <p>Use TEAMCRIBER only for recordings you have the right to transcribe. Automatic transcripts can contain mistakes: check important text before you rely on it. Plans and prices are shown on the <a href="/pricing">pricing page</a> and can change; your current plan stays the same until we tell you about a change. Magnus Inc. may suspend accounts that misuse the service.</p>
+    </div>
+  </section>
+</Public>
