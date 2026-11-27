@@ -205,7 +205,7 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 3px; padding
 .back:hover { color: var(--text); text-decoration: none; }
 
 /* ---------- Layout helpers ---------- */
-.stack { display: grid; gap: 16px; }
+.stack { display: grid; gap: 16px; align-content: start; }
 .stack > * { min-width: 0; }
 .stack.tight { gap: 8px; }
 .stack.loose { gap: 24px; }
@@ -231,6 +231,10 @@ mark { background: var(--warn-soft); color: inherit; border-radius: 3px; padding
 /* ---------- Forms ---------- */
 label { display: grid; gap: 6px; font-weight: 550; font-size: 13.5px; color: var(--text-2); }
 label .hint, .field-hint { font-weight: 400; color: var(--muted); font-size: 12.5px; }
+/* A hint inside a label shows under the field, so fields in one row stay aligned. */
+label > .hint { order: 3; }
+/* Field + button rows: keep the hint above, so the button lines up with the field. */
+.input-group label > .hint { order: 0; }
 input[type="text"], input[type="url"], input[type="search"], input[type="email"], input[type="password"], select, textarea {
   width: 100%; background: var(--surface); border: 1px solid var(--line-strong); color: var(--text);
   border-radius: 8px; padding: 9px 12px; font: inherit; font-weight: 400; min-height: 40px;

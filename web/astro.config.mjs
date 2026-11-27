@@ -9,4 +9,5 @@ export default defineConfig({
   session: false,
   adapter: cloudflare({ imageService: "passthrough" }),
   security: { checkOrigin: true },
+  devToolbar: { enabled: false },
 });
