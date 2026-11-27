@@ -18,7 +18,12 @@ There is **no container** any more. It cost too much (Memory billing), so it was
 - **Files:** the browser decodes the audio, splits it into ~5 minute parts at
   quiet points, and sends up to 4 parts to Gemini at the same time. Only small
   16 kHz audio is uploaded, not the whole file.
-- **YouTube:** Gemini reads public YouTube videos directly, in parallel 5 minute clips.
+- **YouTube:** runs on the server in a `LinkJob` Durable Object (`src/batch/linkjob.ts`), one per link.
+  Gemini reads the public video directly in 5 minute clips, 6 at a time. The browser only polls
+  `/api/jobs/:id`, so the customer can open other pages or close the tab; the transcript is saved
+  to History, and the home page picks running links up again when it is reopened.
+- While uploaded files or live voice are being processed (those run in the browser), links to
+  other pages open in a new tab so the work is not cut off.
 - **Google Drive folder:** paste a public folder link and pick Smart clean or
   Subtitles (timed). The server lists every **MP3, WAV and FLAC** file (subfolders
   too, sorted by name so "2" comes before "10") and works through them one by

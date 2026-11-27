@@ -68,9 +68,9 @@ const firstName = (Astro.locals.user?.name || "").split(" ")[0];
 
         <div data-source-panel="link" class="stack hidden">
           <label>Media links <span class="hint">one per line</span>
-            <textarea id="link" rows="5" placeholder="YouTube, Google Drive, Facebook, Frame.io or a direct media link"></textarea>
+            <textarea id="link" rows="5" placeholder="https://www.youtube.com/watch?v=..."></textarea>
           </label>
-          <p class="muted small-text">Public links only. For a whole Google Drive folder, use the Drive folder tab.</p>
+          <p class="muted small-text">Public YouTube links. They are transcribed on our server, so you can open other pages or close this one: the transcript is saved to your History. For a whole Google Drive folder, use the Drive folder tab.</p>
           <button class="btn block lg" id="link-go" type="button"><Icon name="play" />Transcribe links</button>
         </div>
 

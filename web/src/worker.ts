@@ -6,6 +6,7 @@ import { handle } from "@astrojs/cloudflare/handler";
 import { NIGHTLY_CRON, nightlyRun, pumpJobs } from "./lib/autodrive";
 
 export { BatchRunner } from "./batch/runner";
+export { LinkJob } from "./batch/linkjob";
 export { GeminiRelay } from "./lib/geminirelay";
 
 export default {

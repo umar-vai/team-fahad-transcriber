@@ -22,13 +22,16 @@
   "durable_objects": {
     "bindings": [
       { "name": "BATCH_RUNNER", "class_name": "BatchRunner" },
+      // One per pasted link: keeps transcribing after the customer leaves the page.
+      { "name": "LINK_JOB", "class_name": "LinkJob" },
       // Pinned to North America: forwards Gemini calls when Gemini refuses the server's location.
       { "name": "GEMINI_RELAY", "class_name": "GeminiRelay" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["BatchRunner"] },
-    { "tag": "v2", "new_sqlite_classes": ["GeminiRelay"] }
+    { "tag": "v2", "new_sqlite_classes": ["GeminiRelay"] },
+    { "tag": "v3", "new_sqlite_classes": ["LinkJob"] }
   ],
   // Cron times are UTC. 17:50 UTC is 23:50 in Bangladesh (UTC+6): queue the day's Drive files.
   // Every 5 minutes: start queued jobs when a slot is free and retry failed videos (one cheap D1 read when idle).

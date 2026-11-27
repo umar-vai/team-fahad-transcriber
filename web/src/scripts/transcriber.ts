@@ -7,7 +7,7 @@ import { formatShayari, mergeShayari } from "../lib/shayari";
 
 const SHAYARI_LANGUAGE = "Urdu / Hindi shayari";
 
-const PARALLEL = 4;
+const PARALLEL = 6;
 const BROWSER_DECODE_LIMIT = 300 * 1024 * 1024;
 const UPLOAD_PIECE = 50 * 1024 * 1024;
 
@@ -347,31 +347,108 @@ async function transcribeFile(file: File, s: Settings): Promise<Result> {
   return finish(results, { ...meta, duration }, s);
 }
 
-async function transcribeLink(url: string, s: Settings): Promise<Result> {
-  setProgress("Checking link…", null);
-  const info = await postJson("/api/media/link", { url });
-  if (info.kind === "youtube") {
-    try {
-      const duration: number | null = info.duration;
-      const ranges: { start?: number; end?: number }[] = [];
-      if (duration && duration > PIECE_SECONDS * 1.5) {
-        for (let start = 0; start < duration; start += PIECE_SECONDS) ranges.push({ start, end: Math.min(duration, start + PIECE_SECONDS) });
-      } else ranges.push({});
-      setProgress("Transcribing YouTube video…", 0, ranges.length > 1 ? `0 of ${ranges.length} parts` : "");
-      const results = await transcribePieces(ranges, s, async (range, chosen): Promise<PieceResult> => {
-        const payload = await withRetry(() => postJson("/api/transcribe", { source: "youtube", url: info.url, ...range, ...chosen }), 2);
-        const start = range.start ?? 0;
-        return pieceResult(start, (range.end ?? duration ?? 0) - start, payload);
-      }, "Transcribing YouTube video…");
-      return await finish(results, { title: info.title, sourceType: "youtube", sourceRef: info.url, duration }, s);
-    } catch (error) {
-      console.info("Direct YouTube transcription failed; downloading instead.", error);
-      setProgress("Downloading the video instead…", null);
-      const job = await postJson("/api/media/link", { url, forceDownload: true });
-      return transcribeJob(job.job, s, { sourceType: "youtube", sourceRef: url, fallbackTitle: info.title });
+// ---------- Links (run on the server, so the page can be left) ----------
+
+const JOBS_KEY = "tf:linkjobs";
+
+interface SavedJob {
+  jobId: string;
+  name: string;
+  url: string;
+  settings: Settings;
+}
+
+function savedJobs(): SavedJob[] {
+  try {
+    const list = JSON.parse(localStorage.getItem(JOBS_KEY) || "[]");
+    return Array.isArray(list) ? list.filter((j) => j && typeof j.jobId === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberJob(job: SavedJob | null, forget?: string): void {
+  try {
+    const list = savedJobs().filter((j) => j.jobId !== forget && j.jobId !== job?.jobId);
+    if (job) list.push(job);
+    localStorage.setItem(JOBS_KEY, JSON.stringify(list.slice(-30)));
+  } catch {}
+}
+
+/** Turn a saved History row into a result for the viewer. */
+function resultFromHistory(row: any): Result {
+  return {
+    title: row.title,
+    sourceType: row.source_type,
+    sourceRef: row.source_ref || undefined,
+    mode: row.mode,
+    language: row.language,
+    duration: row.duration,
+    transcript: row.transcript,
+    segments: JSON.parse(row.segments_json || "[]"),
+    estimatedTimes: row.mode !== "detailed",
+    historyId: row.id,
+    extras: JSON.parse(row.extras_json || "{}"),
+  };
+}
+
+/** Poll a server job until it is finished; the job itself does not depend on this page. */
+async function waitForLinkJob(item: QueueItem): Promise<Result> {
+  let misses = 0;
+  while (true) {
+    const response = await fetch(`/api/jobs/${item.jobId}`).catch(() => null);
+    if (response?.status === 401) location.href = "/login?next=/";
+    if (response?.status === 404) throw new FatalError("This job was not found. Please paste the link again.");
+    const state = response?.ok ? ((await response.json().catch(() => null)) as any) : null;
+    if (!state) {
+      if (++misses > 40) throw new Error("Lost contact with the server. Your transcript will still appear in History when it is ready.");
+    } else {
+      misses = 0;
+      if (state.title && item.name === item.url) item.name = state.title;
+      if (state.status === "failed") throw new FatalError(state.error || "This link could not be transcribed.");
+      if (state.status === "done") {
+        const row = await fetch(`/api/history/${state.historyId}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+        if (!row) throw new Error("The transcript is ready in History.");
+        return resultFromHistory(row);
+      }
+      item.label = state.waiting ? "Waiting for Gemini (busy), will continue…" : "Transcribing on the server…";
+      item.fraction = state.total ? state.done / state.total : null;
+      item.detail = state.total > 1 ? `${state.done} of ${state.total} parts · you can leave this page` : "you can leave this page";
+      renderQueue();
+    }
+    await new Promise((resolve) => setTimeout(resolve, document.hidden ? 10_000 : 3000));
+  }
+}
+
+/** Links run side by side (each on the server), not one after another like files. */
+async function runLinkItem(item: QueueItem): Promise<void> {
+  item.state = "running";
+  item.error = undefined;
+  item.label = "Checking link…";
+  item.fraction = null;
+  item.detail = "";
+  renderQueue();
+  try {
+    if (!item.jobId) {
+      const job = await postJson("/api/jobs", { url: item.url, ...item.settings });
+      item.jobId = job.id;
+      if (job.title) item.name = job.title;
+      rememberJob({ jobId: job.id, name: item.name, url: item.url!, settings: item.settings });
+    }
+    const result = await waitForLinkJob(item);
+    item.state = "done";
+    item.result = result;
+    if (queue.length === 1) viewResult(result);
+    rememberJob(null, item.jobId);
+  } catch (error) {
+    item.state = "failed";
+    item.error = error instanceof Error ? error.message : String(error);
+    if (error instanceof FatalError) {
+      rememberJob(null, item.jobId);
+      item.jobId = undefined; // A retry starts a new job.
     }
   }
-  return transcribeJob(info.job, s, { sourceType: "link", sourceRef: url, fallbackTitle: "Linked media" });
+  renderQueue();
 }
 
 // ---------- Google Drive folder (runs on the server) ----------
@@ -482,6 +559,8 @@ interface QueueItem {
   name: string;
   file?: File;
   url?: string;
+  /** Links: the server job doing the work. */
+  jobId?: string;
   settings: Settings;
   state: "queued" | "running" | "done" | "failed";
   label: string;
@@ -556,7 +635,7 @@ async function runQueue(): Promise<void> {
   renderQueue();
   try {
     let item: QueueItem | undefined;
-    while ((item = queue.find((i) => i.state === "queued"))) {
+    while ((item = queue.find((i) => i.kind === "file" && i.state === "queued"))) {
       const current = item;
       current.state = "running";
       current.label = "Starting…";
@@ -570,7 +649,7 @@ async function runQueue(): Promise<void> {
       };
       renderQueue();
       try {
-        const result = current.kind === "file" ? await transcribeFile(current.file!, current.settings) : await transcribeLink(current.url!, current.settings);
+        const result = await transcribeFile(current.file!, current.settings);
         if (!result.transcript.trim()) {
           current.state = "failed";
           current.error = "No speech was found in this media.";
@@ -596,7 +675,11 @@ async function runQueue(): Promise<void> {
 function enqueue(entries: { kind: "file" | "link"; name: string; file?: File; url?: string }[]): void {
   clearError();
   const s = settings();
-  for (const entry of entries) queue.push({ id: nextId++, ...entry, settings: s, state: "queued", label: "", fraction: null, detail: "" });
+  for (const entry of entries) {
+    const item: QueueItem = { id: nextId++, ...entry, settings: s, state: "queued", label: "", fraction: null, detail: "" };
+    queue.push(item);
+    if (item.kind === "link") void runLinkItem(item);
+  }
   renderQueue();
   void runQueue();
 }
@@ -693,11 +776,17 @@ export function initTranscriber(): void {
     const item = queue.find((i) => i.id === Number(button.dataset.id));
     if (!item) return;
     if (button.dataset.act === "view" && item.result) viewResult(item.result);
-    if (button.dataset.act === "remove" && item.state !== "running") queue.splice(queue.indexOf(item), 1);
+    if (button.dataset.act === "remove" && item.state !== "running") {
+      queue.splice(queue.indexOf(item), 1);
+      if (item.jobId) rememberJob(null, item.jobId);
+    }
     if (button.dataset.act === "retry" && item.state === "failed" && (item.file || item.url)) {
-      item.state = "queued";
       item.error = undefined;
-      void runQueue();
+      if (item.kind === "link") void runLinkItem(item);
+      else {
+        item.state = "queued";
+        void runQueue();
+      }
     }
     renderQueue();
   });
@@ -711,7 +800,40 @@ export function initTranscriber(): void {
   window.addEventListener("beforeunload", (event) => {
     if (queueRunning || recorder) event.preventDefault();
   });
+  keepWorkWhileBrowsing();
+  // Links started earlier keep running on the server: pick them up again.
+  const saved = savedJobs();
+  if (saved.length) {
+    for (const job of saved) {
+      const item: QueueItem = { id: nextId++, kind: "link", name: job.name, url: job.url || job.name, jobId: job.jobId, settings: job.settings, state: "queued", label: "", fraction: null, detail: "" };
+      queue.push(item);
+      void runLinkItem(item);
+    }
+  }
   refreshButtons();
+}
+
+/**
+ * Uploaded files and live voice are processed in this browser tab, so leaving the page
+ * would stop them. While they run, links to other pages of the site open in a new tab instead.
+ */
+function keepWorkWhileBrowsing(): void {
+  document.addEventListener("click", (event) => {
+    if (!queueRunning && !recorder) return;
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = (event.target as HTMLElement).closest<HTMLAnchorElement>("a[href]");
+    if (!link || link.target === "_blank" || link.hasAttribute("download")) return;
+    const target = new URL(link.href, location.href);
+    if (target.origin !== location.origin || (target.pathname === location.pathname && target.hash)) return;
+    if (target.pathname.startsWith("/auth/logout")) return;
+    event.preventDefault();
+    window.open(target.href, "_blank");
+    showNotice("Opened in a new tab, so your transcription keeps running here.");
+  });
+}
+
+function showNotice(text: string): void {
+  (window as any).toast?.(text);
 }
 
 export type { Segment };
