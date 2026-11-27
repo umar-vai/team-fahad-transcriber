@@ -25,7 +25,7 @@ export type FileState = "done" | "failed" | "waiting";
 export interface DashInput {
   today: string;
   computers: { id: string; name: string; totalFiles: number }[];
-  files: { id: string; computerId: string; day: string; state: FileState; name: string; error?: string }[];
+  files: { id: string; computerId: string; day: string; state: FileState; name: string; error?: string; folder?: string }[];
 }
 
 export interface DashSummary {
@@ -33,6 +33,7 @@ export interface DashSummary {
   rows: { id: string; name: string; recorded: number; done: number; waiting: number; failed: number; percent: number; recordedToday: number }[];
   totals: { computers: number; recorded: number; done: number; waiting: number; failed: number; percent: number };
   days: { day: string; recorded: number; done: number; failed: number; waiting: number; perComputer: number[] }[];
+  folders: { computer: string; folder: string; recorded: number; done: number; failed: number; waiting: number }[];
   failedFiles: { computer: string; day: string; fileId: string; name: string; error: string }[];
 }
 
@@ -80,24 +81,37 @@ export function summarize(input: DashInput): DashSummary {
     .sort((a, b) => b.day.localeCompare(a.day) || a.name.localeCompare(b.name))
     .slice(0, MAX_FAILED_ROWS)
     .map((f) => ({ computer: names.get(f.computerId) || "", day: f.day, fileId: f.id, name: f.name, error: f.error || "" }));
-  return { today: input.today, rows, totals, days, failedFiles };
+  // Subfolders inside a computer folder ("Folder / file.mp3"): how many files, passed, failed, waiting.
+  const byFolder = new Map<string, { computer: string; folder: string; recorded: number; done: number; failed: number; waiting: number }>();
+  for (const f of input.files) {
+    if (!f.folder) continue;
+    const key = `${f.computerId}\u0000${f.folder}`;
+    const entry = byFolder.get(key) || { computer: names.get(f.computerId) || "", folder: f.folder, recorded: 0, done: 0, failed: 0, waiting: 0 };
+    entry.recorded++;
+    entry[f.state]++;
+    byFolder.set(key, entry);
+  }
+  const folders = [...byFolder.values()].sort((a, b) => a.computer.localeCompare(b.computer) || a.folder.localeCompare(b.folder, undefined, { numeric: true }));
+  return { today: input.today, rows, totals, days, folders, failedFiles };
 }
 
 // ---------- Reading the data ----------
 
-async function loadInput(now: number, account: DriveConnection): Promise<DashInput> {
-  const computers = (await env.DB.prepare("SELECT folder_id, name, total_files FROM drive_computers WHERE account_id = ? ORDER BY name COLLATE NOCASE").bind(account.id).all<any>()).results.map((c) => ({
+async function loadInput(now: number, accounts: DriveConnection[]): Promise<DashInput> {
+  const ids = accounts.map((a) => a.id);
+  const marks = ids.map(() => "?").join(",");
+  const userOf = new Map(accounts.map((a) => [a.id, a.user_id]));
+  const computers = (await env.DB.prepare(`SELECT folder_id, name, total_files FROM drive_computers WHERE account_id IN (${marks}) ORDER BY name COLLATE NOCASE`).bind(...ids).all<any>()).results.map((c) => ({
     id: String(c.folder_id),
     name: String(c.name),
     totalFiles: Number(c.total_files || 0),
   }));
-  const picked = (await env.DB.prepare("SELECT file_id, computer_id, name, file_day, job_id FROM drive_files WHERE computer_id IN (SELECT folder_id FROM drive_computers WHERE account_id = ?)").bind(account.id).all<any>()).results;
+  const picked = (await env.DB.prepare(`SELECT file_id, computer_id, name, file_day, job_id FROM drive_files WHERE computer_id IN (SELECT folder_id FROM drive_computers WHERE account_id IN (${marks}))`).bind(...ids).all<any>()).results;
   const jobs = (
     await env.DB.prepare(
-      `SELECT j.id, j.status, j.batch_id, b.status AS batch_status, b.failed_count, b.done_count FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id WHERE j.account_id = ?`,
-    ).bind(account.id).all<any>()
+      `SELECT j.id, j.account_id, j.status, j.batch_id, b.status AS batch_status, b.failed_count, b.done_count FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id WHERE j.account_id IN (${marks})`,
+    ).bind(...ids).all<any>()
   ).results;
-  const connection = { user_id: account.user_id };
 
   // Per job: which files are done, failed, or still waiting.
   const stateByFile = new Map<string, { state: FileState; name?: string; error?: string }>();
@@ -109,14 +123,14 @@ async function loadInput(now: number, account: DriveConnection): Promise<DashInp
     if (!job.batch_id) jobState.set(job.id, "waiting");
     else if (finished && Number(job.failed_count || 0) === 0) jobState.set(job.id, "done");
     else jobState.set(job.id, "detail");
-    if (jobState.get(job.id) !== "detail" || !connection) continue;
+    if (jobState.get(job.id) !== "detail") continue;
     if (calls >= MAX_RUNNER_CALLS) {
       detailFailed.add(job.id);
       continue;
     }
     calls++;
     try {
-      const status: any = await env.BATCH_RUNNER.getByName(job.batch_id).status(connection.user_id);
+      const status: any = await env.BATCH_RUNNER.getByName(job.batch_id).status(userOf.get(job.account_id) || accounts[0].user_id);
       for (const item of status?.items || []) {
         const state: FileState = item.status === "done" ? "done" : item.status === "failed" ? "failed" : "waiting";
         stateByFile.set(String(item.fileId || ""), { state, name: item.name, error: item.error || undefined });
@@ -155,6 +169,7 @@ async function loadInput(now: number, account: DriveConnection): Promise<DashInp
       computerId: String(row.computer_id),
       day: String(row.file_day),
       state,
+      folder: String(row.name).includes(" / ") ? String(row.name).split(" / ")[0] : undefined,
       name: detail?.name || String(row.name),
       error: detail?.error,
     };
@@ -222,6 +237,23 @@ export function buildGrid(summary: DashSummary, updated: string) {
   add(text("Total", bold), num(t.recorded, bold), num(t.done, bold), num(t.waiting, bold), num(t.failed, bold), num(t.percent, { ...bold, numberFormat: { type: "PERCENT", pattern: "0%" } }), num(summary.rows.reduce((s, r) => s + r.recordedToday, 0), bold));
   blank();
 
+  if (summary.folders.length) {
+    section("By folder (files inside each computer's subfolders)");
+    add(head("Computer"), head("Folder"), head("Files"), head("Passed"), head("Failed"), head("Waiting"));
+    summary.folders.forEach((f, i) => {
+      const band = i % 2 ? { backgroundColor: GREY } : {};
+      add(
+        text(f.computer, band),
+        text(f.folder, { ...band, textFormat: { bold: true } }),
+        num(f.recorded, band),
+        num(f.done, { ...band, textFormat: { foregroundColor: GREEN } }),
+        num(f.failed, { ...band, textFormat: { foregroundColor: f.failed ? RED : { red: 0.5, green: 0.5, blue: 0.5 }, bold: f.failed > 0 } }),
+        num(f.waiting, { ...band, textFormat: { foregroundColor: AMBER } }),
+      );
+    });
+    blank();
+  }
+
   section(`By day (last ${DAYS_SHOWN} days, recordings by their recording date)`);
   const dayHeader = grid.length;
   add(head("Date"), head("Recorded"), head("Transcribed"), head("Failed"), head("Waiting"), ...summary.rows.map((row) => head(row.name)));
@@ -271,34 +303,43 @@ function chartRequest(sheetId: number, title: string, anchorColumn: number, anch
   };
 }
 
-/** Rewrite the Dashboard tab of every connected account (each in its own spreadsheet). Returns the first dashboard's link. */
+/**
+ * Rewrite the "Dashboard" tab of every spreadsheet in use. Accounts that share one spreadsheet are combined
+ * into the same single tab (older per-account tabs such as "Dashboard name" are removed). Returns the first link.
+ */
 export async function refreshSheetDashboard(now = Date.now(), accountId?: string): Promise<string | null> {
-  const accounts = (await getConnections()).filter((a) => !accountId || a.id === accountId);
+  const all = (await getConnections()).filter((a) => sheetsConfigured(a.spreadsheet));
+  const wanted = accountId ? all.filter((a) => a.id === accountId) : all;
+  const groups = new Map<string, DriveConnection[]>();
+  for (const account of wanted) {
+    const sheetId = accountSpreadsheetId(account.spreadsheet)!;
+    // The whole group of accounts that share this spreadsheet is always written together.
+    groups.set(sheetId, all.filter((o) => accountSpreadsheetId(o.spreadsheet) === sheetId));
+  }
   let first: string | null = null;
-  for (const account of accounts) {
-    if (!sheetsConfigured(account.spreadsheet)) continue;
-    // Accounts that share one spreadsheet each get a tab named after their email.
-    const shared = accounts.length > 1 && accounts.some((o) => o.id !== account.id && accountSpreadsheetId(o.spreadsheet) === accountSpreadsheetId(account.spreadsheet));
+  for (const [sheetId, accounts] of groups) {
     try {
-      const url = await writeDashboard(account, now, shared ? `${DASHBOARD_TAB} ${account.google_email.split("@")[0]}`.slice(0, 100) : DASHBOARD_TAB);
+      const url = await writeDashboard(sheetId, accounts, now);
       first ||= url;
     } catch (error) {
-      // One account's sheet problem must not stop the others (an explicit single-account refresh still reports it).
+      // One sheet problem must not stop the others (an explicit single-account refresh still reports it).
       if (accountId) throw error;
-      console.warn(`Dashboard of ${account.google_email} failed:`, error);
+      console.warn(`Dashboard of spreadsheet ${sheetId} failed:`, error);
     }
   }
   return first;
 }
 
-async function writeDashboard(account: DriveConnection, now: number, tabTitle: string): Promise<string> {
-  const id = accountSpreadsheetId(account.spreadsheet)!;
+async function writeDashboard(id: string, accounts: DriveConnection[], now: number): Promise<string> {
+  const tabTitle = DASHBOARD_TAB;
   const base = env.SHEETS_API_BASE || API;
-  const summary = summarize(await loadInput(now, account));
+  const summary = summarize(await loadInput(now, accounts));
   const updated = new Date(now + 6 * 3600_000).toISOString().slice(0, 16).replace("T", " ");
   const built = buildGrid(summary, updated);
+  const oldTabs = new Set(accounts.map((a) => `${DASHBOARD_TAB} ${a.google_email.split("@")[0]}`.slice(0, 100)));
 
   const meta = await googleApi(`${base}/${id}?fields=sheets(properties(sheetId,title),charts(chartId))`);
+  const stale = (meta.sheets || []).filter((x: any) => oldTabs.has(x.properties?.title) && x.properties?.title !== tabTitle);
   let sheet = (meta.sheets || []).find((s: any) => s.properties?.title === tabTitle);
   if (!sheet) {
     const added = await googleApi(`${base}/${id}:batchUpdate`, {
@@ -312,9 +353,10 @@ async function writeDashboard(account: DriveConnection, now: number, tabTitle: s
   const dayHeaderRow = built.dayHeader;
 
   const requests: any[] = [
+    ...stale.map((x: any) => ({ deleteSheet: { sheetId: x.properties.sheetId } })),
     ...(sheet.charts || []).map((c: any) => ({ deleteEmbeddedObject: { objectId: c.chartId } })),
     { updateSheetProperties: { properties: { sheetId, gridProperties: { hideGridlines: true, frozenRowCount: 0 } }, fields: "gridProperties.hideGridlines,gridProperties.frozenRowCount" } },
-    { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 400, startColumnIndex: 0, endColumnIndex: 30 }, cell: {}, fields: "userEnteredValue,userEnteredFormat" } },
+    { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1000, startColumnIndex: 0, endColumnIndex: 60 }, cell: {}, fields: "userEnteredValue,userEnteredFormat" } },
     { updateCells: { start: { sheetId, rowIndex: 0, columnIndex: 0 }, rows: built.grid.map((values) => ({ values })), fields: "userEnteredValue,userEnteredFormat" } },
     ...Array.from({ length: Math.max(columns, widths.length) }, (_, i) => ({
       updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: i, endIndex: i + 1 }, properties: { pixelSize: widths[i] || 110 }, fields: "pixelSize" },
