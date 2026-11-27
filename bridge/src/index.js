@@ -1,5 +1,5 @@
 /**
- * Team Fahad Bridge. Started once per PC (at sign-in). It restarts itself if it ever crashes.
+ * TEAMCRIBER Bridge. Started once per PC (at sign-in). It restarts itself if it ever crashes.
  *   node src/index.js          run (the first process supervises a worker process)
  */
 import { spawn } from "node:child_process";
@@ -41,7 +41,7 @@ async function work() {
     }
     throw error;
   }
-  log(`Team Fahad Bridge ${VERSION} started. Setup page: http://127.0.0.1:${UI_PORT}`);
+  log(`TEAMCRIBER Bridge ${VERSION} started. Setup page: http://127.0.0.1:${UI_PORT}`);
   process.on("uncaughtException", (error) => log(`Unexpected problem: ${error?.stack || error}`));
   process.on("unhandledRejection", (error) => log(`Unexpected problem: ${error?.stack || error}`));
   // Only the tray icon is visible after sign-in. "Exit" ends this worker with code 0, so the supervisor stops too.

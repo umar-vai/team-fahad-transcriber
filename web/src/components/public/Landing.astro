@@ -1,0 +1,188 @@
+---
+/** The public home page (people who are not signed in). */
+import Public from "../../layouts/Public.astro";
+import Icon from "../Icon.astro";
+import Pricing from "./Pricing.astro";
+import { listPlans } from "../../lib/plans";
+
+const freePlan = (await listPlans()).find((p) => p.is_default);
+const freeLine = freePlan && freePlan.price_monthly === 0 && freePlan.minutes_month
+  ? `${freePlan.minutes_month} free minutes every month · No card needed`
+  : "Sign in with Google · No card needed";
+
+const features = [
+  { icon: "users", title: "Subtitles with speakers", text: "Every line gets a time stamp and a speaker label. Download SRT, VTT or Word, ready for YouTube, Premiere or print." },
+  { icon: "sparkle", title: "Smart clean transcripts", text: "Filler words and false starts removed, punctuation added. Or pick exact verbatim when every word counts." },
+  { icon: "globe", title: "Many languages, mixed speech", text: "Bangla, English, Arabic, Hindi and automatic detection for mixed conversations, written in the right script." },
+  { icon: "text", title: "Summaries and translations", text: "One click turns a long meeting into a short summary, or translates the transcript into Bangla or English." },
+  { icon: "folder", title: "Whole Google Drive folders", text: "Paste one folder link. Every recording inside is transcribed on our servers, even after you close the page." },
+  { icon: "monitor", title: "Bridge PCs for teams", text: "Install on office PCs. New call or clinic recordings are transcribed the moment they are saved." },
+  { icon: "sheet", title: "Google Sheets and Notion", text: "Each finished file becomes a row in your team spreadsheet and a page in Notion, with date and file name." },
+  { icon: "search", title: "Private, searchable history", text: "Find any recording by its file name or by words spoken in it. Only you, or your team, can see it." },
+];
+
+const steps = [
+  { icon: "upload", title: "Add your recording", text: "Upload audio or video, paste a YouTube or Drive link, share a whole folder, or just speak into your microphone." },
+  { icon: "wave", title: "We listen carefully", text: "Long files are cut at quiet points and processed in parallel, so an hour of audio is ready in minutes." },
+  { icon: "check", title: "Read, edit and share", text: "Fix any word, add a summary or translation, and download as text, Word, SRT or VTT. Saved to your history." },
+];
+
+const uses = [
+  { icon: "briefcase", title: "Clinics and offices", text: "Doctor consultations and client calls, written up every night." },
+  { icon: "mic", title: "Journalists and podcasters", text: "Interviews and episodes turned into quotes and show notes." },
+  { icon: "youtube", title: "Video creators", text: "Accurate subtitles in Bangla and English for every upload." },
+  { icon: "users", title: "Teachers and students", text: "Lectures and classes as clean, searchable notes." },
+];
+
+const faqs = [
+  { q: "Which languages can TEAMCRIBER write?", a: "Bangla and English work best, with Arabic and Hindi also built in. Automatic detection handles recordings that mix languages, and the Shayari mode writes Urdu and Hindi poetry in Bangla and English letters with a Bangla meaning." },
+  { q: "Which files and links work?", a: "MP3, WAV, M4A, FLAC, MP4, MOV, MKV and most other audio and video files, public YouTube videos, and Google Drive folders shared with a link." },
+  { q: "Who can see my transcripts?", a: "Only you. Team transcripts are visible only to the members an admin added to that team. Recordings are processed to make the transcript and are not kept as audio." },
+  { q: "How accurate is it?", a: "Clear recordings are usually very close to perfect. Add names and special terms before you start and they will be spelled the way you want. Every transcript can be edited." },
+  { q: "Can I change or cancel my plan?", a: "Yes. Talk to us at any time and we will move you to another plan." },
+];
+
+const langs = ["বাংলা", "English", "العربية", "हिन्दी", "اردو", "Mixed"];
+---
+<Public>
+  <section class="hero">
+    <div class="pub-wrap hero-grid">
+      <div class="hero-copy">
+        <span class="hero-eyebrow"><Icon name="globe" size="sm" />Voice and video to text, in any language</span>
+        <h1>Every recording, written out <span class="accent">perfectly</span>.</h1>
+        <p class="hero-sub">TEAMCRIBER turns meetings, calls, interviews and videos into clean transcripts and speaker subtitles in Bangla, English and more. For one person, or for a whole office on autopilot.</p>
+        <div class="hero-cta">
+          <a class="btn lg" href="/login?next=/">Start free<Icon name="arrow" /></a>
+          <a class="btn lg ghost" href="#how"><Icon name="play" />See how it works</a>
+        </div>
+        <p class="hero-fine"><Icon name="check" size="sm" />{freeLine}</p>
+      </div>
+
+      <div class="hero-visual" aria-hidden="true">
+        <div class="demo">
+          <div class="demo-head">
+            <span class="demo-file"><Icon name="audio" size="sm" />clinic_call_0412.mp3</span>
+            <span class="pill good">Done in 48s</span>
+          </div>
+          <div class="demo-wave">
+            {Array.from({ length: 44 }, (_, i) => <span style={`--h:${Math.round(18 + 70 * Math.abs(Math.sin(i * 0.7) * Math.cos(i * 0.23)))}%;--d:${(i % 11) * 0.09}s`}></span>)}
+          </div>
+          <div class="demo-lines">
+            <div class="demo-line"><span class="t">00:02</span><span class="sp a">Speaker 1</span><p>আসসালামু আলাইকুম, ডাক্তার সাহেব। আমার কয়েক দিন ধরে মাথা ব্যথা।</p></div>
+            <div class="demo-line"><span class="t">00:07</span><span class="sp b">Speaker 2</span><p>Walaikum assalam. Since when exactly, and is it worse in the morning?</p></div>
+            <div class="demo-line"><span class="t">00:12</span><span class="sp a">Speaker 1</span><p>প্রায় এক সপ্তাহ। সকালে একটু বেশি হয়।</p></div>
+          </div>
+          <div class="demo-foot">
+            <span class="chip">SRT</span><span class="chip">VTT</span><span class="chip">Word</span><span class="chip">Summary</span><span class="chip">Translate</span>
+          </div>
+        </div>
+        <div class="lang-orbit">
+          {langs.map((l, i) => <span style={`--i:${i}`}>{l}</span>)}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="strip">
+    <div class="pub-wrap strip-row">
+      <div><strong>4</strong><span>output styles</span></div>
+      <div><strong>5+</strong><span>languages and mixed speech</span></div>
+      <div><strong>4×</strong><span>parts transcribed at once</span></div>
+      <div><strong>24/7</strong><span>team automation</span></div>
+    </div>
+  </section>
+
+  <section class="pub-section" id="how">
+    <div class="pub-wrap">
+      <div class="pub-section-head">
+        <span class="kicker">How it works</span>
+        <h2>From sound to text in three steps</h2>
+        <p>No software to learn. Drop a file and get a transcript you can trust.</p>
+      </div>
+      <ol class="steps">
+        {steps.map((s, i) => (
+          <li class="step">
+            <span class="step-num">{i + 1}</span>
+            <span class="step-icon"><Icon name={s.icon} size="lg" /></span>
+            <h3>{s.title}</h3>
+            <p>{s.text}</p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  <section class="pub-section alt" id="features">
+    <div class="pub-wrap">
+      <div class="pub-section-head">
+        <span class="kicker">Features</span>
+        <h2>Everything you need to turn talk into text</h2>
+        <p>Made for the way people really speak: fast, mixed languages, several voices at once.</p>
+      </div>
+      <div class="feature-grid">
+        {features.map((f) => (
+          <article class="feature">
+            <span class="feature-icon"><Icon name={f.icon} /></span>
+            <h3>{f.title}</h3>
+            <p>{f.text}</p>
+          </article>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="pub-section">
+    <div class="pub-wrap">
+      <div class="pub-section-head">
+        <span class="kicker">Who uses it</span>
+        <h2>Built for busy people and busy teams</h2>
+      </div>
+      <div class="use-grid">
+        {uses.map((u) => (
+          <div class="use">
+            <span class="feature-icon"><Icon name={u.icon} /></span>
+            <div><h3>{u.title}</h3><p>{u.text}</p></div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="pub-section alt" id="pricing">
+    <div class="pub-wrap">
+      <div class="pub-section-head">
+        <span class="kicker">Pricing</span>
+        <h2>Simple plans that grow with you</h2>
+        <p>Start free. Move up when you need more minutes or team automation.</p>
+      </div>
+      <Pricing />
+    </div>
+  </section>
+
+  <section class="pub-section" id="faq">
+    <div class="pub-wrap narrow">
+      <div class="pub-section-head">
+        <span class="kicker">Questions</span>
+        <h2>Frequently asked</h2>
+      </div>
+      <div class="faq">
+        {faqs.map((f) => (
+          <details>
+            <summary>{f.q}<Icon name="plus" size="sm" /></summary>
+            <p>{f.a}</p>
+          </details>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="cta-band">
+    <div class="pub-wrap cta-row">
+      <div>
+        <h2>Your next recording deserves a perfect transcript.</h2>
+        <p>Sign in with Google and try it on your own audio in under a minute.</p>
+      </div>
+      <a class="btn lg light" href="/login?next=/">Start free<Icon name="arrow" /></a>
+    </div>
+  </section>
+</Public>

@@ -94,7 +94,7 @@ jobs:
           if (-not $status) { throw "The bridge did not start after installing." }
           $status | ConvertTo-Json -Compress
           $page = Invoke-WebRequest http://127.0.0.1:47821/ -UseBasicParsing
-          if ($page.StatusCode -ne 200 -or $page.Content -notmatch "Team Fahad Bridge") { throw "Setup page did not load." }
+          if ($page.StatusCode -ne 200 -or $page.Content -notmatch "TEAMCRIBER Bridge") { throw "Setup page did not load." }
           $remove = Start-Process (Join-Path $dir "unins000.exe") -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -PassThru
           if (-not $remove.WaitForExit(120000)) { throw "The uninstaller did not finish within 2 minutes." }
           Start-Sleep -Seconds 4

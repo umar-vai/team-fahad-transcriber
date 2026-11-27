@@ -2,6 +2,7 @@
 import Base from "../../layouts/Base.astro";
 import Icon from "../../components/Icon.astro";
 import { env } from "cloudflare:workers";
+import { fixDriveTitles } from "../../lib/drivename";
 import { lengthLabel, MODE_LABEL, SOURCE_ICON, SOURCE_LABEL } from "../../lib/labels";
 
 const user = Astro.locals.user;
@@ -10,12 +11,14 @@ const q = (Astro.url.searchParams.get("q") || "").trim();
 const like = `%${q.replace(/[%_]/g, "")}%`;
 // Personal transcripts only. Team transcripts (Automation) live on the team's page.
 const { results } = await env.DB.prepare(
-  `SELECT id, title, source_type, mode, language, duration, created_at, substr(transcript, 1, 180) AS preview
+  `SELECT id, title, source_type, source_ref, mode, language, duration, created_at, substr(transcript, 1, 180) AS preview
      FROM transcriptions WHERE user_id = ? AND workspace_id IS NULL AND (? = '' OR title LIKE ? OR transcript LIKE ?)
     ORDER BY created_at DESC LIMIT 200`,
 ).bind(user.id, q, like, like).all<any>();
+// Old Drive link transcripts were saved as "google_drive_media": show (and save) the file's real name.
+await fixDriveTitles(results).catch((error) => console.warn("Drive titles", error));
 ---
-<Base title="History · Team Fahad Transcriber">
+<Base title="History · TEAMCRIBER">
   <div class="page-head">
     <div>
       <h1>History</h1>
@@ -23,7 +26,7 @@ const { results } = await env.DB.prepare(
     </div>
     <form method="get" class="search" style="width:min(340px,100%)">
       <Icon name="search" />
-      <input type="search" name="q" value={q} placeholder="Search titles and text" aria-label="Search history" />
+      <input type="search" name="q" value={q} placeholder="Search file names and text" aria-label="Search history" />
     </form>
   </div>
   <section class="card flush">

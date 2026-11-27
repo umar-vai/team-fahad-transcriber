@@ -4,12 +4,14 @@ import Results from "../../components/Results.astro";
 import Icon from "../../components/Icon.astro";
 import { transcriptAccess } from "../../lib/workspaces";
 import { SOURCE_LABEL } from "../../lib/labels";
+import { fixDriveTitles } from "../../lib/drivename";
 
 const user = Astro.locals.user;
 if (!user) return Astro.redirect(`/login?next=${encodeURIComponent(Astro.url.pathname)}`);
 const found = await transcriptAccess(user, String(Astro.params.id || ""));
 if (!found) return new Response("Not found", { status: 404 });
 const { row, canEdit, workspace } = found;
+await fixDriveTitles([row]).catch(() => undefined);
 const segments = JSON.parse(row.segments_json || "[]");
 const result = {
   title: row.title,
@@ -28,7 +30,7 @@ const isUrl = typeof row.source_ref === "string" && /^https?:\/\//.test(row.sour
 const backHref = workspace ? `/auto?team=${encodeURIComponent(workspace.id)}&tab=transcripts` : "/history";
 const backLabel = workspace ? `${workspace.name} transcripts` : "History";
 ---
-<Base title={`${row.title} · Team Fahad Transcriber`}>
+<Base title={`${row.title} · TEAMCRIBER`}>
   <a class="back" href={backHref}><Icon name="back" size="sm" />{backLabel}</a>
   <div class="page-head">
     <div>

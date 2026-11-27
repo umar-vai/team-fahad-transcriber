@@ -2,13 +2,16 @@
 import Base from "../layouts/Base.astro";
 import Results from "../components/Results.astro";
 import Icon from "../components/Icon.astro";
+import Landing from "../components/public/Landing.astro";
 import { apiKeys, LANGUAGES } from "../lib/gemini";
 
-if (!Astro.locals.user) return Astro.redirect("/login?next=/");
+// Not signed in: the public home page. Signed in: the transcriber.
+const signedIn = Boolean(Astro.locals.user);
 const connected = apiKeys().length > 0;
-const firstName = (Astro.locals.user.name || "").split(" ")[0];
+const firstName = (Astro.locals.user?.name || "").split(" ")[0];
 ---
-<Base title="Transcribe · Team Fahad Transcriber">
+{!signedIn ? <Landing /> : (
+<Base title="Transcribe · TEAMCRIBER">
   <div class="page-head">
     <div>
       <h1>{firstName ? `Welcome back, ${firstName}` : "Transcribe"}</h1>
@@ -117,8 +120,9 @@ const firstName = (Astro.locals.user.name || "").split(" ")[0];
     <Results />
   </div>
 </Base>
+)}
 
 <script>
-  import { initTranscriber } from "../scripts/transcriber";
-  initTranscriber();
+  // The landing page has no transcriber on it, so its code is only loaded for signed-in people.
+  if (document.getElementById("source-tabs")) import("../scripts/transcriber").then((m) => m.initTranscriber());
 </script>

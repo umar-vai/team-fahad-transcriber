@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Team Fahad Transcriber: design system
+   TEAMCRIBER: design system
    One accent (signal teal), quiet neutrals, 4px spacing grid, light + dark.
    ========================================================================== */
 
@@ -235,7 +235,7 @@ label .hint, .field-hint { font-weight: 400; color: var(--muted); font-size: 12.
 label > .hint { order: 3; }
 /* Field + button rows: keep the hint above, so the button lines up with the field. */
 .input-group label > .hint { order: 0; }
-input[type="text"], input[type="url"], input[type="search"], input[type="email"], input[type="password"], select, textarea {
+input[type="text"], input[type="url"], input[type="search"], input[type="email"], input[type="password"], input[type="number"], input[type="date"], select, textarea {
   width: 100%; background: var(--surface); border: 1px solid var(--line-strong); color: var(--text);
   border-radius: 8px; padding: 9px 12px; font: inherit; font-weight: 400; min-height: 40px;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -523,3 +523,35 @@ dialog.modal form { display: grid; gap: 14px; padding: 20px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------- Logo ---------- */
+.logo { display: inline-flex; align-items: center; gap: 10px; min-width: 0; color: var(--text); }
+.logo-mark { flex: none; display: block; border-radius: 24%; box-shadow: 0 1px 2px rgba(6, 87, 76, 0.25); }
+.logo-word { display: flex; flex-direction: column; line-height: 1.1; min-width: 0; }
+.logo-name { font-size: 15.5px; font-weight: 800; letter-spacing: 0.07em; white-space: nowrap; }
+.logo-name b { font-weight: 800; color: var(--accent-text); }
+.logo-tag { font-size: 11px; color: var(--muted); font-weight: 500; letter-spacing: 0.01em; margin-top: 2px; white-space: nowrap; }
+.auth-side .logo { color: #fff; }
+.auth-side .logo-name b { color: #4fd1b9; }
+.auth-side .logo-tag { color: #9cc9bf; }
+.auth-card .back { margin: 0; }
+.footer a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+.footer a:hover { color: var(--text); }
+
+/* ---------- Admin pricing ---------- */
+.plan-admin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+.plan-admin { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 18px; display: grid; gap: 8px; align-content: start; }
+.plan-admin.featured { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.plan-admin-price { display: flex; align-items: baseline; gap: 4px; margin-top: 4px; }
+.plan-admin-price strong { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+.plan-admin-price span { color: var(--muted); font-size: 13px; }
+.plan-admin-features { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; font-size: 13px; color: var(--text-2); }
+.plan-admin-features li { display: flex; gap: 6px; align-items: flex-start; }
+.plan-admin-features .icon { stroke: var(--accent-text); margin-top: 2px; }
+.plan-admin-foot { border-top: 1px solid var(--line); padding-top: 10px; margin-top: auto; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.plan-admin { grid-template-rows: auto; display: flex; flex-direction: column; }
+.assign-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1.4fr auto; gap: 12px; align-items: end; }
+.assign-grid textarea { min-height: 42px; }
+dialog.modal.wide { width: min(720px, calc(100vw - 32px)); }
+@media (max-width: 900px) { .assign-grid { grid-template-columns: 1fr 1fr; } .assign-grid > label:first-child { grid-column: 1 / -1; } }
+@media (max-width: 560px) { .assign-grid { grid-template-columns: 1fr; } }

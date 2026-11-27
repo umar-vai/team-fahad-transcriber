@@ -6,7 +6,7 @@ const user = Astro.locals.user;
 const id = Astro.params.id || "";
 if (!user) return Astro.redirect(`/login?next=/batches/${encodeURIComponent(id)}`);
 ---
-<Base title="Folder · Team Fahad Transcriber">
+<Base title="Folder · TEAMCRIBER">
   <div class="stack" id="batch" data-id={id}>
     <div>
       <a class="back" href="/batches" id="b-back"><Icon name="back" size="sm" />All folders</a>

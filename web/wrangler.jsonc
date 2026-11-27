@@ -34,7 +34,7 @@
   // Every 5 minutes: start queued jobs when a slot is free and retry failed videos (one cheap D1 read when idle).
   "triggers": { "crons": ["50 17 * * *", "*/5 * * * *"] },
   "vars": {
-    "APP_NAME": "Team Fahad Transcriber",
+    "APP_NAME": "TEAMCRIBER",
     // Optional: comma separated emails allowed to use the app. Empty = any Google account.
     "ALLOWED_EMAILS": ""
   }

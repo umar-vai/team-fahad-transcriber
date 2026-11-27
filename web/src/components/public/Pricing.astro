@@ -1,0 +1,79 @@
+---
+/** Public pricing cards. Plans, prices and features come from the database and are set by admins. */
+import Icon from "../Icon.astro";
+import { featureList, formatPrice, minutesLabel, publicPlans } from "../../lib/plans";
+
+const plans = await publicPlans();
+const hasYearly = plans.some((p) => p.price_yearly !== null && p.price_monthly !== null && p.price_monthly > 0);
+const signedIn = Boolean(Astro.locals.user);
+const saving = (() => {
+  const paid = plans.filter((p) => p.price_monthly && p.price_yearly);
+  if (!paid.length) return 0;
+  return Math.max(...paid.map((p) => Math.round((1 - p.price_yearly! / (p.price_monthly! * 12)) * 100)));
+})();
+const cards = plans.map((plan) => {
+  const custom = plan.price_monthly === null;
+  const free = plan.price_monthly === 0;
+  const yearlyPerMonth = plan.price_yearly ? Math.round(plan.price_yearly / 12) : plan.price_monthly;
+  return {
+    plan,
+    custom,
+    free,
+    monthly: formatPrice(plan.price_monthly, plan.currency),
+    yearly: formatPrice(yearlyPerMonth, plan.currency),
+    yearlyNote: plan.price_yearly ? formatPrice(plan.price_yearly, plan.currency) + " billed yearly" : "Billed monthly",
+    href: custom ? "/about#contact" : signedIn ? "/" : "/login?next=/",
+    cta: plan.cta_label || (custom ? "Contact us" : "Get started"),
+  };
+});
+---
+<div class="pricing" data-period="month">
+  {hasYearly && (
+    <div class="period-toggle" role="group" aria-label="Billing period">
+      <button type="button" data-period-btn="month" aria-pressed="true">Monthly</button>
+      <button type="button" data-period-btn="year" aria-pressed="false">Yearly{saving > 0 && <span class="save">Save {saving}%</span>}</button>
+    </div>
+  )}
+  {plans.length === 0 ? (
+    <p class="muted" style="text-align:center">Plans are being updated. Please check back soon.</p>
+  ) : (
+    <div class="price-grid" style={`--cols:${Math.min(plans.length, 4)}`}>
+      {cards.map((c) => (
+        <article class:list={["price-card", { featured: c.plan.highlighted }]}>
+          {c.plan.highlighted ? <span class="price-flag">Most popular</span> : null}
+          <h3>{c.plan.name}</h3>
+          {c.plan.tagline && <p class="price-tag">{c.plan.tagline}</p>}
+          <div class="price-amount">
+            {c.custom && <strong>Custom</strong>}
+            {c.free && <strong>{c.monthly}</strong>}
+            {!c.custom && !c.free && <strong data-show="month">{c.monthly}</strong>}
+            {!c.custom && !c.free && <strong data-show="year">{c.yearly}</strong>}
+            {!c.custom && !c.free && <span>/month</span>}
+          </div>
+          <p class="price-note">
+            {c.custom && "Priced for your volume"}
+            {c.free && "Free forever"}
+            {!c.custom && !c.free && <span data-show="month">Billed monthly</span>}
+            {!c.custom && !c.free && <span data-show="year">{c.yearlyNote}</span>}
+          </p>
+          <div class="price-minutes"><Icon name="clock" size="sm" />{minutesLabel(c.plan.minutes_month)}</div>
+          <ul class="price-features">
+            {featureList(c.plan).map((f) => <li><Icon name="check" size="sm" />{f}</li>)}
+          </ul>
+          <a class:list={["btn block", { ghost: !c.plan.highlighted }]} href={c.href}>{c.cta}</a>
+        </article>
+      ))}
+    </div>
+  )}
+  <p class="price-foot">Prices include all languages and output styles. After you sign up, our team turns on your plan and shares the payment details with you.</p>
+</div>
+<script is:inline>
+  document.querySelectorAll(".pricing").forEach(function (box) {
+    box.querySelectorAll("[data-period-btn]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        box.dataset.period = btn.dataset.periodBtn;
+        box.querySelectorAll("[data-period-btn]").forEach(function (b) { b.setAttribute("aria-pressed", String(b === btn)); });
+      });
+    });
+  });
+</script>

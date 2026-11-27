@@ -1,0 +1,94 @@
+---
+/** Public pages (home, pricing, about): no sign-in needed. Header with navigation, Magnus Inc. footer. */
+import Base from "./Base.astro";
+import Logo from "../components/Logo.astro";
+import Icon from "../components/Icon.astro";
+
+interface Props { title?: string }
+const { title = "TEAMCRIBER · Voice and video to text, in any language" } = Astro.props;
+const user = Astro.locals.user;
+const year = new Date().getFullYear();
+const links = [
+  { href: "/#features", label: "Features" },
+  { href: "/#how", label: "How it works" },
+  { href: "/pricing", label: "Pricing" },
+  { href: "/about", label: "About" },
+];
+---
+<Base title={title} bare>
+  <div class="pub">
+    <header class="pub-head">
+      <div class="pub-wrap pub-head-row">
+        <a href="/" class="brand" aria-label="TEAMCRIBER home"><Logo size={34} /></a>
+        <nav class="pub-nav" aria-label="Main">
+          {links.map((l) => <a href={l.href}>{l.label}</a>)}
+        </nav>
+        <div class="pub-head-actions">
+          {user ? (
+            <a class="btn" href="/">Open app<Icon name="arrow" /></a>
+          ) : (
+            <>
+              <a class="btn quiet pub-signin" href="/login">Sign in</a>
+              <a class="btn" href="/login?next=/">Start free</a>
+            </>
+          )}
+          <button class="btn quiet icon-only pub-menu-btn" type="button" aria-label="Open menu" aria-expanded="false" id="pub-menu-btn"><Icon name="menu" /></button>
+        </div>
+      </div>
+      <nav class="pub-mobile-nav" id="pub-mobile-nav" aria-label="Mobile">
+        {links.map((l) => <a href={l.href}>{l.label}</a>)}
+        {!user && <a href="/login">Sign in</a>}
+      </nav>
+    </header>
+
+    <main><slot /></main>
+
+    <footer class="pub-foot">
+      <div class="pub-wrap">
+        <div class="pub-foot-grid">
+          <div class="pub-foot-brand">
+            <Logo size={36} tagline />
+            <p>Accurate transcripts, subtitles, summaries and translations from any recording. Built for people and teams who work in Bangla, English and many more languages.</p>
+          </div>
+          <div>
+            <h4>Product</h4>
+            <a href="/#features">Features</a>
+            <a href="/#how">How it works</a>
+            <a href="/pricing">Pricing</a>
+            <a href="/login">Sign in</a>
+          </div>
+          <div>
+            <h4>Company</h4>
+            <a href="/about">About Magnus Inc.</a>
+            <a href="/about#team">Who builds it</a>
+            <a href="/about#contact">Contact</a>
+          </div>
+          <div>
+            <h4>Legal</h4>
+            <a href="/about#privacy">Privacy</a>
+            <a href="/about#terms">Terms of use</a>
+          </div>
+        </div>
+        <div class="pub-foot-bottom">
+          <span>© {year} Magnus Inc. All rights reserved.</span>
+          <span>TEAMCRIBER is a product of <a href="/about">Magnus Inc.</a></span>
+        </div>
+      </div>
+    </footer>
+  </div>
+  <script is:inline>
+    (function () {
+      var btn = document.getElementById("pub-menu-btn");
+      var nav = document.getElementById("pub-mobile-nav");
+      if (!btn || !nav) return;
+      btn.addEventListener("click", function () {
+        var open = nav.classList.toggle("open");
+        btn.setAttribute("aria-expanded", String(open));
+      });
+      nav.addEventListener("click", function (e) { if (e.target.tagName === "A") nav.classList.remove("open"); });
+    })();
+  </script>
+</Base>
+<style is:global>
+  @import "../styles/public.css";
+</style>

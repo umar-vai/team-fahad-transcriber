@@ -1,0 +1,92 @@
+---
+import Base from "../../layouts/Base.astro";
+import Icon from "../../components/Icon.astro";
+
+const user = Astro.locals.user;
+if (!user) return Astro.redirect("/login?next=/admin/pricing");
+if (!Astro.locals.isAdmin) return Astro.redirect("/");
+---
+<Base title="Pricing and plans · TEAMCRIBER">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow"><Icon name="shield" size="sm" />Admin</div>
+      <h1>Pricing and plans</h1>
+      <p>Set the plans and prices shown on the public home page, and choose which plan each person is on. People you have not given a plan get the default plan.</p>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" href="/pricing" target="_blank" rel="noopener"><Icon name="external" />View public pricing</a>
+      <button class="btn" id="new-plan" type="button"><Icon name="plus" />New plan</button>
+    </div>
+  </div>
+
+  <div class="stats" id="plan-stats" style="margin-bottom:20px"></div>
+
+  <section class="stack" style="margin-bottom:28px">
+    <div class="section-head" style="margin:0"><div><h2>Plans</h2><p>Hidden plans are not on the home page but can still be given to people.</p></div></div>
+    <div class="plan-admin-grid" id="plan-list"><p class="muted">Loading…</p></div>
+  </section>
+
+  <section class="card flush">
+    <div class="card-head">
+      <div><h3>People and their plans</h3><p>Everyone who signed in, plus people you gave a plan before they signed in.</p></div>
+      <form class="search" style="width:min(280px,100%)" onsubmit="return false">
+        <Icon name="search" />
+        <input type="search" id="people-search" placeholder="Search name or email" aria-label="Search people" />
+      </form>
+    </div>
+    <div class="card-body stack" style="border-bottom:1px solid var(--line)">
+      <form id="assign-form" class="assign-grid">
+        <label>Email addresses <span class="hint">one or many, separated by commas or new lines</span>
+          <textarea name="email" rows="2" required placeholder="name@example.com"></textarea>
+        </label>
+        <label>Plan<select name="plan" id="assign-plan"></select></label>
+        <label>Ends on <span class="hint">optional</span><input type="date" name="expiresAt" /></label>
+        <label>Note <span class="hint">optional</span><input type="text" name="note" maxlength="200" placeholder="e.g. paid by bKash, Nov" /></label>
+        <button class="btn" type="submit"><Icon name="check" />Give plan</button>
+      </form>
+    </div>
+    <div class="table-wrap">
+      <table class="table" id="people-table">
+        <thead><tr><th>Person</th><th>Plan</th><th>Used this month</th><th>Ends</th><th></th></tr></thead>
+        <tbody><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <dialog class="modal wide" id="plan-dialog">
+    <div class="card-head"><h3 id="plan-dialog-title">New plan</h3></div>
+    <form method="dialog" id="plan-form" class="stack">
+      <input type="hidden" name="id" />
+      <div class="grid-2">
+        <label>Name<input type="text" name="name" required maxlength="40" placeholder="e.g. Pro" /></label>
+        <label>Short line<input type="text" name="tagline" maxlength="120" placeholder="e.g. For creators and students" /></label>
+      </div>
+      <div class="grid-3">
+        <label>Currency<select name="currency" id="plan-currency"></select></label>
+        <label>Monthly price <span class="hint">empty = "Contact us"</span><input type="number" name="price_monthly" min="0" step="0.01" /></label>
+        <label>Yearly price <span class="hint">optional</span><input type="number" name="price_yearly" min="0" step="0.01" /></label>
+      </div>
+      <div class="grid-3">
+        <label>Minutes a month <span class="hint">empty = unlimited</span><input type="number" name="minutes_month" min="0" step="1" /></label>
+        <label>Longest file (minutes) <span class="hint">empty = no limit</span><input type="number" name="max_file_minutes" min="0" step="1" /></label>
+        <label>Order <span class="hint">small numbers first</span><input type="number" name="sort" step="1" /></label>
+      </div>
+      <label>Features <span class="hint">one per line, shown as a checklist</span><textarea name="features" rows="6"></textarea></label>
+      <div class="grid-2">
+        <label>Button text<input type="text" name="cta_label" maxlength="30" placeholder="e.g. Get Pro" /></label>
+        <div class="stack tight" style="align-content:end">
+          <label class="switch"><span>Show on the home page</span><input type="checkbox" name="is_public" /></label>
+          <label class="switch"><span>Mark as "Most popular"</span><input type="checkbox" name="highlighted" /></label>
+        </div>
+      </div>
+      <div class="row end">
+        <button class="btn ghost" value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button class="btn" value="save" type="submit">Save plan</button>
+      </div>
+    </form>
+  </dialog>
+</Base>
+<script>
+  import { initPricingAdmin } from "../../scripts/pricing";
+  initPricingAdmin();
+</script>

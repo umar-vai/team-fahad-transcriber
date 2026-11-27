@@ -147,7 +147,7 @@ export async function createNotionFolder(info: {
             ...richText(info.ongoing
               ? `  ·  transcribed automatically every night  ·  ${info.modeLabel}  ·  `
               : `  ·  ${info.fileCount} videos  ·  ${info.modeLabel}  ·  ${date}  ·  `),
-            ...richText("Open in Team Fahad Transcriber", undefined, info.appUrl),
+            ...richText("Open in TEAMCRIBER", undefined, info.appUrl),
           ],
         },
       },

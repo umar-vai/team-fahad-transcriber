@@ -1,6 +1,7 @@
 ---
 import Base from "../layouts/Base.astro";
 import Icon from "../components/Icon.astro";
+import Logo from "../components/Logo.astro";
 import { devLoginEnabled, googleConfigured } from "../lib/auth";
 
 const next = Astro.url.searchParams.get("next") || "/";
@@ -9,27 +10,26 @@ const error = Astro.url.searchParams.get("error");
 const setupMissing = error === "setup" || !googleConfigured();
 const dev = devLoginEnabled(Astro.url);
 ---
-<Base title="Sign in · Team Fahad Transcriber" bare>
+<Base title="Sign in · TEAMCRIBER" bare>
   <div class="auth">
     <section class="auth-side">
-      <a href="/" class="brand">
-        <span class="brand-mark"><Icon name="wave" /></span>
-        <span class="brand-name"><strong>Team Fahad</strong><span>Transcriber</span></span>
-      </a>
+      <a href="/" class="brand" aria-label="TEAMCRIBER home"><Logo size={40} tagline /></a>
       <div>
         <h2>Every recording, turned into clean, searchable text.</h2>
         <p>Bangla and English transcription with speaker subtitles, summaries and translations, plus hands-free automation for whole teams.</p>
         <div class="auth-points">
+          <div><Icon name="check" /><span>Bangla, English, Arabic, Hindi and mixed speech</span></div>
           <div><Icon name="check" /><span>Files, links, Google Drive folders and live voice</span></div>
           <div><Icon name="check" /><span>Subtitles with speakers, SRT, VTT and Word exports</span></div>
           <div><Icon name="check" /><span>Team automation from PCs and Drive into Google Sheets</span></div>
         </div>
       </div>
-      <p class="small-text" style="margin:0">Developed by Umar Vai</p>
+      <p class="small-text" style="margin:0">A product of Magnus Inc. · Developed by Umar Vai</p>
       <svg class="auth-wave" viewBox="0 0 24 24" fill="none" stroke="#4fd1b9" stroke-width="1.2" stroke-linecap="round" aria-hidden="true"><path d="M4 10v4"/><path d="M8 7v10"/><path d="M12 4v16"/><path d="M16 8v8"/><path d="M20 11v2"/></svg>
     </section>
     <section class="auth-main">
       <div class="auth-card">
+        <a class="back" href="/"><Icon name="back" size="sm" />Back to home</a>
         <div>
           <h1>Sign in</h1>
           <p class="sub">Use your Google account. Your transcripts are private to you.</p>

@@ -15,11 +15,11 @@ Add-Type -AssemblyName System.Drawing
 $parent = [int]$env:BRIDGE_PARENT
 $tray = New-Object System.Windows.Forms.NotifyIcon
 try { $tray.Icon = New-Object System.Drawing.Icon($env:BRIDGE_ICON) } catch { $tray.Icon = [System.Drawing.SystemIcons]::Application }
-$tray.Text = 'Team Fahad Bridge'
+$tray.Text = 'TEAMCRIBER Bridge'
 function Say($word) { [Console]::Out.WriteLine($word); [Console]::Out.Flush() }
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $open = $menu.Items.Add('Open status window')
-$quit = $menu.Items.Add('Exit Team Fahad Bridge')
+$quit = $menu.Items.Add('Exit TEAMCRIBER Bridge')
 $open.add_Click({ Say 'open' })
 $quit.add_Click({ Say 'exit'; $tray.Visible = $false; [System.Windows.Forms.Application]::Exit() })
 $tray.ContextMenuStrip = $menu
