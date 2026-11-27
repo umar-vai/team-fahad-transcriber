@@ -16,7 +16,7 @@ const API = "https://sheets.googleapis.com/v4/spreadsheets";
 export const DASHBOARD_TAB = "Dashboard";
 const DAYS_SHOWN = 14;
 const MAX_FAILED_ROWS = 100;
-const MAX_RUNNER_CALLS = 60;
+const MAX_RUNNER_CALLS = 400;
 
 // ---------- Numbers ----------
 
@@ -94,7 +94,7 @@ async function loadInput(now: number, account: DriveConnection): Promise<DashInp
   const picked = (await env.DB.prepare("SELECT file_id, computer_id, name, file_day, job_id FROM drive_files WHERE computer_id IN (SELECT folder_id FROM drive_computers WHERE account_id = ?)").bind(account.id).all<any>()).results;
   const jobs = (
     await env.DB.prepare(
-      `SELECT j.id, j.status, j.batch_id, b.status AS batch_status, b.failed_count FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id WHERE j.account_id = ?`,
+      `SELECT j.id, j.status, j.batch_id, b.status AS batch_status, b.failed_count, b.done_count FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id WHERE j.account_id = ?`,
     ).bind(account.id).all<any>()
   ).results;
   const connection = { user_id: account.user_id };
@@ -103,12 +103,17 @@ async function loadInput(now: number, account: DriveConnection): Promise<DashInp
   const stateByFile = new Map<string, { state: FileState; name?: string; error?: string }>();
   let calls = 0;
   const jobState = new Map<string, string>();
+  const detailFailed = new Set<string>();
   for (const job of jobs) {
     const finished = job.batch_id && job.batch_status && job.batch_status !== "running";
     if (!job.batch_id) jobState.set(job.id, "waiting");
     else if (finished && Number(job.failed_count || 0) === 0) jobState.set(job.id, "done");
     else jobState.set(job.id, "detail");
-    if (jobState.get(job.id) !== "detail" || !connection || calls >= MAX_RUNNER_CALLS) continue;
+    if (jobState.get(job.id) !== "detail" || !connection) continue;
+    if (calls >= MAX_RUNNER_CALLS) {
+      detailFailed.add(job.id);
+      continue;
+    }
     calls++;
     try {
       const status: any = await env.BATCH_RUNNER.getByName(job.batch_id).status(connection.user_id);
@@ -118,6 +123,15 @@ async function loadInput(now: number, account: DriveConnection): Promise<DashInp
       }
     } catch (error) {
       console.warn("Dashboard: batch status failed:", error);
+      detailFailed.add(job.id);
+    }
+  }
+  // Jobs whose per-file status could not be read (too many jobs, or the runner did not answer): use the
+  // counts saved in D1 (the same numbers the website shows), handed out file by file.
+  const countsByJob = new Map<string, { done: number; failed: number }>();
+  for (const job of jobs) {
+    if (jobState.get(job.id) === "detail" && (calls >= MAX_RUNNER_CALLS || detailFailed.has(job.id)) ) {
+      countsByJob.set(job.id, { done: Number(job.done_count || 0), failed: Number(job.failed_count || 0) });
     }
   }
   const jobOfFile = new Map<string, string>();
@@ -125,7 +139,17 @@ async function loadInput(now: number, account: DriveConnection): Promise<DashInp
     jobOfFile.set(String(row.file_id), String(row.job_id));
     const detail = stateByFile.get(String(row.file_id));
     const byJob = jobState.get(String(row.job_id));
-    const state: FileState = detail ? detail.state : byJob === "done" ? "done" : "waiting";
+    let state: FileState = detail ? detail.state : byJob === "done" ? "done" : "waiting";
+    const counts = detail ? undefined : countsByJob.get(String(row.job_id));
+    if (counts) {
+      if (counts.done > 0) {
+        counts.done--;
+        state = "done";
+      } else if (counts.failed > 0) {
+        counts.failed--;
+        state = "failed";
+      }
+    }
     return {
       id: String(row.file_id),
       computerId: String(row.computer_id),

@@ -480,7 +480,8 @@ export async function pumpJobs(force = false): Promise<{ started: number; retrie
       }
     }
   }
-  if (summary.started || summary.finished || summary.retried) await refreshSheetDashboardSafe();
+  // Also refresh while jobs are running (every 5 minutes), so the sheet follows the progress shown on the website.
+  if (summary.started || summary.finished || summary.retried || active > 0) await refreshSheetDashboardSafe();
   return summary;
 }
 
