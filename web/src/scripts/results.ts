@@ -203,7 +203,8 @@ export function initResults(): void {
     ),
   ];
   for (const [button, kind] of copyButtons) {
-    const label = button.textContent;
+    // innerHTML keeps the icon when the label comes back.
+    const label = button.innerHTML;
     button.addEventListener("click", async () => {
       if (!current) return;
       const text = kind === "timed" ? timedText(current) : current.transcript;
@@ -213,7 +214,7 @@ export function initResults(): void {
       } catch {
         button.textContent = "Copy failed";
       }
-      setTimeout(() => (button.textContent = label), 1500);
+      setTimeout(() => (button.innerHTML = label), 1500);
     });
   }
 }

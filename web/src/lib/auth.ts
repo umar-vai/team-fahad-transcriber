@@ -2,6 +2,7 @@
 import { env } from "cloudflare:workers";
 import type { AstroCookies } from "astro";
 import { DRIVE_READONLY_SCOPE, saveConnection } from "./autodrive";
+import { accessTo } from "./workspaces";
 
 export const SESSION_COOKIE = "tf_session";
 const STATE_COOKIE = "tf_oauth_state";
@@ -110,6 +111,14 @@ export async function completeGoogleLogin(url: URL, cookies: AstroCookies): Prom
       .run();
   }
 
+  await startSession(userId, cookies);
+  return returnTo || "/";
+}
+
+/** Start a login session for this user and set the cookie. */
+async function startSession(userId: string, cookies: AstroCookies): Promise<void> {
+  const db = env.DB;
+  const now = Date.now();
   const token = randomToken();
   const expires = now + SESSION_DAYS * 86400_000;
   await db.batch([
@@ -120,7 +129,29 @@ export async function completeGoogleLogin(url: URL, cookies: AstroCookies): Prom
   cookies.set(SESSION_COOKIE, token, {
     httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: SESSION_DAYS * 86400,
   });
-  return returnTo || "/";
+}
+
+/** True only on a local development server with DEV_LOGIN=1 (never on the live site). */
+export function devLoginEnabled(url: URL): boolean {
+  return env.DEV_LOGIN === "1" && ["localhost", "127.0.0.1"].includes(url.hostname);
+}
+
+/** Local development only: sign in as any email without Google, to test layouts and permissions. */
+export async function devLogin(url: URL, cookies: AstroCookies, rawEmail: string): Promise<void> {
+  if (!devLoginEnabled(url)) throw new Error("Development sign-in is switched off.");
+  const email = String(rawEmail || "").trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error("Type an email address.");
+  const sub = `dev:${email}`;
+  const now = Date.now();
+  const existing = await env.DB.prepare("SELECT id FROM users WHERE google_sub = ?").bind(sub).first<{ id: string }>();
+  const userId = existing?.id || crypto.randomUUID();
+  if (existing) await env.DB.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").bind(now, userId).run();
+  else {
+    await env.DB.prepare("INSERT INTO users (id, google_sub, email, name, picture, created_at, last_login_at) VALUES (?, ?, ?, ?, NULL, ?, ?)")
+      .bind(userId, sub, email, email.split("@")[0], now, now)
+      .run();
+  }
+  await startSession(userId, cookies);
 }
 
 export async function currentUser(cookies: AstroCookies): Promise<User | null> {
@@ -144,9 +175,9 @@ export async function logout(cookies: AstroCookies): Promise<void> {
 // ---------- Connect the Google Drive account that is watched every night ----------
 
 /** Consent URL for read-only Drive access with an offline refresh token. The same /auth/callback receives it. */
-export function driveConnectUrl(origin: string, cookies: AstroCookies): string {
+export function driveConnectUrl(origin: string, cookies: AstroCookies, workspaceId: string): string {
   const state = randomToken(24);
-  cookies.set(DRIVE_STATE_COOKIE, state, { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 600 });
+  cookies.set(DRIVE_STATE_COOKIE, `${state}|${workspaceId}`, { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 600 });
   const params = new URLSearchParams({
     client_id: String(env.GOOGLE_CLIENT_ID),
     redirect_uri: redirectUri(origin),
@@ -161,14 +192,18 @@ export function driveConnectUrl(origin: string, cookies: AstroCookies): string {
 
 /** True when this callback belongs to a Drive connect (not a normal sign-in). */
 export function isDriveCallback(url: URL, cookies: AstroCookies): boolean {
-  const saved = cookies.get(DRIVE_STATE_COOKIE)?.value;
+  const saved = cookies.get(DRIVE_STATE_COOKIE)?.value?.split("|")[0];
   return Boolean(saved && saved === url.searchParams.get("state"));
 }
 
-export async function completeDriveConnect(url: URL, cookies: AstroCookies): Promise<void> {
+/** Finish connecting a Drive account to a team. Returns the team id (for the redirect back to its Auto page). */
+export async function completeDriveConnect(url: URL, cookies: AstroCookies): Promise<string> {
+  const workspaceId = cookies.get(DRIVE_STATE_COOKIE)?.value?.split("|")[1] || "";
   cookies.delete(DRIVE_STATE_COOKIE, { path: "/" });
   const user = await currentUser(cookies);
   if (!user) throw new Error("Please sign in first, then press Connect Drive again.");
+  const access = await accessTo(user, workspaceId);
+  if (!access?.canManage) throw new Error("Only a manager of this team can connect a Drive account.");
   if (url.searchParams.get("error")) throw new Error(`Drive connect was cancelled (${url.searchParams.get("error")}).`);
   const code = url.searchParams.get("code");
   if (!code) throw new Error("Drive connect expired. Please try again.");
@@ -192,5 +227,6 @@ export async function completeDriveConnect(url: URL, cookies: AstroCookies): Pro
   const profile: any = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
     headers: { authorization: `Bearer ${tokens.access_token}` },
   }).then((r) => r.json()).catch(() => ({}));
-  await saveConnection({ userId: user.id, email: String(profile.email || "unknown"), refreshToken: tokens.refresh_token, appUrl: url.origin });
+  await saveConnection({ userId: user.id, workspaceId, email: String(profile.email || "unknown"), refreshToken: tokens.refresh_token, appUrl: url.origin });
+  return workspaceId;
 }

@@ -6,15 +6,16 @@ if (!Astro.locals.user) return Astro.redirect(`/login?next=${encodeURIComponent(
 const email = Astro.locals.user.email;
 const shown = code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : "";
 ---
-<Base title="Allow a computer · Team Fahad Transcriber">
-  <div class="card stack" style="max-width:520px;margin:24px auto" id="box" data-code={code}>
-    <h1 style="margin:0">Allow this computer?</h1>
+<Base title="Allow a computer · Team Fahad Transcriber" narrow>
+  <div class="card stack" style="max-width:520px;margin:24px auto;text-align:center" id="box" data-code={code}>
+    <span class="empty-icon" style="width:46px;height:46px;border-radius:12px;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent-text);margin:0 auto"><svg class="icon lg" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg></span>
+    <h1>Allow this computer?</h1>
     {shown ? (
       <>
         <p class="muted" style="margin:0">The Team Fahad Bridge app on a computer is asking to send its transcripts to <b>{email}</b>. Check that the code below is the same as in the app window.</p>
-        <p style="font-size:2rem;letter-spacing:.15em;font-weight:700;margin:0" id="shown">{shown}</p>
+        <p class="pairing-code" id="shown">{shown}</p>
         <p class="muted" id="who" style="margin:0">Looking up the computer…</p>
-        <button class="btn" id="allow" type="button" disabled>Allow this computer</button>
+        <button class="btn lg" id="allow" type="button" disabled>Allow this computer</button>
       </>
     ) : (
       <p class="notice error">This link has no code. Press "Connect with Google" in the app again.</p>

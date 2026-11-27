@@ -1,5 +1,6 @@
 ---
 import Base from "../../layouts/Base.astro";
+import Icon from "../../components/Icon.astro";
 
 const user = Astro.locals.user;
 const id = Astro.params.id || "";
@@ -7,29 +8,31 @@ if (!user) return Astro.redirect(`/login?next=/batches/${encodeURIComponent(id)}
 ---
 <Base title="Folder · Team Fahad Transcriber">
   <div class="stack" id="batch" data-id={id}>
-    <div class="page-head" style="margin:0">
-      <div style="min-width:0">
-        <p class="muted small-text" style="margin:0"><a href="/batches">← All folders</a></p>
-        <h1 id="b-title">Loading…</h1>
-        <div class="chips" id="b-chips"></div>
-      </div>
-      <div class="row">
-        <button class="btn ghost small hidden" id="b-stop" type="button">Stop</button>
-        <button class="btn small hidden" id="b-resume" type="button">Retry failed</button>
-        <button class="btn small hidden" id="b-zip" type="button">Download all (ZIP)</button>
+    <div>
+      <a class="back" href="/batches" id="b-back"><Icon name="back" size="sm" />All folders</a>
+      <div class="page-head" style="margin:0">
+        <div style="min-width:0">
+          <h1 id="b-title">Loading…</h1>
+          <div class="chips" id="b-chips" style="margin-top:8px"></div>
+        </div>
+        <div class="actions">
+          <button class="btn ghost small hidden" id="b-stop" type="button">Stop</button>
+          <button class="btn small hidden" id="b-resume" type="button"><Icon name="refresh" />Retry failed</button>
+          <button class="btn ghost small hidden" id="b-zip" type="button"><Icon name="download" />Download all (ZIP)</button>
+        </div>
       </div>
     </div>
 
     <section class="card stack">
       <div class="batch-stats">
-        <div class="stat"><strong id="s-done">0</strong><span>Done</span></div>
-        <div class="stat"><strong id="s-left">0</strong><span>Left</span></div>
-        <div class="stat"><strong id="s-failed">0</strong><span>Failed</span></div>
-        <div class="stat"><strong id="s-total">0</strong><span>Videos</span></div>
+        <div class="stat good"><span>Done</span><strong id="s-done">0</strong></div>
+        <div class="stat"><span>Left</span><strong id="s-left">0</strong></div>
+        <div class="stat bad"><span>Failed</span><strong id="s-failed">0</strong></div>
+        <div class="stat"><span>Files</span><strong id="s-total">0</strong></div>
       </div>
       <div class="progress"><div id="b-bar"></div></div>
       <div class="links" id="b-links"></div>
-      <p class="muted small-text" id="b-note" style="margin:0">This runs on the server. You can close this page and come back any time.</p>
+      <p class="muted small-text" id="b-note">This runs on the server. You can close this page and come back any time.</p>
     </section>
 
     <div class="notice error hidden" id="b-error" role="alert"></div>

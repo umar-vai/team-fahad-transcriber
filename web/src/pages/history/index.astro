@@ -1,56 +1,62 @@
 ---
 import Base from "../../layouts/Base.astro";
+import Icon from "../../components/Icon.astro";
 import { env } from "cloudflare:workers";
+import { lengthLabel, MODE_LABEL, SOURCE_ICON, SOURCE_LABEL } from "../../lib/labels";
 
 const user = Astro.locals.user;
 if (!user) return Astro.redirect("/login?next=/history");
 const q = (Astro.url.searchParams.get("q") || "").trim();
 const like = `%${q.replace(/[%_]/g, "")}%`;
+// Personal transcripts only. Team transcripts (Automation) live on the team's page.
 const { results } = await env.DB.prepare(
-  `SELECT id, title, source_type, mode, language, duration, created_at, substr(transcript, 1, 220) AS preview
-     FROM transcriptions WHERE user_id = ? AND (? = '' OR title LIKE ? OR transcript LIKE ?)
+  `SELECT id, title, source_type, mode, language, duration, created_at, substr(transcript, 1, 180) AS preview
+     FROM transcriptions WHERE user_id = ? AND workspace_id IS NULL AND (? = '' OR title LIKE ? OR transcript LIKE ?)
     ORDER BY created_at DESC LIMIT 200`,
 ).bind(user.id, q, like, like).all<any>();
-
-const sourceLabel: Record<string, string> = { upload: "File", link: "Link", youtube: "YouTube", live: "Live voice", drive: "Drive folder" };
-const modeLabel: Record<string, string> = { smart: "Smart clean", detailed: "Subtitles + speakers", verbatim: "Verbatim", shayari: "Shayari" };
-function length(seconds: number | null) {
-  if (!seconds) return "";
-  const s = Math.round(seconds);
-  return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : `${Math.floor(s / 60)}m ${s % 60}s`;
-}
 ---
 <Base title="History · Team Fahad Transcriber">
   <div class="page-head">
     <div>
-      <h1>Your history</h1>
-      <p class="muted" style="margin:0">Every file, link and live recording you have transcribed. Only you can see these.</p>
+      <h1>History</h1>
+      <p>Everything you transcribed yourself. Only you can see these.</p>
     </div>
-    <form method="get" class="row" style="min-width:260px">
-      <input type="search" name="q" value={q} placeholder="Search titles and text" />
+    <form method="get" class="search" style="width:min(340px,100%)">
+      <Icon name="search" />
+      <input type="search" name="q" value={q} placeholder="Search titles and text" aria-label="Search history" />
     </form>
   </div>
-  {results.length === 0 ? (
-    <div class="card"><p class="muted" style="margin:0">{q ? "Nothing matches your search." : "No transcriptions yet."} <a href="/">Transcribe something</a>.</p></div>
-  ) : (
-    <div class="history-list">
-      {results.map((item) => (
-        <a class="card history-item" href={`/history/${item.id}`}>
-          <strong>{item.title}</strong>
-          <div class="chips">
-            <span class="chip">{sourceLabel[item.source_type] || item.source_type}</span>
-            <span class="chip">{modeLabel[item.mode] || item.mode}</span>
-            {item.duration ? <span class="chip">{length(item.duration)}</span> : null}
-            <span class="chip" data-time={item.created_at}>{new Date(item.created_at).toISOString().slice(0, 10)}</span>
-          </div>
-          <p>{item.preview}</p>
-        </a>
-      ))}
-    </div>
-  )}
+  <section class="card flush">
+    {results.length === 0 ? (
+      <div class="empty">
+        <span class="empty-icon"><Icon name={q ? "search" : "history"} size="lg" /></span>
+        <h3>{q ? "Nothing matches your search" : "No transcripts yet"}</h3>
+        <p>{q ? "Try other words, or clear the search." : "Files, links and live recordings you transcribe are saved here automatically."}</p>
+        {q ? <a class="btn ghost small" href="/history">Clear search</a> : <a class="btn small" href="/"><Icon name="plus" />Transcribe something</a>}
+      </div>
+    ) : (
+      <div class="list">
+        {results.map((item) => (
+          <a class="list-item" href={`/history/${item.id}`}>
+            <span class="li-icon"><Icon name={SOURCE_ICON[item.source_type] || "file"} /></span>
+            <span class="li-main">
+              <span class="li-title">{item.title}</span>
+              <span class="li-sub">{item.preview}</span>
+            </span>
+            <span class="li-meta">
+              <span class="chip">{SOURCE_LABEL[item.source_type] || item.source_type}</span>
+              <span class="chip">{MODE_LABEL[item.mode] || item.mode}</span>
+              {item.duration ? <span class="num">{lengthLabel(item.duration)}</span> : null}
+              <span data-time={item.created_at}>{new Date(item.created_at).toISOString().slice(0, 10)}</span>
+            </span>
+          </a>
+        ))}
+      </div>
+    )}
+  </section>
+  {results.length === 200 && <p class="muted small-text" style="margin-top:12px">Showing the latest 200. Search to find older ones.</p>}
 </Base>
 <script>
-  document.querySelectorAll<HTMLElement>("[data-time]").forEach((el) => {
-    el.textContent = new Date(Number(el.dataset.time)).toLocaleString();
-  });
+  const fmt = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+  document.querySelectorAll<HTMLElement>("[data-time]").forEach((el) => (el.textContent = fmt.format(new Date(Number(el.dataset.time)))));
 </script>

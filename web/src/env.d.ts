@@ -3,6 +3,10 @@
 declare namespace App {
   interface Locals {
     user: import("./lib/auth").User | null;
+    /** The signed-in person is an admin (manages every team). */
+    isAdmin: boolean;
+    /** The signed-in person may open the Auto page (admin, or member of a team). */
+    autoAccess: boolean;
   }
 }
 
@@ -14,6 +18,10 @@ declare namespace Cloudflare {
     GEMINI_RELAY?: DurableObjectNamespace<import("./lib/geminirelay").GeminiRelay>;
     APP_NAME: string;
     ALLOWED_EMAILS?: string;
+    /** Comma separated admin emails (they manage every team). Empty: the built-in owner accounts. */
+    ADMIN_EMAILS?: string;
+    /** Local development only: "1" shows a sign-in form without Google on localhost. */
+    DEV_LOGIN?: string;
     GEMINI_API_KEYS?: string;
     GEMINI_API_KEY?: string;
     GEMINI_MODEL?: string;

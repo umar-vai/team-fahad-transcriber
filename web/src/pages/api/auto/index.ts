@@ -1,16 +1,23 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { LANGUAGES } from "../../../lib/gemini";
-import { handler, HttpError, json, requireUser } from "../../../lib/http";
+import { handler, HttpError, json } from "../../../lib/http";
+import { notionAllowed, requireWorkspace } from "../../../lib/workspaces";
 import { dayOf, dayStart, discoverComputers, driveAccessToken, getConnection, getConnections, nightlyRun, retryAllFailed } from "../../../lib/autodrive";
 import { refreshSheetDashboard } from "../../../lib/sheetdash";
 import { accountSpreadsheetId, checkSpreadsheetAccess, spreadsheetId } from "../../../lib/sheets";
 import { BATCH_MODES, type BatchMode } from "../../../batch/runner";
 
-/** Connected Drive accounts, the computers found in them, and the latest nightly jobs. */
+function requireDrive(access: { workspace: { feature_drive: number } }) {
+  if (!access.workspace.feature_drive) throw new HttpError(403, "Drive automation is not switched on for this team.");
+}
+
+/** The team's connected Drive accounts, the computers found in them, and the latest nightly jobs. */
 export const GET: APIRoute = handler(async (context) => {
-  requireUser(context);
-  const connections = await getConnections();
+  const access = await requireWorkspace(context);
+  requireDrive(access);
+  const workspaceId = access.workspace.id;
+  const connections = await getConnections(workspaceId);
   let computers: { id: string; name: string }[] | null = null;
   let driveError: string | null = null;
   const checkId = context.url.searchParams.get("check") === "1" ? context.url.searchParams.get("account") : null;
@@ -24,8 +31,8 @@ export const GET: APIRoute = handler(async (context) => {
   }
   const jobs = await env.DB.prepare(
     `SELECT j.id, j.account_id, j.computer_name, j.day, j.status, j.attempts, j.batch_id, j.files_json, b.done_count, b.failed_count, b.total, b.status AS batch_status, b.notion_url, b.sheet_url
-       FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id ORDER BY j.created_at DESC LIMIT 150`,
-  ).all<any>();
+       FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id WHERE j.workspace_id = ? ORDER BY j.created_at DESC LIMIT 150`,
+  ).bind(workspaceId).all<any>();
   const today = dayOf(Date.now());
   const stats = await env.DB.prepare(
     `SELECT c.folder_id AS id, c.account_id, c.name, c.total_files, c.last_scan_at, c.scan_error,
@@ -38,12 +45,15 @@ export const GET: APIRoute = handler(async (context) => {
        (SELECT COALESCE(SUM(MAX(json_array_length(j.files_json) - COALESCE(b.done_count, 0) - COALESCE(b.failed_count, 0), 0)), 0)
           FROM drive_jobs j LEFT JOIN batches b ON b.id = j.batch_id
          WHERE j.computer_id = c.folder_id AND j.status != 'done') AS waiting
-       FROM drive_computers c ORDER BY c.name COLLATE NOCASE`,
+       FROM drive_computers c WHERE c.account_id IN (SELECT id FROM drive_accounts WHERE workspace_id = ?3) ORDER BY c.name COLLATE NOCASE`,
   )
-    .bind(today, dayStart(today))
+    .bind(today, dayStart(today), workspaceId)
     .all<any>();
   return json({
     today,
+    canManage: access.canManage,
+    notionAllowed: notionAllowed(access.workspace),
+    teamSheet: Boolean(access.workspace.spreadsheet) || Boolean(access.workspace.is_default),
     connected: connections.length > 0,
     accounts: connections.map((c) => {
       const sheet = accountSpreadsheetId(c.spreadsheet);
@@ -54,9 +64,9 @@ export const GET: APIRoute = handler(async (context) => {
         notion: Boolean(c.notion_enabled),
         mode: c.mode,
         language: c.language,
-        spreadsheet: c.spreadsheet || "",
+        spreadsheet: c.own_spreadsheet || "",
         extraFolders: c.extra_folders || "",
-        ownSheet: Boolean(spreadsheetId(c.spreadsheet || undefined)),
+        ownSheet: Boolean(spreadsheetId(c.own_spreadsheet || undefined)),
         sheetUrl: sheet ? `https://docs.google.com/spreadsheets/d/${sheet}/edit` : null,
       };
     }),
@@ -68,29 +78,46 @@ export const GET: APIRoute = handler(async (context) => {
   });
 });
 
-/** Run the nightly scan now (same as the 23:50 cron), for all accounts. */
+/** Run the nightly scan now (same as the 23:50 cron) for this team's accounts, retry failed files, or update dashboards. */
 export const POST: APIRoute = handler(async (context) => {
-  requireUser(context);
-  if (!(await getConnections()).length) throw new HttpError(400, "Connect Google Drive first.");
+  const access = await requireWorkspace(context, { manage: true });
+  requireDrive(access);
+  const workspaceId = access.workspace.id;
+  const connections = await getConnections(workspaceId);
+  if (!connections.length) throw new HttpError(400, "Connect Google Drive first.");
   if (context.url.searchParams.get("dashboard") === "1") {
-    const url = await refreshSheetDashboard(Date.now(), context.url.searchParams.get("account") || undefined);
-    if (!url) throw new HttpError(400, "Google Sheets is not set up (add a spreadsheet link for this account, or SHEETS_SPREADSHEET_ID, and the service account).");
+    const wanted = context.url.searchParams.get("account");
+    if (wanted && !connections.some((c) => c.id === wanted)) throw new HttpError(404, "That Drive account is not connected to this team.");
+    let url: string | null = null;
+    // Only this team's accounts: another team's spreadsheet is never touched from here.
+    for (const account of wanted ? connections.filter((c) => c.id === wanted) : connections) {
+      const written = await refreshSheetDashboard(Date.now(), account.id).catch((error) => {
+        if (wanted) throw error;
+        return null;
+      });
+      url ||= written;
+    }
+    if (!url) throw new HttpError(400, "Google Sheets is not set up for this team. Add a spreadsheet link for the account or the team, and share it with the service account.");
     return json({ ok: true, url });
   }
-  if (context.url.searchParams.get("retry") === "1") return json(await retryAllFailed());
-  return json(await nightlyRun());
+  if (context.url.searchParams.get("retry") === "1") return json(await retryAllFailed(workspaceId));
+  return json(await nightlyRun(Date.now(), workspaceId));
 });
 
 /** Change the settings of one account: on/off, Notion, output style, language, spreadsheet, extra folders. */
 export const PATCH: APIRoute = handler(async (context) => {
-  requireUser(context);
+  const access = await requireWorkspace(context, { manage: true });
+  requireDrive(access);
   const body: any = await context.request.json().catch(() => ({}));
-  const account = await getConnection(String(body.account || ""));
+  const account = await getConnection(String(body.account || ""), access.workspace.id);
   if (!account) throw new HttpError(400, "Choose a connected Drive account.");
   const set = (column: string, value: string | number | null) =>
     env.DB.prepare(`UPDATE drive_accounts SET ${column} = ? WHERE id = ?`).bind(value, account.id).run();
   if (body.enabled !== undefined) await set("enabled", body.enabled ? 1 : 0);
-  if (body.notion !== undefined) await set("notion_enabled", body.notion ? 1 : 0);
+  if (body.notion !== undefined) {
+    if (body.notion && !notionAllowed(access.workspace)) throw new HttpError(400, "Notion export is only available for the original team.");
+    await set("notion_enabled", body.notion ? 1 : 0);
+  }
   if (body.mode !== undefined) {
     if (!(String(body.mode) in BATCH_MODES)) throw new HttpError(400, "Choose Smart clean or Subtitles (timed).");
     await set("mode", String(body.mode) as BatchMode);
@@ -101,7 +128,7 @@ export const PATCH: APIRoute = handler(async (context) => {
   }
   if (body.spreadsheet !== undefined) {
     const raw = String(body.spreadsheet || "").trim();
-    if (raw && !spreadsheetId(raw)) throw new HttpError(400, "That is not a Google Sheets link. Paste the spreadsheet link (docs.google.com/spreadsheets/d/...), or leave it empty to use the team spreadsheet.");
+    if (raw && !spreadsheetId(raw)) throw new HttpError(400, "That is not a Google Sheets link. Paste the spreadsheet link (docs.google.com/spreadsheets/d/...), or leave it empty to use the team's spreadsheet.");
     if (raw) {
       // Fail now, not on the first transcript: the sheet must be shared with the service account.
       await checkSpreadsheetAccess(raw).catch((error) => {
@@ -116,8 +143,8 @@ export const PATCH: APIRoute = handler(async (context) => {
 
 /** Disconnect one Drive account. Its finished transcripts stay; its waiting jobs are removed. */
 export const DELETE: APIRoute = handler(async (context) => {
-  requireUser(context);
-  const account = await getConnection(context.url.searchParams.get("account") || "");
+  const access = await requireWorkspace(context, { manage: true });
+  const account = await getConnection(context.url.searchParams.get("account") || "", access.workspace.id);
   if (!account) throw new HttpError(404, "That Drive account is not connected.");
   await env.DB.batch([
     env.DB.prepare("DELETE FROM drive_jobs WHERE account_id = ? AND status = 'queued'").bind(account.id),

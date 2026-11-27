@@ -10,7 +10,7 @@ export const GET: APIRoute = handler(async (context) => {
     `SELECT id, title, source_type, source_ref, mode, language, duration, created_at,
             substr(transcript, 1, 220) AS preview
        FROM transcriptions
-      WHERE user_id = ? AND (? = '' OR title LIKE ? OR transcript LIKE ?)
+      WHERE user_id = ? AND workspace_id IS NULL AND (? = '' OR title LIKE ? OR transcript LIKE ?)
       ORDER BY created_at DESC LIMIT 200`,
   )
     .bind(user.id, q, like, like)

@@ -1,49 +1,136 @@
 ---
-interface Props { title?: string; wide?: boolean }
-const { title = "Team Fahad Transcriber", wide = false } = Astro.props;
+import Icon from "../components/Icon.astro";
+
+interface Props {
+  title?: string;
+  /** Narrow reading width (history item, settings). */
+  narrow?: boolean;
+  /** No sidebar (login page). */
+  bare?: boolean;
+  /** Kept for older pages: wide is now the default. */
+  wide?: boolean;
+}
+const { title = "Team Fahad Transcriber", narrow = false, bare = false } = Astro.props;
 const user = Astro.locals.user;
+const isAdmin = Astro.locals.isAdmin;
+const autoAccess = Astro.locals.autoAccess;
 const path = Astro.url.pathname;
+const active = (prefix: string) => (prefix === "/" ? path === "/" : path.startsWith(prefix));
+const initial = (user?.name || user?.email || "?").trim()[0] || "?";
+const nav = [
+  { href: "/", label: "Transcribe", icon: "wave" },
+  { href: "/history", label: "History", icon: "history" },
+  { href: "/batches", label: "Drive folders", icon: "folder" },
+];
 ---
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Accurate transcripts, speaker subtitles, summaries and translations in one place." />
+    <meta name="description" content="Accurate Bangla and English transcripts, speaker subtitles, summaries and translations, for teams." />
+    <meta name="theme-color" content="#0b7a68" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <title>{title}</title>
+    <script is:inline>
+      try { const t = localStorage.getItem("tf-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
+    </script>
   </head>
   <body>
-    <div class:list={["shell", { wide }]}>
-      <header class="topbar">
-        <a href="/" class="brand">
-          <img src="/favicon.svg" alt="" width="44" height="44" />
-          <span>
-            <strong>Team Fahad Transcriber</strong>
-            <small>Audio and video to text</small>
-          </span>
-        </a>
-        {user && (
-          <nav class="nav">
-            <a href="/" class:list={{ active: path === "/" }}>Transcribe</a>
-            <a href="/batches" class:list={{ active: path.startsWith("/batches") }}>Folders</a>
-            <a href="/auto" class:list={{ active: path.startsWith("/auto") }}>Auto</a>
-            <a href="/history" class:list={{ active: path.startsWith("/history") }}>History</a>
-            <details class="account">
-              <summary>
-                {user.picture ? <img src={user.picture} alt="" width="30" height="30" referrerpolicy="no-referrer" /> : <span class="avatar">{(user.name || user.email)[0]}</span>}
-              </summary>
-              <div class="menu">
-                <p><strong>{user.name || "Signed in"}</strong><br /><span class="muted">{user.email}</span></p>
-                <form method="post" action="/auth/logout"><button type="submit" class="btn ghost small">Sign out</button></form>
-              </div>
-            </details>
+    {bare || !user ? (
+      <slot />
+    ) : (
+      <div class="app" id="app">
+        <header class="topbar">
+          <a href="/" class="brand">
+            <span class="brand-mark"><Icon name="wave" /></span>
+            <span class="brand-name"><strong>Team Fahad</strong><span>Transcriber</span></span>
+          </a>
+          <button class="btn quiet icon-only" type="button" id="nav-open" aria-label="Open menu"><Icon name="menu" /></button>
+        </header>
+        <div class="scrim" id="nav-scrim"></div>
+        <aside class="sidebar" aria-label="Main">
+          <a href="/" class="brand">
+            <span class="brand-mark"><Icon name="wave" /></span>
+            <span class="brand-name"><strong>Team Fahad</strong><span>Transcriber</span></span>
+          </a>
+          <nav class="nav-group">
+            {nav.map((item) => (
+              <a href={item.href} class:list={["nav-link", { active: active(item.href) }]} aria-current={active(item.href) ? "page" : undefined}>
+                <Icon name={item.icon} />{item.label}
+              </a>
+            ))}
           </nav>
-        )}
-      </header>
-      <main><slot /></main>
-      <footer class="footer">Team Fahad Transcriber · Developed by <strong>Umar Vai</strong></footer>
-    </div>
+          {(autoAccess || isAdmin) && (
+            <nav class="nav-group">
+              <span class="nav-label">Teams</span>
+              {autoAccess && (
+                <a href="/auto" class:list={["nav-link", { active: active("/auto") }]}><Icon name="bolt" />Automation</a>
+              )}
+              {isAdmin && (
+                <a href="/admin" class:list={["nav-link", { active: active("/admin") }]}><Icon name="shield" />Admin</a>
+              )}
+            </nav>
+          )}
+          <div class="sidebar-foot">
+            <div class="user-chip">
+              <span class="avatar">{user.picture ? <img src={user.picture} alt="" referrerpolicy="no-referrer" /> : initial}</span>
+              <span class="who"><strong>{user.name || "Signed in"}</strong><span title={user.email}>{user.email}</span></span>
+            </div>
+            <div class="foot-actions">
+              <button class="btn quiet small" type="button" id="theme-toggle" aria-label="Switch theme"><Icon name="moon" class="theme-dark" /><Icon name="sun" class="theme-light" /><span>Theme</span></button>
+              <form method="post" action="/auth/logout" style="display:flex"><button type="submit" class="btn quiet small" style="flex:1"><Icon name="logout" />Sign out</button></form>
+            </div>
+          </div>
+        </aside>
+        <div class="main">
+          <main class:list={["content", { narrow }]}><slot /></main>
+          <footer class="footer">Team Fahad Transcriber · Developed by Umar Vai</footer>
+        </div>
+      </div>
+    )}
+    <div class="toast-host" id="toasts" aria-live="polite"></div>
+    <script is:inline>
+      (function () {
+        var app = document.getElementById("app");
+        var open = document.getElementById("nav-open");
+        var scrim = document.getElementById("nav-scrim");
+        if (app && open && scrim) {
+          open.addEventListener("click", function () { app.classList.add("nav-open"); });
+          scrim.addEventListener("click", function () { app.classList.remove("nav-open"); });
+        }
+        var toggle = document.getElementById("theme-toggle");
+        function dark() {
+          var t = document.documentElement.dataset.theme;
+          return t ? t === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+        }
+        function paint() {
+          document.querySelectorAll(".theme-dark").forEach(function (el) { el.style.display = dark() ? "none" : ""; });
+          document.querySelectorAll(".theme-light").forEach(function (el) { el.style.display = dark() ? "" : "none"; });
+        }
+        if (toggle) {
+          paint();
+          toggle.addEventListener("click", function () {
+            var next = dark() ? "light" : "dark";
+            document.documentElement.dataset.theme = next;
+            try { localStorage.setItem("tf-theme", next); } catch (e) {}
+            paint();
+          });
+        }
+        window.toast = function (message, kind) {
+          var host = document.getElementById("toasts");
+          if (!host) return;
+          var el = document.createElement("div");
+          el.className = "toast" + (kind === "error" ? " error" : "");
+          el.textContent = message;
+          host.appendChild(el);
+          setTimeout(function () { el.remove(); }, kind === "error" ? 6000 : 3500);
+        };
+      })();
+    </script>
   </body>
 </html>
 <style is:global>

@@ -10,7 +10,7 @@ export const GET: APIRoute = handler(async (context) => {
   const user = requireUser(context);
   const rows = await env.DB.prepare(
     `SELECT id, folder_name, folder_url, mode, total, done_count, failed_count, status, notion_url, sheet_url, created_at, finished_at
-       FROM batches WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`,
+       FROM batches WHERE user_id = ? AND workspace_id IS NULL ORDER BY created_at DESC LIMIT 100`,
   )
     .bind(user.id)
     .all();

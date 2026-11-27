@@ -9,7 +9,7 @@ import { knownName, approveLogin, authDevice, completeFile, deviceView, leaveDev
 function fakeD1() {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys = ON");
-  for (const file of ["0001_init", "0003_auto_drive", "0006_bridge", "0007_bridge_link", "0008_bridge_personal"]) db.exec(readFileSync(new URL(`../migrations/${file}.sql`, import.meta.url), "utf8"));
+  for (const file of ["0001_init", "0002_drive_batches", "0003_auto_drive", "0004_auto_notion_toggle", "0005_auto_dashboard", "0006_bridge", "0007_bridge_link", "0008_bridge_personal", "0009_drive_accounts", "0010_workspaces"]) db.exec(readFileSync(new URL(`../migrations/${file}.sql`, import.meta.url), "utf8"));
   const wrap = (sql, args = []) => ({
     bind: (...values) => wrap(sql, values),
     run: async () => ({ meta: { changes: Number(db.prepare(sql).run(...args).changes) } }),
@@ -22,6 +22,8 @@ function fakeD1() {
 function setup() {
   const d1 = fakeD1();
   d1.db.prepare("INSERT INTO users (id, google_sub, email, created_at, last_login_at) VALUES ('u1','g1','a@b.c',1,1)").run();
+  // Drive computers in these tests belong to the original team's first Drive account.
+  d1.db.prepare("INSERT INTO drive_accounts (id, user_id, google_email, refresh_token, app_url, connected_at) VALUES ('primary','u1','drive@b.c','r','https://x',1)").run();
   env.DB = d1;
   env.SHEETS_SPREADSHEET_ID = undefined;
   env.GOOGLE_SERVICE_ACCOUNT_JSON = undefined;
@@ -29,7 +31,7 @@ function setup() {
 }
 
 async function pairDevice(name = "PC-01") {
-  const { code } = await createPairingCode("u1", name);
+  const { code } = await createPairingCode("u1", "team-fahad", name);
   return redeemPairingCode(code);
 }
 
@@ -38,7 +40,7 @@ const info = (n) => ({ fingerprint: `${n}`.padStart(32, "a"), name: `2026-11-17 
 
 test("a pairing code works once, only for 15 minutes, and gives a token that identifies the PC", async () => {
   const d1 = setup();
-  const { code } = await createPairingCode("u1", "PC-03");
+  const { code } = await createPairingCode("u1", "team-fahad", "PC-03");
   assert.match(code, /^[A-HJ-NP-Z2-9]{8}$/);
   const paired = await redeemPairingCode(`${code.slice(0, 4)}-${code.slice(4).toLowerCase()}`);
   assert.equal(paired.name, "PC-03");
@@ -49,7 +51,7 @@ test("a pairing code works once, only for 15 minutes, and gives a token that ide
   // Only a hash of the token is stored.
   assert.equal(d1.db.prepare("SELECT COUNT(*) AS n FROM bridge_devices WHERE token_hash = ?").get(paired.token).n, 0);
 
-  const late = await createPairingCode("u1", "PC-04");
+  const late = await createPairingCode("u1", "team-fahad", "PC-04");
   d1.db.prepare("UPDATE bridge_pairing SET expires_at = 1").run();
   await assert.rejects(() => redeemPairingCode(late.code), /wrong or has expired/);
 });
@@ -161,9 +163,9 @@ test("a fresh PC needs the team PIN, then takes over an earlier PC or a Drive co
   d1.db.prepare("INSERT INTO drive_computers (folder_id, name, sheet_json, created_at) VALUES ('f1','Hasan','{\"title\":\"Hasan\"}',1), ('f2','Mahbub',NULL,1)").run();
 
   await assert.rejects(() => linkChoices("1234"), /No team PIN/);
-  await assert.rejects(() => setLinkPin("u1", "12"), /at least 4/);
-  await setLinkPin("u1", "team-pin");
-  assert.equal(d1.db.prepare("SELECT link_pin_hash FROM bridge_settings").get().link_pin_hash.includes("team-pin"), false);
+  await assert.rejects(() => setLinkPin("team-fahad", "u1", "12"), /at least 4/);
+  await setLinkPin("team-fahad", "u1", "team-pin");
+  assert.equal(d1.db.prepare("SELECT link_pin_hash FROM workspaces WHERE id = 'team-fahad'").get().link_pin_hash.includes("team-pin"), false);
   await assert.rejects(() => linkChoices("nope"), /wrong/);
 
   // The Drive computer with the same name as a bridge PC is not listed twice.
@@ -189,7 +191,7 @@ test("a fresh PC needs the team PIN, then takes over an earlier PC or a Drive co
 
 test("too many wrong PINs lock the list for a while", async () => {
   const d1 = setup();
-  await setLinkPin("u1", "team-pin");
+  await setLinkPin("team-fahad", "u1", "team-pin");
   for (let i = 0; i < 7; i++) await assert.rejects(() => linkChoices("bad"), /wrong/);
   await assert.rejects(() => linkChoices("bad"), /Too many/);
   await assert.rejects(() => linkChoices("team-pin"), /Too many/);
@@ -199,7 +201,7 @@ test("too many wrong PINs lock the list for a while", async () => {
 
 test("a person signs in with Google from the app: approval on the website, own account, own settings, no team sheet", async () => {
   const d1 = setup();
-  await setLinkPin("u1", "team-pin");
+  await setLinkPin("team-fahad", "u1", "team-pin");
   const { requestId, userCode } = await startLogin("Office laptop");
   assert.deepEqual(await pollLogin(requestId), { pending: true });
   assert.equal((await loginRequestInfo(userCode)).name, "Office laptop");
@@ -258,7 +260,7 @@ test("a file that was already transcribed (by this PC or from Drive) is not done
   const d1 = setup();
   d1.db.prepare("INSERT INTO drive_computers (folder_id, name, sheet_json, created_at) VALUES ('f1','Mahbub',NULL,1)").run();
   d1.db.prepare("INSERT INTO drive_files (file_id, computer_id, name, file_day, job_id, created_at) VALUES ('x1','f1','Call Records / 2026-11-11 14-56-14.mp4','2026-11-11','j',1), ('x2','other','2026-11-12 09-00-00.mp4','2026-11-12','j',1), ('x3','f1','Call Records/ Sub / 2026-11-13 08-00-00.mp4','2026-11-13','j',1)").run();
-  await setLinkPin("u1", "team-pin");
+  await setLinkPin("team-fahad", "u1", "team-pin");
   const choice = (await linkChoices("team-pin")).find((c) => c.name === "Mahbub");
   const linked = await linkDevice("team-pin", choice.key);
   const device = await authDevice(new Request("https://x", { headers: { authorization: `Bearer ${linked.token}` } }));
@@ -270,4 +272,23 @@ test("a file that was already transcribed (by this PC or from Drive) is not done
   assert.equal(await knownName(device, "2026-11-23 10-00-00.mp4"), false, "a brand new file is transcribed");
   await completeFile(device, { ...info(1), pieces: pieces("hello there") });
   assert.equal(await knownName(device, info(1).name), true, "done by this PC");
+});
+
+test("teams are kept apart: each PIN only lists its own team's computers, and team transcripts stay out of personal History", async () => {
+  const d1 = setup();
+  d1.db.prepare("INSERT INTO workspaces (id, name, kind, created_at) VALUES ('cust','Customer A','customer',1)").run();
+  const own = await pairDevice("Fahad-PC");
+  const { code } = await createPairingCode("u1", "cust", "Cust-PC");
+  const other = await redeemPairingCode(code);
+  await setLinkPin("team-fahad", "u1", "fahad-pin");
+  await assert.rejects(() => setLinkPin("cust", "u1", "fahad-pin"), /Another team/);
+  await setLinkPin("cust", "u1", "cust-pin");
+  assert.deepEqual((await linkChoices("fahad-pin")).map((c) => c.name), ["Fahad-PC"]);
+  assert.deepEqual((await linkChoices("cust-pin")).map((c) => c.name), ["Cust-PC"]);
+
+  const device = await authDevice(new Request("https://x", { headers: { authorization: `Bearer ${other.token}` } }));
+  await completeFile(device, { ...info(1), pieces: pieces("hello customer") });
+  const row = d1.db.prepare("SELECT workspace_id FROM transcriptions").get();
+  assert.equal(row.workspace_id, "cust");
+  void own;
 });
